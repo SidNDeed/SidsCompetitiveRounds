@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import field_validator   # its own line: an import line is part of every fingerprint that reaches a name it binds
 from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
 from database import get_asm_db
+from identity_order import identity_lock_key
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import review_boot, seat_evidence as _sev   # review_boot FIRST: the review closure executes from source only
 import card_evidence as _cev
@@ -4913,7 +4914,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:57428 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:58151 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4979,7 +4980,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:57229 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:57950 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -5049,7 +5050,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:56560 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:57248 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7272,7 +7273,12 @@ async def replica_write_gate(request: Request, call_next):
         allowlist either, so it cannot arrive here through the documented path.
     This gate is a backstop for the one case a method test CAN catch: a
     non-GET arriving at a read replica.
+
+    It also hands the request's scope to _ban_gate_route (bans part 2a), so a
+    ban refusal made by a check that is given no request still names the
+    route; it reads and writes nothing else.
     """
+    _ban_gate_scope.set(request.scope)
     if IS_REPLICA and request.method not in ("GET", "HEAD", "OPTIONS"):
         # Announce once per METHOD. A refusal that leaves no trace means the
         # box can be rejecting every write while `logs:api` shows nothing --
@@ -8056,6 +8062,27 @@ _MODLOG_BUILD = 1
 # boxes by construction, probed by the release train and read by nothing else
 # (#306). Absent on any build before it.
 _VOIDED_STREAK_BUILD = 1
+# Bans part 2a: 1 = this build refuses an actively banned account on every
+# state-changing route (the soft session check's ban read, the ban gates of
+# the signature-only and bot routes, the report refusals, the admin check)
+# and voids a banned account's open series and lobbies in the ban's own
+# transaction, reported on /health as `ban_sweep_build`. It names build
+# identity only: what the batch changes is seen by no phase of the train, so
+# without it the train could not tell a box on the new build from a stale
+# one (learnings 780, 794). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else
+# (#306). Absent on any build before it.
+_BAN_SWEEP_BUILD = 1
+
+# QAPPLY-1: 1 = this build's Accept of a held FFA report applies the game
+# through the report route's body (_qapply_run) and its Credit route pays XP
+# and gold without ratings, reported on /health as `qapply_build`. It names
+# build identity only: a stale box answers the same keys on every GET the
+# train reads, so without it the train could not tell a refreshed box from a
+# stale one (learnings 780, 794, 1186). A code constant, equal on both boxes
+# by construction, probed by the release train and read by nothing else
+# (#306). Absent on any build before it.
+_QAPPLY_BUILD = 1
 # Release-train verification plumbing, not a design mechanism: the build
 # marker of the batch in which typed text in the api's Discord channel posts,
 # stream posts and DMs, and in the bot's own messages, passes one helper once
@@ -8150,6 +8177,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              qapply_build=_QAPPLY_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -8226,6 +8255,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
+                              qapply_build=_QAPPLY_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
@@ -10591,11 +10622,24 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # gate factored into get_or_create_player itself so every creator shares
     # it — deliberately not done here (it touches every caller); see TODO.
     _sids = [report.player1.steam_id, report.player2.steam_id]
+    # F2 hardening, checked BEFORE any lock: the reporter MUST be one of the
+    # two match participants (previously this defaulted to p2 when reported_by
+    # matched neither). Here, so that every identity key the transaction takes
+    # is taken by _identity_lock_many below: the ban read after it asks for the
+    # reporter's key too, and that key is then one it already holds.
+    if report.reported_by_steam_id not in _sids:
+        raise HTTPException(status_code=400, detail="reporter is not a participant in this match")
     # CAST spelled out: hashtext() has a single text signature, but an explicit
     # cast keeps asyncpg from having to infer the parameter type at all. A hash
     # collision between two different steam_ids is harmless — it costs one
     # needless serialization, never a missed lock.
     await _identity_lock_many(db, _sids)
+    # Bans part 2a (S4, BAN-R5): a report that names an actively banned
+    # account, as reporter or as either player, is refused, read under the
+    # identity locks a ban also takes, before any row is written: no match,
+    # rating, gold, XP, win or loss is created for anyone. (It used to be
+    # recorded as a casual match.)
+    await _ban_lock_and_gate(db, _sids, request, actor=report.reported_by_steam_id)
     _known_pids = (await db.execute(
         text("SELECT id FROM players WHERE steam_id = ANY(:sids)"),
         {"sids": _sids},
@@ -10648,6 +10692,17 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # existing current series for this pair is harmless when the report really
     # is casual (the row is simply left alone).
     await _take_early_series_lock(db, p1.id, p2.id, report.photon_room_id)
+    # Bans part 2a (FIX-2 class I a): a game of a sitting the ban void ended is
+    # refused here, before any match row or payment, as the other modes'
+    # cores refuse a write onto a record the void ended (409
+    # series_ended_by_ban) -- while the ban is active, after it ran out and
+    # after an unban alike. The lookup below (_find_current_active_series)
+    # sees active series only, so without this a result from such a sitting
+    # found no series, made a fresh one and was paid.
+    if await _pair_sitting_ended_by_ban(db, p1.id, p2.id, report.photon_room_id,
+                                        report.is_ranked):
+        _ban_gate_refused(request)
+        raise HTTPException(status_code=409, detail="series_ended_by_ban")
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
     # here means the player deliberately turned ranked off. The old behavior
@@ -10661,16 +10716,11 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     _mod_room = bool(report.photon_room_id) and (
         report.photon_room_id.lower().startswith("ranked_")
         or report.photon_room_id.lower().startswith("sct-"))
-    # Round-19 find 3, the DIRECT route: a claimed-ranked report (or a
-    # mod-room exemption) with a banned participant must also stay casual —
-    # no new post-ban ranked series through ANY report shape. Unlike the
-    # ranked-disabled branch below, a live series does NOT keep this ranked:
-    # a ban is an administrative revocation, not a mid-series consent race.
-    if report.is_ranked and ((await _is_banned(db, p1.steam_id)) is not None
-                             or (await _is_banned(db, p2.steam_id)) is not None):
-        print(f"[MATCH] downgraded to casual: participant banned "
-              f"(room={report.photon_room_id})")
-        report.is_ranked = False
+    # Round-19 find 3 kept a report with a banned participant casual here (no
+    # post-ban ranked series through any report shape). Bans part 2a refuses
+    # such a report outright, under the identity locks above, so no report
+    # that reaches this point names an actively banned account and neither
+    # branch below can create a series for one.
     if report.is_ranked and not _mod_room and (not p1.ranked_enabled or not p2.ranked_enabled):
         # Bug #47: an ACTIVE series is the durable consent record for the
         # sitting — both players were ranked-enabled when preflight created it.
@@ -10687,14 +10737,10 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                   f"{p1.steam_id if not p1.ranked_enabled else ''} {p2.steam_id if not p2.ranked_enabled else ''} "
                   f"(room={report.photon_room_id})")
             report.is_ranked = False
-    elif (not report.is_ranked and not _mod_room
-          # Round-19 find 3: the upgrade path must not reverse a BAN-caused
-          # downgrade — preflight answers not_ranked for a banned
-          # participant, and this branch was upgrading the resulting casual
-          # report straight back to ranked (creating the post-ban series the
-          # whole invariant forbids). Banned participant => stays casual.
-          and (await _is_banned(db, p1.steam_id)) is None
-          and (await _is_banned(db, p2.steam_id)) is None):
+    elif not report.is_ranked and not _mod_room:
+        # (Round-19 find 3's ban term is gone from this condition: a report
+        # naming an actively banned account is refused above, so the upgrade
+        # can no longer reach one.)
         # Bug #47, other direction: the client's matchIsRanked snapshot races
         # (opponent Photon props lost on join, /mod/check vs preflight-registration
         # race, opponent's startup ranked-sync landing mid-game) and the FIRST
@@ -10755,12 +10801,8 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
 
-    # Find the reporting player. F2 hardening: the reporter MUST be one of the two
-    # match participants. Previously this defaulted to p2 when reported_by matched
-    # neither — silently crediting/stamping a non-participant and accepting a report
-    # from someone who wasn't in the match. Reject instead.
-    if report.reported_by_steam_id not in (report.player1.steam_id, report.player2.steam_id):
-        raise HTTPException(status_code=400, detail="reporter is not a participant in this match")
+    # Find the reporting player: one of the two participants, refused otherwise
+    # before the identity locks above (F2 hardening).
     reporter = p1 if report.reported_by_steam_id == report.player1.steam_id else p2
     # The session check above binds this request to the reporter.
     await _mark_mod_seen(db, reporter, stamp_version=True)
@@ -15065,6 +15107,9 @@ async def set_player_card_tier(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(403, "Invalid signature")
+    # Bans part 2a (S3): the shared-secret signature names no session, so the
+    # acting id's ban is read here.
+    await _ban_lock_and_gate(db, [steam_id])
 
     f = filter.lower()
     if f not in ("casual", "ranked", "all"):
@@ -16908,7 +16953,14 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # heartbeat") — a banned account could immediately obtain a fresh verified
     # session and keep using every session-gated endpoint that lacks a
     # usage-site ban check. Bans must also stop the mint.
-    await _check_ban_or_raise(db, req.steam_id)
+    # This early read takes NO lock: the Steam call below waits up to 6 s, and
+    # an identity key held across it would hold every report that names the
+    # account for that long. A banned account is still refused here, before
+    # the call; the writing transaction below takes the key and reads again.
+    await _ban_gate_or_raise(db, req.steam_id)
+    # End the read's transaction: nothing is written yet, and no transaction
+    # stays open across the wait.
+    await db.rollback()
     key = os.getenv("STEAM_WEB_API_KEY", "")
     verified = False
     if key:
@@ -16946,9 +16998,8 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # revocation states after the await. Deletion rewrites players.steam_id,
     # so its durable tombstone is the deleted_steam_ids hash table — a
     # missing player row alone proves nothing (players are created lazily).
-    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
-                     {"sid": req.steam_id})
-    await _check_ban_or_raise(db, req.steam_id)
+    # ONE taking call: the key exclusive, then the ban read under it.
+    await _ban_lock_and_gate(db, [req.steam_id], exclusive=[req.steam_id])
     if MATCH_HMAC_SECRET:
         _tombed = (await db.execute(text(
             "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
@@ -17135,7 +17186,8 @@ def _session_was_verified(request):
         return False
 
 
-async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None:
+async def _check_steam_session(request, steam_id: str, db: AsyncSession, *,
+                               banned_ok: bool = False) -> None:
     """Session enforcement for the mutating endpoints. Reads X-Session-Token,
     matches it (sha256, single indexed SELECT) against steam_sessions for the
     CLAIMED steam_id. Valid → return. Invalid/missing → 401 only when
@@ -17308,6 +17360,24 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
                                 detail="session_check_unavailable")
     if enforce:
         raise HTTPException(status_code=401, detail="session_required")
+    # Bans part 2a (S2, BAN-R13): the request is about to be admitted with no
+    # verified session, so nothing has established that the claimed id is not
+    # under an active ban (a ban deletes the account's sessions and sign-in
+    # refuses it, which is why the verified exit above needs no read). One
+    # read, on this path only: an actively banned claimed id is refused with
+    # the answer _check_ban_or_raise gives. `banned_ok=True` is passed only by
+    # the exits of BAN-R4 / BAN-R17 (the census lists them exactly). A read
+    # that does not complete is answered 503, as the session read above is.
+    if not banned_ok:
+        try:
+            async with db.begin_nested():  # savepoint: never poison the caller's tx
+                _ban_reason = await _is_banned(db, steam_id)
+        except Exception as ex:
+            print(f"[STEAM-AUTH] ban read UNDETERMINED: {type(ex).__name__}")
+            raise HTTPException(status_code=503, detail="session_check_unavailable")
+        if _ban_reason is not None:
+            _ban_gate_refused(request)
+            raise HTTPException(status_code=409, detail=_ban_gate_detail(_ban_reason))
     path = ""
     try:
         if request is not None:
@@ -18345,18 +18415,18 @@ async def _identity_lock_many(db: AsyncSession, steam_ids, *,
     Ordering is the whole point, not tidiness. Two formations overlapping on A
     and B that acquire in opposite orders deadlock on the advisory locks
     themselves, which no row ordering can repair (#197/#202/#282). The key is
-    _ffa_sort_key -- the repo's existing canonical (length, ordinal) order for
-    steam ids. Any total order would serialize correctly PROVIDED it is the
-    only one in the class, which is why every site routes through this function
-    rather than sorting for itself; _ffa_sort_key is chosen over bare sorted()
-    because the two agree on canonical 17-digit ids and diverge on anything
-    shorter, and this is not the place to assume the domain is clean.
+    identity_order.identity_lock_key -- (length, text), the ONE order every
+    taker of several identity keys uses (this function, _ban_lock_and_gate,
+    match_hold._guard_identities). Any total order would serialize correctly
+    PROVIDED it is the only one in the class; bare sorted() is not used
+    because it and (length, text) disagree on ids of different lengths, which
+    the stored ids include. It equals _ffa_sort_key on text.
 
     Returns the ordered list actually locked, so a test can assert the real
     bind sequence instead of trusting the loop (a check that reads the source
     cannot fail -- #441).
     """
-    ordered = sorted({s for s in steam_ids if s}, key=_ffa_sort_key)
+    ordered = sorted({s for s in steam_ids if s}, key=identity_lock_key)
     _wait_ms = int(timeout_ms) if timeout_ms is not None else FORMATION_LOCK_TIMEOUT_MS
     # Bound the WAIT, not just the retry count (self-review finding 2). The
     # SET and the handler below have deliberately IDENTICAL extent: armed
@@ -20462,7 +20532,9 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
 async def queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     """Leave the ranked queue."""
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, steam_id, db)
+    # An exit (BAN-R4 / BAN-R17): open to a banned account; it removes only
+    # the caller's own state.
+    await _check_steam_session(request, steam_id, db, banned_ok=True)
     # Revoke the commitment FIRST and unconditionally (migration 174). The
     # lease would lapse on its own, but an explicit leave should let the
     # player queue elsewhere immediately, and it must work even when the row
@@ -20535,7 +20607,9 @@ async def queues_escape(request: Request, steam_id: str = Query(...),
     destroy a game that was actually played.
 
     Idempotent: escaping when already free returns 200."""
-    await _check_steam_session(request, steam_id, db)
+    # An exit (BAN-R4 / BAN-R17): open to a banned account; it removes only
+    # the caller's own state.
+    await _check_steam_session(request, steam_id, db, banned_ok=True)
     player = (await db.execute(
         select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
@@ -21064,6 +21138,9 @@ async def booster_grant(
     )).scalar_one_or_none()
     if player is None:
         return {"status": "not_linked", "discord_id": discord_id}
+    # Bans part 2a (S6, F4): no gold is granted to an actively banned player.
+    # The check and the grant hold one lock: the identity lock, shared, first.
+    await _ban_lock_and_gate(db, [player.steam_id])
     await _assert_no_service_subject(db, affected_player_ids=[player.id])
     existing = (await db.execute(
         select(BoosterGrant).where(BoosterGrant.discord_id == discord_id,
@@ -22199,7 +22276,8 @@ async def queue_decline(req: QueueDeclineRequest, request: Request, db: AsyncSes
     points back at the caller (v1.40.1: the partner write is SQL-conditional).
     """
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, req.steam_id, db)
+    # An exit of BAN-R17 (the 1v1 decline): open to an actively banned caller.
+    await _check_steam_session(request, req.steam_id, db, banned_ok=True)
     p1_result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
     p1 = p1_result.scalar_one_or_none()
     p2_result = await db.execute(select(Player).where(Player.steam_id == req.opponent_steam_id))
@@ -22463,6 +22541,9 @@ async def _report_disconnect_once(
     # exactly like every other mutating endpoint. Safe for deployed clients:
     # the shipped client's PostRequest already attaches X-Session-Token here.
     await _check_steam_session(request, reporter_steam_id, db)
+    # Bans part 2a (S4, BAN-R5): a disconnect report naming an actively banned
+    # account, as reporter or as leaver, creates no disconnect count.
+    await _ban_lock_and_gate(db, [disconnected_steam_id], request, actor=reporter_steam_id)
     await _assert_no_service_subject(
         db, affected_steam_ids=[reporter_steam_id, disconnected_steam_id])
     # Validate both players exist
@@ -23041,6 +23122,13 @@ async def report_casual_dc(
     if reporter.steam_id == leaver_steam_id:
         raise HTTPException(status_code=400, detail="Cannot report yourself")
     await _check_steam_session(request, reporter_steam_id, db)
+    # Bans part 2a (S4, BAN-R5): before the leaver's row can be created or a
+    # casual disconnect recorded. The leaver's id as it is stored (stripped)
+    # is the key: its exclusive key below serializes the row's creator, and it
+    # is taken here, in the transaction's one taking call.
+    _lv = (leaver_steam_id or "").strip()
+    await _ban_lock_and_gate(db, [_lv], request, actor=reporter_steam_id,
+                             exclusive=[_lv])
 
     # The leaver may have NO players row, and that is the headline case rather
     # than an edge one: a vanilla opponent whose FIRST ever contact with a mod
@@ -23068,27 +23156,22 @@ async def report_casual_dc(
     # production are the two `photon_N` rows that leaked in once, and
     # photon_/unity_ are precisely the client's own "I could not resolve an
     # identity" fallbacks. 4..20 digits keeps it inside String(20).
-    _lv = (leaver_steam_id or "").strip()
     if not (4 <= len(_lv) <= 20 and _lv.isdigit()):
         raise HTTPException(status_code=422,
                             detail="leaver_steam_id must be a numeric account id")
     # Same discover-then-create advisory gate submit_match uses (#207): the
-    # lock keys on the VALUE, so it exists before the row does and makes this
-    # path serialize against the other creator of the same steam_id rather than
-    # racing it into a unique violation.
+    # leaver's identity key, taken EXCLUSIVE above (exclusive=), keys on the
+    # VALUE, so it exists before the row does and makes this path serialize
+    # against the other creator of the same steam_id rather than racing it
+    # into a unique violation.
     #
-    # Two locks are taken in this transaction, always in this order: the
-    # leaver's id key, then the 'casualdc:' rate key below. Nothing else in the
-    # codebase takes a 'casualdc:' key, and submit_match — the only other
-    # holder of id keys — takes id keys ONLY, so neither can be the middle of a
-    # wait chain. (The one residual is a hashtext collision between an id key
-    # and the rate key, which submit_match's own comment already accepts: it
+    # The identity keys of this transaction are all taken in that one ordered
+    # pass (the leaver exclusive, the reporter shared); the 'casualdc:' rate
+    # key below comes after them. Nothing else in the codebase takes a
+    # 'casualdc:' key, so it cannot be the middle of a wait chain. (The one
+    # residual is a hashtext collision between an id key and the rate key: it
     # costs a needless serialization, and in the worst case Postgres aborts one
     # side on its deadlock timeout and the client retries.)
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
-        {"sid": _lv},
-    )
     # Fall back to the id when no name was sent: _clean_display_name treats the
     # id as "no name offered", which keeps a real stored name from being
     # clobbered and leaves a brand-new row with the placeholder rather than a
@@ -23265,23 +23348,28 @@ async def link_discord(
     if not link:
         raise HTTPException(status_code=404, detail="Invalid or expired code")
 
+    # The code's player, read before any players row is written here.
+    player_result = await db.execute(select(Player).where(Player.id == link.player_id))
+    player = player_result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    # Bans part 2a (S6): the bot acts for the code's player; an actively
+    # banned player links nothing (the request's writes roll back with it).
+    # Under the shared identity lock (F4), before the unlink below writes a
+    # players row.
+    await _ban_lock_and_gate(db, [player.steam_id])
+
     # Check if discord_id is already linked to another player
     existing = await db.execute(
         select(Player).where(Player.discord_id == discord_id)
     )
     existing_player = existing.scalar_one_or_none()
     if existing_player and existing_player.id != link.player_id:
-        # Unlink old player. Logged because there is no audit row anywhere for a
-        # discord_id change: before this, a takeover was retroactively invisible.
+        # Unlink old player, logged: no audit row anywhere records a discord_id change.
         print(f"[LINK] rebind: discord_id={discord_id} released from "
               f"steam_id={existing_player.steam_id}")
         existing_player.discord_id = None
-
-    # Link the discord account
-    player_result = await db.execute(select(Player).where(Player.id == link.player_id))
-    player = player_result.scalar_one_or_none()
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
+        await db.flush()  # discord_id is unique: the release is sent before the new holder's store
 
     if player.discord_id and player.discord_id != discord_id:
         print(f"[LINK] rebind: steam_id={player.steam_id} "
@@ -25522,6 +25610,8 @@ async def chat_moderate_delete(req: _ChatModDeleteReq, request: Request,
     request. Admins additionally prove identity with the standard admin HMAC
     over `admin:{admin}:chat_delete:{message_id}`; moderators prove identity
     with their Steam session (they have no admin secret)."""
+    # Bans part 2a: an actively banned moderator is refused on both branches.
+    await _ban_lock_and_gate(db, [req.steam_id], request)
     role, langs = await _chat_moderator_scope(db, req.steam_id)
     if role is None:
         raise HTTPException(403, "Not a chat moderator")
@@ -25620,7 +25710,9 @@ class _ChatModMuteReq(BaseModel):
 
 async def _chat_mod_authn(db: AsyncSession, request: Request, req, action: str, target: str):
     """Shared identity proof for the mute/unmute pair: admin HMAC for admins,
-    Steam session for scoped moderators."""
+    Steam session for scoped moderators. An actively banned moderator is
+    refused first, on both branches (bans part 2a)."""
+    await _ban_lock_and_gate(db, [req.steam_id], request)
     role, langs = await _chat_moderator_scope(db, req.steam_id)
     if role is None:
         raise HTTPException(403, "Not a chat moderator")
@@ -28658,31 +28750,34 @@ async def i18n_review(payload: dict, request: Request,
         " key_id, action, detail) VALUES (:sid, :role, :lang, :k, :act, :d)"
     ), {"sid": steam_id, "role": role, "lang": lang, "k": prop["key_id"],
         "act": action, "d": f"proposal {pid}" + (" (self-approved)" if action == "approve" and prop["proposer_steam_id"] == steam_id else "")})
-    if action == "approve":
-        # Translator titles for BOTH people behind the now-live string, in a
-        # SAVEPOINT each (learning #187): the review is the durable work and
-        # must commit even if a title grant hits a schema/data problem.
-        #
-        # CANONICAL ORDER, not proposer-first (find 2): each grant takes the
-        # contributor's advisory identity lock, so two approvals whose
-        # (proposer, reviewer) pairs are mirror images — A proposes/B reviews
-        # and B proposes/A reviews, committing concurrently — would take the
-        # two locks in opposite orders and ABBA-deadlock. Sorting the distinct
-        # contributors makes every caller take them in the same order.
-        #
-        # HONEST FAILURE MODE (find 3): a failed grant is re-evaluated only if
-        # that person contributes again. It does NOT self-heal on its own — an
-        # earlier comment here claimed it did, which was wrong. The backstop is
-        # re-running the back-grant half of migration 214, which is idempotent
-        # and grants exactly the tiers a contributor has earned.
-        for _who in sorted({w for w in (prop["proposer_steam_id"], steam_id) if w}):
-            try:
-                async with db.begin_nested():
-                    await _grant_translator_achievements(db, _who)
-            except Exception as _tex:  # noqa: BLE001
-                print(f"[I18N] translator title grant failed for {_who}: {_tex}"
-                      f" — re-run migration 214's back-grant to repair")
+    # The review commits FIRST, holding one identity key: the reviewer's,
+    # taken by _portal_auth.
+    _grant_to = (sorted({w for w in (prop["proposer_steam_id"], steam_id) if w}, key=identity_lock_key)
+                 if action == "approve" else [])
     await db.commit()
+    # Translator titles for BOTH people behind the now-live string, AFTER the
+    # review has committed, each in a transaction of its own that holds that
+    # contributor's identity key and no other (lesson 204: a transaction that
+    # holds at most one key is never the middle of a wait chain). Best-effort
+    # (learning #187): a failed grant is rolled back and logged, and never
+    # fails the review, which has already committed. No key is taken inside a
+    # savepoint (lesson 718).
+    #
+    # HONEST FAILURE MODE (find 3): a failed grant is re-evaluated only if
+    # that person contributes again. It does NOT self-heal on its own. The
+    # backstop is re-running the back-grant half of migration 214, which is
+    # idempotent and grants exactly the tiers a contributor has earned.
+    for _who in _grant_to:
+        try:
+            await _grant_translator_achievements(db, _who)
+            await db.commit()
+        except Exception as _tex:  # noqa: BLE001
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[I18N] translator title grant failed for {_who}: {_tex}"
+                  f" — re-run migration 214's back-grant to repair")
     return {"proposal_id": pid, "status": "approved" if action == "approve" else "rejected"}
 
 
@@ -41042,6 +41137,8 @@ async def update_live_points(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+    # Bans part 2a (S3): before the presence touch and any series read.
+    await _ban_lock_and_gate(db, [reporter_steam_id], request)
 
     _presence_touch(reporter_steam_id)
     try:
@@ -41237,6 +41334,8 @@ async def update_team_live_points(
     # dropped (logged) when it does not verify, never refusing the pair.
     _token = _team_game_post_token(series_id, reporter_steam_id, t1_points, t2_points,
                                    game_number, photon_room_id, game_token, token_sig)
+    # Bans part 2a (S3): before the presence touch and any series read.
+    await _ban_lock_and_gate(db, [reporter_steam_id], request)
 
     _presence_touch(reporter_steam_id)
     try:
@@ -42090,6 +42189,8 @@ async def update_ffa_live_points(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+    # Bans part 2a (S3): before the presence touch and any lobby read.
+    await _ban_lock_and_gate(db, [reporter_steam_id], request)
 
     _presence_touch(reporter_steam_id)
     try:
@@ -42238,7 +42339,7 @@ async def place_bet(
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     # Banned players can't bet (alongside queue + chat).
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
 
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
@@ -42474,7 +42575,7 @@ async def place_team_bet(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -44662,6 +44763,10 @@ async def artist_gift(
     )).scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=404, detail="Player not found — they need to have used the mod once")
+    # Bans part 2a (S5): an actively banned RECEIVER is refused (the giver's own
+    # ban is refused by the strict session above). The answer is "Banned:
+    # participant"; it never carries the receiver's reason.
+    await _ban_lock_and_gate(db, [target_steam_id], request, actor=steam_id)
     # Per-item client floor (migration 397), judged on the RECIPIENT's
     # last-seen version: a gift to a client that cannot equip the item is
     # refused, and so is one to a recipient with no recorded version.
@@ -45716,6 +45821,8 @@ async def internal_tournament_checkin_response(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
+    # Bans part 2a (S6): the bot answers for the named player.
+    await _ban_lock_and_gate(db, [body.steam_id])
     from tournaments import handle_tournament_checkin_response
     result = await handle_tournament_checkin_response(
         db, body.match_id, body.steam_id, body.answer)
@@ -48477,6 +48584,9 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         severity = "medium"
     if category not in BUG_REPORT_VALID_CATEGORIES:
         category = "other"
+    # Bans part 2a (S5, BAN-R3): the route requires no session, so the claimed
+    # id's ban is read here; an actively banned claimed id files no report.
+    await _ban_lock_and_gate(db, [req.steam_id], request)
 
     # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
     # can show a "slow down" toast. Admins are exempt (July 28, Sid hit the
@@ -48896,6 +49006,14 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         # before this point needs the row, and an object read in a
         # transaction that has since ended is a snapshot this one would be
         # acting on (#208).
+        #
+        # Bans part 2a (F4): the ban is read again HERE, under the identity
+        # lock (shared), the first lock this transaction takes: T1's read is
+        # a transaction ago, and a ban that commits between the two must not
+        # let the report stand. A refusal commits nothing, so an attachment
+        # stored above stays under its marker and the orphan sweep removes it,
+        # as for every T2 that does not commit.
+        await _ban_lock_and_gate(db, [req.steam_id], request)
         player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
         player = player.scalar_one_or_none()
         if player:
@@ -49735,6 +49853,9 @@ async def user_comment_on_bug_report(
     owner_discord = str(owner.discord_id) if (owner and owner.discord_id) else None
     if not owner_discord or owner_discord != discord_id:
         raise HTTPException(403, "not_owner")
+    # Bans part 2a (S5, S6, BAN-R3): an actively banned reporter adds nothing
+    # to its bug report through the bot either.
+    await _ban_lock_and_gate(db, [report.steam_id])
     actor_name = (report.display_name
                   or (owner.display_name if owner else None)
                   or "Reporter")
@@ -49796,6 +49917,21 @@ def _require_internal_key(x_internal_key: str | None) -> None:
 
 
 async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
+    """On the admin roster and under no active ban (BAN-R10): an actively
+    banned admin is no admin to any check built on this one (_require_admin
+    and every inline admin check), and the refusal writes the [BAN-GATE]
+    line. The ban is read only for a roster member."""
+    if not await _is_admin_roster(db, steam_id):
+        return False
+    if (await _is_banned(db, steam_id)) is not None:
+        _ban_gate_refused()
+        return False
+    return True
+
+
+async def _is_admin_roster(db: AsyncSession, steam_id: str) -> bool:
+    """On the admin roster (admin_users), the ban not read. Only _is_admin, _require_admin_roster and
+    _mail_lock_admin(roster=True) call it; see _require_admin_roster for the one route that may."""
     if not steam_id:
         return False
     r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
@@ -49924,6 +50060,22 @@ async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, tar
         raise HTTPException(403, "Bad admin signature")
 
 
+async def _require_admin_roster(db: AsyncSession, admin_steam_id: str, action: str, target: str,
+                                signature) -> None:
+    """_require_admin without its ban read, for the one admin route whose own
+    gate reads the acting admin's ban later in the same request and answers
+    it as it did before bans part 2a: admin_mail_broadcast, whose sender gates
+    (_mail_sender_gates) answer an actively banned sender 403 "banned", after
+    the idempotency replay (a retry of a broadcast that already went out gets
+    its stored answer); its re-proof under the lock is the roster alone too,
+    _mail_lock_admin(roster=True). The sender gates refuse before any write.
+    test_ban_sweep_admin_pairs.py holds both to that route, the gate in place."""
+    if not await _is_admin_roster(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, action, target, signature):
+        raise HTTPException(403, "Bad admin signature")
+
+
 async def _is_banned(db: AsyncSession, steam_id: str):
     """The reason of the account's ACTIVE ban (models.player_ban_active_sql:
     not lifted, and its end time, if any, ahead of the database's clock), or
@@ -49978,6 +50130,230 @@ async def _check_ban_or_raise(db: AsyncSession, steam_id: str) -> None:
     reason = await _is_banned(db, steam_id)
     if reason is not None:
         raise HTTPException(status_code=409, detail=f"Banned: {reason or 'violation'}")
+
+
+# Bans part 2a (BAN-R12): the route template of the request being answered,
+# for the refusal line of a check that is handed no request (_is_admin). Set
+# by replica_write_gate, the outermost http middleware, to the request's ASGI
+# scope; the router writes the matched route into that same scope before the
+# handler runs. None outside a request (a direct call, a test).
+_ban_gate_scope: contextvars.ContextVar = contextvars.ContextVar("ban_gate_scope", default=None)
+
+
+def _ban_gate_route(request=None) -> str:
+    """The route template a refusal names: the matched route of `request`,
+    else of the request this task is answering, else "-"."""
+    for scope in ((getattr(request, "scope", None) if request is not None else None),
+                  _ban_gate_scope.get()):
+        try:
+            route = scope.get("route") if scope is not None else None
+            path = getattr(route, "path", None)
+            if path:
+                return str(path)
+        except Exception:
+            pass
+    return "-"
+
+
+def _ban_gate_refused(request=None) -> None:
+    """The one writer of the sweep's refusal line (BAN-R12). It holds the route
+    template and nothing else: no account id, no reason."""
+    print(f"[BAN-GATE] refused route={_ban_gate_route(request)}")
+
+
+def _ban_gate_detail(reason) -> str:
+    """The answer's body for an actively banned acting account: the one shape
+    _check_ban_or_raise gives (409, "Banned: <reason>")."""
+    return f"Banned: {reason or 'violation'}"
+
+
+async def _ban_gate_or_raise(db: AsyncSession, steam_id: str, request=None) -> None:
+    """Refuse an actively banned acting account (models.player_ban_active_sql,
+    through _is_banned): 409 with the body _check_ban_or_raise gives, and one
+    [BAN-GATE] line naming the route. One read. Used where a route acts for a
+    player id that no session establishes (bans part 2a, S3 to S6)."""
+    reason = await _is_banned(db, steam_id)
+    if reason is not None:
+        _ban_gate_refused(request)
+        raise HTTPException(status_code=409, detail=_ban_gate_detail(reason))
+
+
+async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=None) -> None:
+    """Refuse a report when its reporter (`actor`) or any account it names
+    (`others`: the opponent, the named leaver, every roster member) is under
+    an active ban (BAN-R5). One read of every id. The reporter's own ban
+    answers with its own reason; another account's ban answers
+    "Banned: participant" and never carries that account's reason."""
+    ids = sorted({str(s) for s in [actor, *(others or ())] if s})
+    if not ids:
+        return
+    rows = (await db.execute(text(
+        "SELECT pb.steam_id, pb.reason FROM player_bans pb "
+        "WHERE pb.steam_id = ANY(CAST(:sids AS text[])) AND " + player_ban_active_sql("pb")
+    ), {"sids": ids})).all()
+    if not rows:
+        return
+    _ban_gate_refused(request)
+    own = [r for r in rows if actor and r[0] == str(actor)]
+    if own:
+        raise HTTPException(status_code=409, detail=_ban_gate_detail(own[0][1]))
+    raise HTTPException(status_code=409, detail="Banned: participant")
+
+
+async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=None,
+                             exclusive=()) -> None:
+    """Bans part 2a (F4, lesson 208): check and write under ONE lock. Takes the
+    identity lock the ban core takes (pg_advisory_xact_lock(hashtext(steam_id)),
+    exclusive in _apply_ban_core) in SHARED mode for every id and for `actor`,
+    then reads the ban of every id and refuses (409, one [BAN-GATE] line): a
+    ban that commits after this read waits for this transaction, and a ban
+    that committed before it is read here. `actor` answers with its own
+    reason; any other id answers "Banned: participant". Every route's sweep
+    gate reads the ban through this helper; the one read outside it
+    (team_series_report_dc's roster read) is taken under the team series row
+    lock, which the ban core takes after its identity lock.
+
+    LOCK ORDER. The ban core takes the target's identity lock FIRST and only
+    then locks rows (ffa_lobbies -> series -> team_lobbies -> ovt_lobbies ->
+    queue rows -> leases). So this comes before any lock the transaction that
+    writes takes on such a row: a caller that took one first could hold a row
+    the ban core waits for while waiting on the ban core's identity lock. The
+    ids are locked in the ONE identity order (identity_order.identity_lock_key,
+    the order _identity_lock_many and _guard_identities take), so this
+    and an exclusive holder of two of them never take them in opposite
+    orders. A caller that already holds the exclusive identity lock of an id
+    in this transaction takes the shared one at once (both are this
+    session's).
+
+    `exclusive` names the ids whose key the caller takes EXCLUSIVE later in
+    the same transaction (a per-account cap or turn on the same key). Those
+    are taken exclusive HERE, in the same ordered pass: a shared key that the
+    transaction later asks to make exclusive waits for every other shared
+    holder, and two such transactions wait for each other until the server
+    ends one of them. Does NOT commit."""
+    ids = sorted({str(s) for s in [*(steam_ids or ()), actor, *(exclusive or ())] if s},
+                 key=identity_lock_key)
+    excl = {str(s) for s in (exclusive or ()) if s}
+    for sid in ids:
+        if sid in excl:
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+                             {"sid": sid})
+        else:
+            await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                             {"sid": sid})
+    if not ids:
+        return
+    if actor is None and len(ids) == 1:
+        await _ban_gate_or_raise(db, ids[0], request)
+    else:
+        await _ban_gate_any_or_raise(db, actor, ids, request)
+
+
+# Bans part 2a (F1 b): the ONE place that says which records no writer may pay.
+# A record the ban void ended carries one of these invalidation reasons
+# (_ban_void_apply writes them); it stays ended for every writer -- a report,
+# a journaled window, a horizon settle, a replay, an admin completion -- also
+# after the ban has run out.
+BAN_VOID_REASONS = frozenset({"member_banned", "member_banned_played"})
+
+
+def _record_ended_by_ban(row) -> bool:
+    """Whether a series or lobby row (a mapping with invalidation_reason) was
+    ended by the ban void, so that no writer may record or pay on it."""
+    try:
+        return row["invalidation_reason"] in BAN_VOID_REASONS
+    except (KeyError, TypeError):
+        return False
+
+
+_PAIR_SQL = ("((player1_id = :a AND player2_id = :b)"
+             " OR (player1_id = :b AND player2_id = :a))")
+
+
+async def _pair_sitting_ended_by_ban(db, pid_a, pid_b, room, ranked: bool) -> bool:
+    """Whether a 1v1 report of this pair in `room` belongs to a sitting the ban
+    void ended (FIX-2 class I a). ranked_series carries no room, so the
+    sitting is resolved from the room's own binding, in this order:
+
+      tournament room  bound to its bracket match's series (tournament_matches,
+                       _TM_ROOM_MATCH_SQL): ended iff that series is.
+      a recorded game  of an ended series in this room: ended.
+      queue room       the room ledger (issued_room_regions, written only at
+                       queue issuance for this pair): ended iff issued at or
+                       before the newest ban void V of the pair.
+      private room     no binding: a RANKED report is ended iff no series of
+                       the pair was created after V (preflight creates the new
+                       sitting's series before its first game); a casual one
+                       is judged by the recorded-game rule only.
+
+    False whenever the pair has no series the void ended, so a pair no ban ever
+    touched pays nothing for this. Reads only; the caller holds the pair's
+    identity keys and the early series lock."""
+    ended = (await db.execute(text(
+        "SELECT id, invalidated_at FROM ranked_series WHERE " + _PAIR_SQL +
+        " AND invalidation_reason = ANY(CAST(:why AS text[]))"),
+        {"a": pid_a, "b": pid_b, "why": sorted(BAN_VOID_REASONS)})).all()
+    if not ended:
+        return False
+    ids = [str(r[0]) for r in ended]
+    stamps = [r[1] for r in ended if r[1] is not None]
+    room = (room or "").strip()
+    if room:
+        bound = (await db.execute(text(
+            "SELECT CAST(tm.series_id AS text) FROM tournament_matches tm WHERE "
+            + _TM_ROOM_MATCH_SQL), {"room": room})).scalars().all()
+        if bound:
+            return any(s in ids for s in bound if s)
+        if (await db.execute(text(
+                "SELECT 1 FROM matches WHERE photon_room_id = :room"
+                " AND series_id = ANY(CAST(:ids AS uuid[])) LIMIT 1"),
+                {"room": room, "ids": ids})).first() is not None:
+            return True
+        issued = (await db.execute(text(
+            "SELECT issued_at FROM issued_room_regions WHERE room_name = :room AND " + _PAIR_SQL),
+            {"room": room, "a": pid_a, "b": pid_b})).scalar()
+        if issued is not None:
+            return not stamps or issued <= max(stamps)
+    if not ranked:
+        return False
+    if not stamps:
+        return True
+    newer = (await db.execute(text(
+        "SELECT 1 FROM ranked_series WHERE " + _PAIR_SQL + " AND created_at > :v LIMIT 1"),
+        {"a": pid_a, "b": pid_b, "v": max(stamps)})).first()
+    return newer is None
+
+
+def _ban_writer_refusal(exc: HTTPException, in_window: bool):
+    """A writer's ban refusal: inside a report window it is PERMANENT and no
+    report of the game gets past it, so the attempt is kept and the window is
+    closed as refused (match_report_window.close_refused: superseded_at set,
+    every held or journaled report of the game kept), and nothing settles it
+    afterwards; elsewhere the HTTP refusal itself."""
+    if in_window:
+        return _mrw_mod().PermanentReportRefusal(exc, closes_window=True)
+    return exc
+
+
+async def _settle_writer_ban_check(db: AsyncSession, steam_ids, reporter, *,
+                                   in_window: bool = False) -> None:
+    """Bans part 2a (F1 a): a settle body's own ban check, whatever path
+    reached it (the route, the report window's janitor, a replay). Under the
+    identity locks of every account it names (_ban_lock_and_gate, shared, in
+    id order) and BEFORE the settle locks its series row, so a ban that
+    commits after this read waits for the settle to commit."""
+    try:
+        await _ban_lock_and_gate(db, steam_ids, None, actor=reporter)
+    except HTTPException as exc:
+        raise _ban_writer_refusal(exc, in_window) from exc
+
+
+def _refuse_record_ended_by_ban(row, in_window: bool) -> None:
+    """Refuse a write onto a record the ban void ended (F1 b)."""
+    if _record_ended_by_ban(row):
+        _ban_gate_refused()
+        raise _ban_writer_refusal(
+            HTTPException(status_code=409, detail="series_ended_by_ban"), in_window)
 
 
 async def _is_banned_via_session(steam_id: str) -> bool:
@@ -50271,6 +50647,231 @@ async def _ban_set_length_core(db: AsyncSession, *, admin_steam_id: str, target_
             "seconds_left": None if row["seconds_left"] is None else int(row["seconds_left"])}
 
 
+async def _ban_active_by_wall_clock(db: AsyncSession, ban_id) -> bool:
+    """Whether the ban row `ban_id` is active at clock_timestamp(), the wall
+    clock read now, by the one definition (models.player_ban_active_sql with
+    that time bound as its `at`). Two statements: the clock, then the row."""
+    wall = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
+    return bool((await db.execute(text(
+        "SELECT " + player_ban_active_sql("pb", "CAST(:wall AS timestamptz)") + " "
+        "FROM player_bans pb WHERE pb.id = :id"
+    ), {"wall": wall, "id": ban_id})).scalar())
+
+
+# Bans part 2a (F2, BAN-R4/R5/R22): every status each record table is written
+# with, classed ONCE. "live": the record still holds its members, and a ban of
+# any member ends it as void (_ban_void_lock/_ban_void_apply read this table).
+# "open_lobby": a lobby that has not started; the ban removes the account as an
+# ordinary leave does (BAN-R21). "terminal": the record holds nobody. A status
+# word the code writes to one of these tables and this table does not class
+# fails test_ban_sweep_census's status census.
+BAN_RECORD_STATUSES = {
+    "ffa_lobbies": {"open": "open_lobby", "active": "live",
+                    "canceled": "terminal", "completed": "terminal"},
+    "ranked_series": {"active": "live", "completed": "terminal", "abandoned": "terminal"},
+    "team_series": {"active": "live", "dc_paused": "live", "dc_incomplete": "live",
+                    "completed": "terminal", "canceled": "terminal", "cancelled": "terminal"},
+    "ovt_series": {"active": "live", "completed": "terminal", "canceled": "terminal"},
+}
+
+
+def _ban_live_statuses_sql(table: str) -> str:
+    """The table's live statuses as a SQL list literal, e.g. ('active', 'dc_paused')."""
+    live = sorted(w for w, c in BAN_RECORD_STATUSES[table].items() if c == "live")
+    assert live and all(w.replace("_", "").isalnum() for w in live)
+    return "(" + ", ".join("'" + w + "'" for w in live) + ")"
+
+
+async def _ban_void_lock(db: AsyncSession, pid) -> dict:
+    """Bans part 2a (S4, BAN-R5), first half: find every open series and
+    started lobby the account `pid` is in and lock each record. Membership is
+    read from each record's frozen roster, never from queue rows (a repeat
+    ban finds the rows gone): a 1v1 ranked_series 'active', an ffa_lobbies
+    row, a team_series or an ovt_series in a status BAN_RECORD_STATUSES
+    classes "live". Each is locked FOR NO KEY UPDATE in id order, table by table
+    in account deletion's order (FFA lobbies, then the series), under the
+    target's identity lock. _apply_ban_core calls this after the FFA
+    open-lobby lock and before the 2v2 and 1v2 open-lobby locks, so the ban
+    keeps deletion's order: ffa_lobbies -> series -> team_lobbies ->
+    ovt_lobbies -> queue rows -> leases."""
+    p = {"pid": pid}
+    found = {
+        "ffa": (await db.execute(text(
+            "SELECT id FROM ffa_lobbies WHERE status IN " + _ban_live_statuses_sql("ffa_lobbies")
+            + " AND :pid = ANY(member_ids)"),
+            p)).scalars().all(),
+        "ranked": (await db.execute(text(
+            "SELECT id FROM ranked_series WHERE status IN " + _ban_live_statuses_sql("ranked_series")
+            + " AND (player1_id = :pid OR player2_id = :pid)"), p)).scalars().all(),
+        "team": (await db.execute(text(
+            "SELECT id FROM team_series WHERE status IN " + _ban_live_statuses_sql("team_series")
+            + " AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)"), p)).scalars().all(),
+        "ovt": (await db.execute(text(
+            "SELECT id FROM ovt_series WHERE status IN " + _ban_live_statuses_sql("ovt_series")
+            + " AND :pid IN (solo_id, duo_a_id, duo_b_id)"), p)).scalars().all(),
+    }
+    for _key, _tbl in (("ffa", "ffa_lobbies"), ("ranked", "ranked_series"),
+                       ("team", "team_series"), ("ovt", "ovt_series")):
+        found[_key] = sorted(found[_key], key=str)
+        for _id in found[_key]:
+            await db.execute(text(f"SELECT 1 FROM {_tbl} WHERE id = :id FOR NO KEY UPDATE"),
+                             {"id": _id})
+    return found
+
+
+async def _ban_void_apply(db: AsyncSession, pid, found: dict) -> None:
+    """Bans part 2a (S4, BAN-R5), second half: end as void every record
+    _ban_void_lock found and locked, so the other players are free at once.
+    Each UPDATE re-checks the status. Games recorded before the ban stand;
+    the open record ends:
+      - FFA: an unstarted lobby 'canceled' (member_banned), a played one
+        'completed' (member_banned_played), bets reconciled; the other
+        members' rows go back to searching (account deletion's statements);
+      - 1v1: unsettled bets refunded, status 'abandoned' (member_banned); the
+        partner's queue row matched with the account is deleted;
+      - 2v2: status 'cancelled' (member_banned), bets reconciled, and the
+        group dissolved by _dissolve_group_rows, the one disposition
+        authority (a hosted group released and its lobby canceled, a public
+        group's members back to searching, their group leases dropped);
+      - 1v2: status 'canceled' (member_banned), dissolved the same way;
+    and an open hold of a voided 2v2 or 1v2 series closes (member_banned).
+    No rating, gold, XP, win, loss or disconnect count is written here.
+    Each reset or delete of another player's queue row is followed, in this
+    function and transaction, by the release of the lease that held it (the
+    voided FFA lobby's group leases; the 1v1 partner's ranked lease), as
+    _dissolve_group_rows does for a 2v2 or 1v2 group: a seat put back to
+    searching with its lease still held looks free and cannot be formed."""
+    ended = 0
+    for _lid in found["ffa"]:
+        _ended = (await db.execute(text(
+            """UPDATE ffa_lobbies SET status='canceled', invalidation_reason='member_banned',
+                      invalidated_at=NOW(),""" + _FFA_CLOSE_RECORD_SET + """
+                WHERE id=:lid AND status='active' AND games_played = 0
+                  AND start_granted_at IS NULL
+               RETURNING id"""),
+            {"lid": _lid, "rec_path": "member_banned", "rec_trigger": "member_ban"})).scalar()
+        if _ended is None:
+            _ended = (await db.execute(text(
+                """UPDATE ffa_lobbies SET status='completed', completed_at=NOW(),"""
+                + _FFA_CLOSE_RECORD_SET + """
+                    WHERE id=:lid AND status='active'
+                      AND (games_played > 0 OR start_granted_at IS NOT NULL)
+                   RETURNING id"""),
+                {"lid": _lid, "rec_path": "member_banned_played",
+                 "rec_trigger": "member_ban"})).scalar()
+        if _ended is None:
+            continue
+        ended += 1
+        await _reconcile_ffa_lobby_bets(db, _lid, "member banned")
+        await db.execute(text(
+            """UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
+                      room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
+                      held_until=NULL, held_lobby=NULL
+                WHERE series_id=:lid AND player_id <> :pid"""),
+            {"lid": _lid, "pid": pid})
+        await db.execute(text(
+            "DELETE FROM queue_leases WHERE mode = 'ffa' AND group_id = :g"),
+            {"g": _lid})
+    for _sid in found["ranked"]:
+        _ended = (await db.execute(text(
+            "UPDATE ranked_series SET status = 'abandoned', invalidated_at = NOW(),"
+            " invalidation_reason = 'member_banned' WHERE id = :sid AND status = 'active'"
+            " RETURNING id"), {"sid": _sid})).scalar()
+        if _ended is None:
+            continue
+        ended += 1
+        await _refund_series_bets(db, _sid)
+        _partners = (await db.execute(text(
+            "DELETE FROM ranked_queue WHERE matched_with = :pid AND player_id IN"
+            " (SELECT CASE WHEN player1_id = :pid THEN player2_id ELSE player1_id END"
+            "    FROM ranked_series WHERE id = :sid)"
+            " RETURNING player_id"), {"pid": pid, "sid": _sid})).scalars().all()
+        for _x in _partners:
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ranked'"),
+                {"pid": _x})
+    _voided = []
+    for _mode, _cancel in (
+            ("team", "UPDATE team_series SET status='cancelled', invalidated_at=NOW(),"
+                     " invalidation_reason='member_banned'"
+                     " WHERE id=:sid AND status IN " + _ban_live_statuses_sql("team_series")
+                     + " RETURNING id"),
+            ("ovt", "UPDATE ovt_series SET status='canceled', invalidated_at=NOW(),"
+                    " invalidation_reason='member_banned'"
+                    " WHERE id=:sid AND status IN " + _ban_live_statuses_sql("ovt_series")
+                    + " RETURNING id")):
+        for _sid in found[_mode]:
+            if (await db.execute(text(_cancel), {"sid": _sid})).scalar() is None:
+                continue
+            ended += 1
+            if _mode == "team":
+                await _reconcile_team_series_bets(db, _sid, "member_banned")
+            await _dissolve_group_rows(db, _mode, _sid, exclude_pid=pid)
+            _voided.append(_sid)
+    if _voided and await _s2_tables_present(db):
+        await db.execute(text(
+            "UPDATE match_seat_holds SET closed_at = clock_timestamp(),"
+            "       closed_reason = 'member_banned'"
+            " WHERE closed_at IS NULL AND series_id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": [str(g) for g in _voided]})
+    if ended:
+        print(f"[BAN] ended {ended} open record(s) of the banned account as void")
+
+
+_LOBBY_SEAT_TABLES = {"ffa": ("ffa_queue", "ffa_lobbies"),
+                      "team": ("team_queue", "team_lobbies"),
+                      "ovt": ("ovt_queue", "ovt_lobbies")}
+
+
+async def _lobby_seat_left_core(db: AsyncSession, mode: str, lobby_id, leaver_pid) -> tuple:
+    """The ONE implementation of a member leaving an OPEN lobby of `mode`, after
+    the caller deleted the leaver's seat row (when it had one) under the
+    lobby's lock: the ordinary leave (team, 1v2 and FFA) and the ban (FIX-2
+    class III) both call it. The leaver's pending invites for the lobby end
+    (sender_left). Then, judged by the FRESH members only (a member whose
+    poll is older than the freshness bound counts as gone, as everywhere a
+    lobby is read): with none left the lobby is disbanded, its lobby-phase
+    wagers refunded and its invites ended (lobby_closed); otherwise, when the
+    leaver was the STORED host, the earliest fresh member becomes host.
+    Returns (invites ended, disbanded, the fresh members left); the caller
+    moves the invitees' revisions (_invite_bump) and commits."""
+    qt, lt = _LOBBY_SEAT_TABLES[mode]
+    inv = await _invite_end_departed(db, mode, lobby_id, [leaver_pid])
+    lrow = (await db.execute(text(
+        f"SELECT status, host_player_id FROM {lt} WHERE id = :lid"),
+        {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        return inv, False, []
+    remaining = (await db.execute(text(
+        f"SELECT player_id FROM {qt} WHERE series_id = :lid AND status = 'lobby'"
+        f" AND {LOBBY_MEMBER_FRESH_SQL} ORDER BY joined_at, player_id::text"),
+        {"lid": lobby_id})).scalars().all()
+    if not remaining:
+        killed = (await db.execute(text(
+            f"UPDATE {lt} SET status='canceled', invalidated_at=NOW(),"
+            f" invalidation_reason='lobby_disbanded' WHERE id = :lid AND status = 'open'"
+            f" RETURNING id"), {"lid": lobby_id})).scalar()
+        # Only when the TERMINAL transition landed (migration 207): a refund
+        # on a mere seat event would void live wagers on a lobby about to start.
+        if killed is not None:
+            await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
+            inv += await _invite_end_lobby(db, mode, lobby_id, "lobby_closed")
+        return inv, True, []
+    if lrow["host_player_id"] == leaver_pid:
+        await db.execute(text(f"UPDATE {lt} SET host_player_id = :h WHERE id = :lid"),
+                         {"h": remaining[0], "lid": lobby_id})
+    return inv, False, list(remaining)
+
+
+# The lobby kinds the ban core reads an account's open lobbies from, in the
+# order account deletion locks them (FFA, then 2v2, then 1v2): (mode, queue
+# table, lobby table). A closed list of code constants; the ban core's lobby
+# read interpolates these table names and nothing else.
+_BAN_LOBBY_TABLES = (("ffa", "ffa_queue", "ffa_lobbies"),
+                     ("team", "team_queue", "team_lobbies"),
+                     ("ovt", "ovt_queue", "ovt_lobbies"))
+
+
 async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam_id: str,
                           reason: str, duration_minutes: int | None = None,
                           length_sent: bool = False, record_reason: str | None = None,
@@ -50310,6 +50911,13 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                      {"sid": target_steam_id})
     if length_sent:
         _active = await _active_ban_details(db, target_steam_id)
+        if _active is not None and not await _ban_active_by_wall_clock(db, _active["id"]):
+            # BAN-R20 (bans part 2a, S10): the read above judges the ban by
+            # NOW(), this transaction's start. A ban whose end fell between
+            # that start and the grant of the identity lock has ended by the
+            # wall clock: it is no ban to lengthen. The request takes the full
+            # path below (the purges first) and answers as a repeated ban does.
+            _active = None
         if _active is not None:
             return await _ban_set_length_core(
                 db, admin_steam_id=admin_steam_id, target_steam_id=target_steam_id,
@@ -50353,17 +50961,28 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # to another lobby meanwhile; a seat that left in between leaves the
         # end below with nothing to end.
         _ban_lobbies = []
-        for _lmode, _lqt, _llt in (("ffa", "ffa_queue", "ffa_lobbies"),
-                                   ("team", "team_queue", "team_lobbies"),
-                                   ("ovt", "ovt_queue", "ovt_lobbies")):
-            _blid = (await db.execute(text(
-                f"SELECT series_id FROM {_lqt} WHERE player_id = :pid AND status = 'lobby'"
-            ), {"pid": _bpid})).scalar()
-            if _blid is not None:
+        for _lmode, _lqt, _llt in _BAN_LOBBY_TABLES:
+            # FIX-2 class III: every OPEN lobby the account hosts or holds a
+            # seat in, read from the lobby table itself (a host whose own
+            # expired seat row is already gone is found by host_player_id).
+            # The statement's interpolated parts are the table names of the
+            # closed list _BAN_LOBBY_TABLES alone; the account is a typed bind.
+            for _blid in (await db.execute(text(
+                    f"SELECT id FROM {_llt} WHERE status = 'open' AND (host_player_id = CAST(:pid AS uuid)"
+                    f" OR id IN (SELECT series_id FROM {_lqt}"
+                    f"           WHERE player_id = CAST(:pid AS uuid) AND status = 'lobby'))"
+                    f" ORDER BY id"), {"pid": _bpid})).scalars().all():
                 await db.execute(text(
                     f"SELECT 1 FROM {_llt} WHERE id = :lid FOR NO KEY UPDATE"
                 ), {"lid": _blid})
                 _ban_lobbies.append((_lmode, _blid))
+            if _lmode == "ffa":
+                # Bans part 2a (S4, BAN-R5): the open series and started
+                # lobbies the account is in, locked after the FFA lobby rows
+                # and before the 2v2 and 1v2 lobby rows (deletion's order).
+                _ban_void_found = await _ban_void_lock(db, _bpid)
+        # ...and ended as void, before the queue rows below.
+        await _ban_void_apply(db, _bpid, _ban_void_found)
         # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
         # branch was racy because it did partner WRITES from a status-filtered
         # snapshot; a bare unconditional DELETE of the banned player's own
@@ -50383,10 +51002,43 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
                 f"DELETE FROM {_qt} WHERE player_id = :pid"
             ), {"pid": _bpid})
         for _lmode, _blid in _ban_lobbies:
-            _ban_inv_ended += await _invite_end_departed(db, _lmode, _blid, [_bpid])
+            # FIX-2 class III: the account leaves each open lobby through the
+            # ordinary leave's own core (_lobby_seat_left_core): its invites
+            # end, then the lobby is disbanded with refunds when no fresh
+            # member is left, or the stored host's successor is the earliest
+            # fresh member. Its seat row was deleted just above.
+            _inv, _disb, _left = await _lobby_seat_left_core(db, _lmode, _blid, _bpid)
+            _ban_inv_ended += _inv
+            # BAN-R21: no wager of the account's own stays on the lobby it left
+            # (a disband above refunded every wager; this is a no-op then).
+            await _refund_lobby_bets(db, _lmode, _blid, "bettor_banned", bettor=_bpid)
+        # FIX-2 class II: every pending invite TO the account ends too, in any
+        # lobby and mode (_INVITE_END_INVITEE_SQL); the invitees' revisions
+        # move with the others below (_invite_bump).
+        _ban_inv_ended += list((await db.execute(text(_INVITE_END_INVITEE_SQL),
+                                                 {"pid": str(_bpid)})).scalars().all())
+        # The account's own seat lease last, after every parent, queue row and
+        # invite (the order account deletion keeps). The leases of the records
+        # the void ended were released by _ban_void_apply beside each reset.
+        await db.execute(text("DELETE FROM queue_leases WHERE player_id = :pid"),
+                         {"pid": _bpid})
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
+    # F2 b: a looking-for-players post the account queued and the bot has not
+    # posted yet is the account's live state too (the bot's poll reads no ban).
+    # Keyed by the steam id and run whether or not the account has a players
+    # row (FIX-3 1.4): queueing a post needs only the steam id.
+    await db.execute(text(
+        "DELETE FROM lfp_pings WHERE steam_id = :sid AND posted_at IS NULL"
+    ), {"sid": target_steam_id})
+    # The account's spectate leases end as the spectate leave ends one (F2 d;
+    # FIX-2 class II): drain tombstone, then the lease revoked, through the one
+    # helper the leave route uses. Keyed by the steam id and run whether or not
+    # the account has a players row: a spectate lease needs only an
+    # authenticated session. The lease is revoked at once; the drain mark keeps
+    # the slot taken until a later complete inventory ends it.
+    await _spectate_leave_rows(db, target_steam_id)
     # Player Cards, first (r7 H2): a Discord line in flight naming this
     # player -- as a card's subject or as a party of a pull -- is on Discord
     # before the ban commits; the writer waits for the bot to release its
@@ -51470,7 +52122,9 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...),
                            expected_series_id: str | None = Query(None),
                            db: AsyncSession = Depends(get_db)):
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, steam_id, db)
+    # An exit (BAN-R4 / BAN-R17): open to a banned account; it removes only
+    # the caller's own state.
+    await _check_steam_session(request, steam_id, db, banned_ok=True)
     # Codex r2 f3: a delayed/retried leave must never tear down a NEWER
     # enrollment. When the caller names the incarnation it is leaving, the
     # lease release is fenced to it and the row must still carry it below —
@@ -52871,6 +53525,9 @@ async def team_series_spawn_confirm(
     the local Player. Idempotent per (series, player) — safe to retry."""
     if not _verify_spawn_confirm_hmac(steam_id, series_id, hmac_sig):
         raise HTTPException(403, "Invalid spawn-confirm signature")
+    # Bans part 2a (S3): the signature names no session; the acting id's ban
+    # is read before the confirmation is counted.
+    await _ban_lock_and_gate(db, [steam_id])
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -53704,12 +54361,29 @@ async def admin_resolve_team_series(
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid series_id")
+    if action == "complete":
+        # Bans part 2a (FIX-2 class I b): a completion pays the roster, so it
+        # reads the ban of every member under their identity keys, taken here
+        # in the transaction's one taking call (shared, one ordered pass)
+        # BEFORE the series row lock below: a ban that commits after this read
+        # waits for this transaction, and one committed before it refuses the
+        # completion (409 "Banned: participant") before anything is paid. The
+        # roster is read without a lock first; team_series rows never change
+        # their roster, and the locked read below is the one written from.
+        _roster = (await db.execute(text(
+            "SELECT p.steam_id FROM team_series s"
+            " JOIN players p ON p.id IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)"
+            " WHERE s.id = :sid"), {"sid": sid_uuid})).scalars().all()
+        await _ban_lock_and_gate(db, list(_roster), None)
     srow = (await db.execute(
-        text("SELECT status, t1a_id, t1b_id, t2a_id, t2b_id "
+        text("SELECT status, invalidation_reason, t1a_id, t1b_id, t2a_id, t2b_id "
              "FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
     )).mappings().first()
     if srow is None:
         raise HTTPException(404, "Series not found")
+    # Bans part 2a (F1 b): a series the ban void ended is never completed.
+    if _record_ended_by_ban(srow):
+        return {"status": "noop", "reason": "ended by a ban"}
     # Guard against re-resolution: a completed OR already-voided series must not be
     # re-paid (void→complete would otherwise double-credit). The helper has its own
     # status guard too, but bail early for a clean response.
@@ -54562,6 +55236,10 @@ async def team_series_report_dc(
     "one reader" would miss every one of them."""
     if not _verify_team_dc_hmac(reporter_steam_id, series_id, dc_player_steam_id, hmac_sig):
         raise HTTPException(403, "Invalid DC report signature")
+    # Bans part 2a (S3, S4): the signature names no session; a report whose
+    # reporter or named leaver is actively banned records nothing. The rest of
+    # the roster is read under the series lock below.
+    await _ban_lock_and_gate(db, [dc_player_steam_id], actor=reporter_steam_id)
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -54593,6 +55271,14 @@ async def team_series_report_dc(
     s = s_row.mappings().first()
     if s is None:
         raise HTTPException(404, "Series not found")
+    # Bans part 2a (S4, BAN-R5): any roster member under an active ban, read
+    # under the series lock, refuses the report before any write. Not through
+    # _ban_lock_and_gate: an identity lock taken after this row lock would
+    # invert the ban core's order. The row lock serializes instead: the ban
+    # core locks this row after the identity lock, so a ban of a member
+    # either committed before this read (and voided the row) or waits here.
+    await _ban_gate_any_or_raise(db, reporter_steam_id, await _modlog_steam_ids(
+        db, [s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]]))
     if s["status"] not in ("active", "dc_paused"):
         # THE SETTLED-ROW EXIT. A report that arrives after anything terminal
         # has been written -- by another report, by an admin, or by the
@@ -55850,7 +56536,9 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
     with >=1 reported game is left alone — that's a mid-series leave and the
     match pipeline owns its lifecycle."""
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
-    await _check_steam_session(request, steam_id, db)
+    # An exit (BAN-R4 / BAN-R17): open to a banned account; it removes only
+    # the caller's own state.
+    await _check_steam_session(request, steam_id, db, banned_ok=True)
     # Codex r2 f3: incarnation fence — see team_queue_leave. Legacy callers
     # (no param) keep the unfenced behaviour.
     _exp_sid = None
@@ -56965,6 +57653,19 @@ async def _report_window_receive(db, mode, report):
         by_steam = await _match_hold._guard_identities(db, keys)
     if any(key not in by_steam for key in keys):
         raise HTTPException(404, "One or more players not registered")
+    # Bans part 2a (F4, FIX-2 class IV): every account the report names is
+    # read for a ban under the identity keys just taken (_guard_identities,
+    # exclusive, every key of the report in one ordered pass), BEFORE the first
+    # write of this transaction (a receipt, a journal row, a window row). A ban
+    # committed before this read refuses the report and nothing is journaled;
+    # a ban that commits after it waits for this transaction. The series row is
+    # read again under the same keys: one a ban's void ended answers as the
+    # settle cores answer (409 series_ended_by_ban), and nothing is journaled.
+    # At this point the transaction holds the identity keys only, no row lock.
+    await _ban_gate_any_or_raise(db, report.reported_by_steam_id, sorted(keys), None)
+    _refuse_record_ended_by_ban((await db.execute(
+        text("SELECT * FROM " + stable + " WHERE id = :sid"), {"sid": series_id})).mappings().first()
+        or {}, False)
     if (len(by_steam) != len(members) or set(by_steam.values()) != set(members)
             or report.reported_by_steam_id not in by_steam):
         return None
@@ -57138,6 +57839,11 @@ async def _report_window_janitor() -> dict:
                 if not mrw._window_terminal(window):
                     await mrw._keep_permanently_refused(
                         db, w["room_name"], w["game_id"], attempt)
+                    if ex.closes_window:
+                        # A ban refusal no report of this game gets past:
+                        # the window closes as refused (FIX-2 class IV).
+                        await mrw.close_refused(db, w["room_name"], w["game_id"],
+                                                await _match_hold._ctx_now(db))
                 await db.commit()
                 print(f"[HOLD] report window settle refused room={w['room_name']}: "
                       f"{type(ex).__name__}: {ex}")
@@ -57170,6 +57876,18 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_ovt_hmac(report):
         raise HTTPException(403, "Invalid 1v2 match signature")
+    # Bans part 2a (S4, BAN-R5): refused before it is journaled or settled
+    # when the reporter or any of the three is actively banned.
+    # Not under the identity lock on purpose: the report window's receipt
+    # takes the EXCLUSIVE identity guards of the whole game next
+    # (_guard_identities), and a shared key taken here would have to become
+    # exclusive there, so two reporters of one game would wait for each other
+    # until the server ended one report. The reads that hold come after it:
+    # the receipt reads the ban of every account the report names under those
+    # guards, before its first write (_report_window_receive), and the settle
+    # reads it again under its own (_settle_writer_ban_check).
+    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
+                                 _report_steams("ovt", report), request)
     _windowed = await _report_window_receive(db, "ovt", report)
     if _windowed is not None:
         return _windowed
@@ -57193,6 +57911,9 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     steams = {report.solo.steam_id, report.duo_a.steam_id, report.duo_b.steam_id}
     if len(steams) != 3:
         raise HTTPException(400, "Need three distinct players")
+    # Bans part 2a (F1): the writer's own check, under the identity locks,
+    # before the series row lock below.
+    await _settle_writer_ban_check(db, steams, report.reported_by_steam_id, in_window=in_window)
     await _assert_no_service_subject(db, affected_steam_ids=steams)
 
     prows = (await db.execute(
@@ -57230,6 +57951,8 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     ), {"sid": series_uuid})).mappings().first()
     if series is None:
         raise HTTPException(404, "Series not found")
+    # Bans part 2a (F1 b): a series the ban void ended records and pays nothing.
+    _refuse_record_ended_by_ban(series, in_window)
     await _assert_no_service_subject(
         db, affected_player_ids=[series["solo_id"], series["duo_a_id"], series["duo_b_id"]])
     # Round-20 find 4: bind the report to the sitting's issued room. Report
@@ -57542,7 +58265,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:5018 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:5019 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -58622,6 +59345,42 @@ def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
     mirror at last, linear in the beaten-fraction, mean 1.0 absent ties."""
     frac = _ffa_place_frac(place, beaten, n_live)
     return (2.0 - FFA_SHAPE_TOP) + (2.0 * FFA_SHAPE_TOP - 2.0) * frac
+
+
+def _ffa_game_awards(*, place: int, beaten: int, n_live: int, paid_battles: float,
+                     opp_ratings, old_xp=None) -> dict:
+    """One rated-or-casual FFA seat's game XP and gold: pure, no database and
+    no clock. submit_ffa_match's award loop and the held-report Credit route
+    (QAPPLY-1) both call it, so the two cannot pay different amounts.
+
+    The pool is rate(n_live) x paid battles x placement shape x the opponent
+    tier factor NORMALISED to the x1.5 calibration field (FFA_G_PER_PLAYER_MIN
+    is calibrated "at tier x1.5", learning #258); with no opponent ratings
+    (a casual game) the tier is 1.0. XP is 45 % of the pool x 100, floored at
+    FFA_MIN_XP; placement gold is the other 55 %, FLOORED AT 1 (the
+    ffa_placement ledger row is the back-pay idempotency marker, so a live
+    seat always produces one). Returns {"xp", "place_gold", "tier"}; with
+    old_xp (the XP total before this game's XP) also "xp_gold" (one gold per
+    100 XP boundary crossed), "level_gold" (level_reward_for of every level
+    gained; bug #117) and "gold", their sum with the placement gold."""
+    tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
+                 if opp_ratings else 1.0)
+    pool = (_ffa_battle_rate(n_live) * paid_battles
+            * _ffa_pool_shape(place, beaten, n_live)
+            * (tier_mult / 1.5))
+    xp = max(FFA_MIN_XP, int(round(pool * FFA_XP_SHARE * 100)))
+    out = {"xp": xp, "place_gold": max(1, int(round(pool * (1.0 - FFA_XP_SHARE)))),
+           "tier": tier_mult}
+    if old_xp is not None:
+        old_xp = int(old_xp)
+        new_xp = old_xp + xp
+        old_lvl = level_from_xp(old_xp)[0]
+        new_lvl = level_from_xp(new_xp)[0]
+        out["xp_gold"] = max(0, (new_xp // 100) - (old_xp // 100))
+        out["level_gold"] = (sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                             if new_lvl > old_lvl else 0)
+        out["gold"] = out["xp_gold"] + out["place_gold"] + out["level_gold"]
+    return out
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
@@ -60459,7 +61218,9 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     caller gets an explicit 409 naming the right endpoint rather than a
     partial teardown."""
     cfg = _lobby_cfg(mode)
-    await _check_steam_session(request, steam_id, db)
+    # An exit (BAN-R4 / BAN-R17): open to a banned account; it removes only
+    # the caller's own state.
+    await _check_steam_session(request, steam_id, db, banned_ok=True)
     # UNLOCKED pre-check BEFORE touching the lease. This ordering is
     # load-bearing and the first draft had it wrong: _lease_release_by_steam
     # with a NULL fence deletes EVERY lease the player holds, so releasing
@@ -60564,40 +61325,12 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     await db.execute(text(
         "DELETE FROM queue_leases WHERE player_id = :pid AND group_id = CAST(:lid AS uuid)"
     ), {"pid": me["player_id"], "lid": str(lobby_id)})
-    # Migration 416's change: the leaver's pending invites for this lobby end
-    # with them (sender_left), and a disband ends the rest (lobby_closed);
-    # the invitees' revisions move as the transaction's last statement.
-    _inv_ended = await _invite_end_departed(db, mode, lobby_id, [me["player_id"]])
-    remaining = (await db.execute(text(f"""
-        SELECT player_id FROM {cfg['queue']}
-         WHERE series_id = :lid AND status = 'lobby' AND {LOBBY_MEMBER_FRESH_SQL}
-         ORDER BY joined_at, player_id::text
-    """), {"lid": lobby_id})).scalars().all()
-    disbanded = False
-    if not remaining:
-        _killed = (await db.execute(text(f"""
-            UPDATE {cfg['lobbies']} SET status='canceled', invalidated_at=NOW(),
-                   invalidation_reason='lobby_disbanded'
-             WHERE id=:lid AND status='open'
-            RETURNING id"""), {"lid": lobby_id})).scalar()
-        disbanded = True
-        # Only when the TERMINAL transition actually landed (migration 207):
-        # one member leaving a lobby that still has people in it does not
-        # dissolve anything, and refunding there would void live wagers on a
-        # lobby that is about to start. No-op for 'ovt' (no bet table).
-        if _killed is not None:
-            await _refund_lobby_bets(db, mode, lobby_id, "lobby_disbanded")
-            _inv_ended += await _invite_end_lobby(db, mode, lobby_id, "lobby_closed")
-    else:
-        # Promote only when the LEAVER was the stored host (a read never
-        # persists the derived host — see _lobby_effective_host).
-        _host = (await db.execute(text(
-            f"SELECT host_player_id FROM {cfg['lobbies']} WHERE id=:lid"
-        ), {"lid": lobby_id})).scalar()
-        if _host == me["player_id"]:
-            await db.execute(text(
-                f"UPDATE {cfg['lobbies']} SET host_player_id=:h WHERE id=:lid"
-            ), {"h": remaining[0], "lid": lobby_id})
+    # The rest is the one open-lobby leave core the ban also runs
+    # (_lobby_seat_left_core): the leaver's invites end, then disband with
+    # refunds when no fresh member is left, or the stored host's successor.
+    # The invitees' revisions move as the transaction's last statement.
+    _inv_ended, disbanded, remaining = await _lobby_seat_left_core(
+        db, mode, lobby_id, me["player_id"])
     await _invite_bump(db, _inv_ended)
     await db.commit()
     print(f"[{cfg['label']}-LOBBY] {steam_id} left lobby {lobby_id}"
@@ -61713,7 +62446,9 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
 # in one query can disagree by microseconds against a 75-SECOND threshold.
 # That is the trade taken deliberately: a deterministic staleness miss for a
 # boundary case that resolves itself on the next poll.
-FFA_LOBBY_MEMBER_FRESH_SQL = "last_polled > clock_timestamp() - INTERVAL '75 seconds'"
+# One definition for every mode: the FFA name is an alias of the lobby one
+# (LOBBY_MEMBER_FRESH_SQL), which the shared leave core reads for every mode.
+FFA_LOBBY_MEMBER_FRESH_SQL = LOBBY_MEMBER_FRESH_SQL
 
 
 async def _ffa_live_lobby_members(db: AsyncSession, lobby_id):
@@ -62913,7 +63648,9 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     one member leaving means the remaining group can never reach N again in
     that room (Codex design find 4 — leaving them 'ready_join' would re-feed
     a dead room forever). Everyone's rows are deleted; they requeue fresh."""
-    await _check_steam_session(request, steam_id, db)
+    # An exit (BAN-R4 / BAN-R17): open to a banned account; it removes only
+    # the caller's own state.
+    await _check_steam_session(request, steam_id, db, banned_ok=True)
     # Bug #392 lens find 7: narrowed ONCE, here, so all three writers below
     # bind the same value and none of them can be the site that persists an
     # unrecognised tag. `cause` itself is left alone — the in-room decisions
@@ -63039,38 +63776,15 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     if me["status"] == "lobby" and lobby_id is not None:
         await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
                          {"pid": me["player_id"]})
-        # Migration 416's change: the leaver's pending invites for this lobby
-        # end with them (sender_left), and a disband ends the rest
-        # (lobby_closed); the invitees' revisions move as the last statement.
-        _inv_ended = await _invite_end_departed(db, "ffa", lobby_id, [me["player_id"]])
-        lrow = (await db.execute(text(
-            "SELECT status, host_player_id FROM ffa_lobbies WHERE id = :lid"
-        ), {"lid": lobby_id})).mappings().first()
-        if lrow is not None and lrow["status"] == "open":
-            live = await _ffa_live_lobby_members(db, lobby_id)
-            if not live:
-                _cancelled = (await db.execute(text(
-                    """UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
-                              invalidation_reason='lobby_disbanded'
-                        WHERE id=:lid AND status='open'
-                     RETURNING id"""), {"lid": lobby_id})).scalar()
-                print(f"[FFA-LOBBY] lobby {lobby_id} disbanded (last member left: {steam_id})")
-                # Review find 1: this is a TERMINAL transition, so staged
-                # wagers must come back here rather than waiting on the
-                # 10-minute orphan janitor. Gated on the UPDATE having
-                # actually fired (the house rule: refund on the transition,
-                # never on a mere seat event).
-                if _cancelled is not None:
-                    try:
-                        await _refund_lobby_bets(db, "ffa", lobby_id, "lobby_disbanded")
-                    except Exception as _re:
-                        print(f"[FFA-LOBBY] lobby-bet refund deferred to janitor: {_re}")
-                    _inv_ended += await _invite_end_lobby(db, "ffa", lobby_id, "lobby_closed")
-            elif lrow["host_player_id"] == me["player_id"]:
-                await db.execute(text(
-                    "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
-                ), {"h": live[0]["player_id"], "lid": lobby_id})
-                print(f"[FFA-LOBBY] host left lobby {lobby_id} — promoted earliest member")
+        # The one open-lobby leave core the team and 1v2 leaves and the ban
+        # also run (_lobby_seat_left_core): the leaver's invites end, then
+        # disband with the lobby-phase wagers refunded on the terminal
+        # transition when no fresh member is left, or the stored host's
+        # successor. The invitees' revisions move as the last statement.
+        _inv_ended, _disb, _left = await _lobby_seat_left_core(
+            db, "ffa", lobby_id, me["player_id"])
+        if _disb:
+            print(f"[FFA-LOBBY] lobby {lobby_id} disbanded (last member left: {steam_id})")
         await _invite_bump(db, _inv_ended)
         await db.commit()
         return {"status": "ok"}
@@ -67081,12 +67795,135 @@ _RDM_JOURNAL_MODE: contextvars.ContextVar = contextvars.ContextVar(
 
 async def _ffa_settle_report(report, db, *, journal: dict):
     """Settle one journaled report through the report route's body (V3 P3:
-    the same code as a direct report)."""
+    the same code as a direct report). Refused while the held-report replay
+    variable is set: the two modes are never both set (QAPPLY-1 R2)."""
+    if _QAPPLY_REPLAY.get() is not None:
+        raise RuntimeError("journal settlement refused: the held-report replay is set")
     tok = _RDM_JOURNAL_MODE.set(journal)
     try:
         return await submit_ffa_match(report, None, db)
     finally:
         _RDM_JOURNAL_MODE.reset(tok)
+
+
+# QAPPLY-1: an admin's action on a held FFA report (match_report_quarantine)
+# runs under this context variable. Accept ("kind": "accept") replays the
+# held body through the report route's own body, submit_ffa_match, with no
+# request, the way the journal settlement does above; Credit ("kind":
+# "credit") runs the seat rules it shares with that body. The value is the
+# held row's {qid, received_at (its created_at), actor, note, player_ids,
+# kind}. _qapply_run is the ONE function that sets and resets it, and it
+# refuses while either this variable or the journal's is set, so the two
+# modes are never both set. What the body does differently under it is
+# listed where it reads it: no session check and no settlement of the
+# lobby's journal windows, a closed lobby whose word is served goes on to
+# the checks, an active lobby is refused, no capture (_ffa_record_and_refuse
+# raises the refusal and writes nothing), the held row's created_at as the
+# clock, the gate after the players pass (_qapply_gate), a refusal after a
+# rollback of the game insert, and the held row's status and the moderator
+# record before the one commit (_qapply_finish).
+_QAPPLY_REPLAY: contextvars.ContextVar = contextvars.ContextVar(
+    "_qapply_replay", default=None)
+
+
+@asynccontextmanager
+async def _qapply_run(ctx: dict):
+    """`async with _qapply_run(ctx): ...` runs its block with _QAPPLY_REPLAY set to
+    ctx, and resets it after. Refuses (RuntimeError, the block not run)
+    while the replay or the journal variable is already set. A context
+    manager, so each route calls the body or the credit work by name."""
+    if _QAPPLY_REPLAY.get() is not None or _RDM_JOURNAL_MODE.get() is not None:
+        raise RuntimeError("held-report replay refused: a settlement mode is already set")
+    tok = _QAPPLY_REPLAY.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _QAPPLY_REPLAY.reset(tok)
+
+
+# QAPPLY-1 FIX-1: set for the whole transaction of Accept and of Credit
+# (_qapply_unit), from before the first lock to the commit or rollback; the
+# held row's own checks (_qapply_held) run before _qapply_run sets the replay.
+# Its value is the unit's mark (_QapplyUnitMark): the handle_error listener
+# reads it to mark the unit on a bound error (F6), and the tests count what
+# runs inside the unit by it. A fill of the service-policy cache is kept out
+# of the unit by _qapply_service_ready except in the one interleaving its
+# docstring names, never by a reader of this variable.
+_QAPPLY_UNIT: contextvars.ContextVar = contextvars.ContextVar(
+    "_qapply_unit", default=None)
+
+
+class _QapplyUnitMark:
+    """The open unit's value of _QAPPLY_UNIT (F6): its kind, and whether a
+    database bound error (_qapply_out_of_time) was raised by a statement run
+    in this unit's context, whoever caught it."""
+    __slots__ = ("kind", "bound")
+
+    def __init__(self, kind: str):
+        self.kind, self.bound = kind, False
+
+
+class _QapplyBoundHit(TimeoutError):
+    """_qapply_check_bound's refusal. A TimeoutError, so the routes'
+    classifier (_qapply_out_of_time) answers it busy and rolls back."""
+
+
+def _qapply_on_db_error(ctx) -> None:
+    """handle_error listener, registered once for every Engine (below). It
+    does nothing unless a held-report unit is open in the calling context:
+    the greenlet that runs a statement takes the calling task's context, so
+    another request's statements never see this unit. Then it marks the unit
+    when the error is a bound error by the routes' one classifier. A handler
+    that catches the error later cannot unmark it. It never raises."""
+    try:
+        mark = _QAPPLY_UNIT.get()
+        if mark is not None and _qapply_out_of_time(ctx.sqlalchemy_exception or ctx.original_exception):
+            mark.bound = True
+    except Exception:
+        pass
+
+
+from sqlalchemy import event as _sa_event  # noqa: E402
+from sqlalchemy.engine import Engine as _SaEngine  # noqa: E402
+
+_sa_event.listen(_SaEngine, "handle_error", _qapply_on_db_error)
+
+
+def _qapply_check_bound() -> None:
+    """The mark's read (F6), directly before every commit a unit reaches:
+    the last statement of _qapply_finish (directly before the report body's
+    one commit) and the statement before Credit's commit. A bound error
+    raised anywhere in the unit, caught or not, refuses the commit: the
+    action answers busy and rolls back whole."""
+    mark = _QAPPLY_UNIT.get()
+    if mark is not None and mark.bound:
+        raise _QapplyBoundHit("a database bound fired inside the unit")
+
+
+@asynccontextmanager
+async def _qapply_unit(kind: str):
+    """`async with _qapply_unit(kind): ...` runs a held-report action's whole
+    transaction with _QAPPLY_UNIT set to a fresh mark of that kind, and
+    resets it after.
+
+    F6, the unit's exit: once the mark is set, an error that leaves the unit
+    leaves it as _QapplyBoundHit, whatever it is. A handler that caught the
+    bound error may have gone on to raise something else (the body's skew
+    refund turns any error into its 503 wagers refusal; a statement after a
+    caught error with no savepoint fails as an aborted transaction), and the
+    action must still answer busy. Nothing commits on that path either way:
+    the routes roll back on every error. A bound error itself, and an exit
+    with the mark unset, leave as they were."""
+    mark = _QapplyUnitMark(kind)
+    tok = _QAPPLY_UNIT.set(mark)
+    try:
+        yield kind
+    except Exception as ex:
+        if mark.bound and not _qapply_out_of_time(ex):
+            raise _QapplyBoundHit("the unit ended after a database bound fired in it") from ex
+        raise
+    finally:
+        _QAPPLY_UNIT.reset(tok)
 
 
 async def _ffa_settle_due_windows_for_report(db, lobby_id_text) -> None:
@@ -68526,6 +69363,113 @@ def _ffa_named_game_number(room_id: str | None) -> int | None:
     return int(tail)
 
 
+# ── The verifications of an FFA report, in one place (QAPPLY-1 FIX-1) ──────
+# Each check below is a verification submit_ffa_match makes of a report
+# between its hold sites and its payment. The body calls each at its own
+# place, with its own answer; _ffa_report_verify runs every one in the body's
+# order for the two callers that hold no request of their own: Credit and the
+# held list's flags. Neither holds a copy of a check, so a check changed here
+# changes all three. The signature (_verify_ffa_hmac) and the service-account
+# check (_assert_no_service_subject) are shared the same way, by name.
+# Each check answers None when the report passes it.
+
+def _ffa_check_participants(report) -> str | None:
+    """Two or more distinct players, with the winner and the reporter among them."""
+    steams = [p.steam_id for p in report.players]
+    if len(set(steams)) != len(steams) or len(steams) < 2:
+        return "players"
+    if report.winner_steam_id not in set(steams):
+        return "winner"
+    if report.reported_by_steam_id not in set(steams):
+        return "reporter"
+    return None
+
+
+def _ffa_check_room(report) -> str | None:
+    """The report names a room."""
+    return None if (report.photon_room_id or "").strip() else "room"
+
+
+def _ffa_check_accounts(report, id_by_steam) -> str | None:
+    """Every player of the report has a live account (id_by_steam is read
+    with deleted accounts left out)."""
+    return None if len(id_by_steam) == len(report.players) else "accounts"
+
+
+def _ffa_check_roster(report, members, id_by_steam) -> str | None:
+    """The report covers exactly the lobby's frozen roster, which is not
+    empty, and its reporter is one of the report's live players."""
+    member_set = set(members)
+    if (not member_set or set(id_by_steam.values()) != member_set
+            or report.reported_by_steam_id not in id_by_steam):
+        return "roster"
+    return None
+
+
+def _ffa_check_count(report, lobby, members) -> str | None:
+    """The report's player count is the lobby's."""
+    if len(report.players) != int(lobby["player_count"] or len(members)):
+        return "count"
+    return None
+
+
+def _ffa_check_slots(report, members, id_by_steam) -> str | None:
+    """Every player sits in the lobby's slot for them; the first steam id
+    that does not, or None."""
+    slot_by_pid = {pid: i for i, pid in enumerate(members)}
+    for p in report.players:
+        if slot_by_pid.get(id_by_steam[p.steam_id]) != p.slot:
+            return p.steam_id
+    return None
+
+
+def _ffa_check_game_limit(lobby) -> str | None:
+    """The lobby has room for one more game."""
+    if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
+        return "limit"
+    return None
+
+
+def _ffa_lobby_kills_capable(lobby) -> bool:
+    return bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
+
+
+def _ffa_check_downgrade(canonical_form, lobby) -> str | None:
+    """A v1 signature is refused from a lobby whose roster signs v2."""
+    if canonical_form == "v1" and _ffa_lobby_kills_capable(lobby):
+        return "downgrade"
+    return None
+
+
+# The body's verifications, by name; the census test derives the body's set
+# from submit_ffa_match and compares it with this and with the runner.
+_FFA_REPORT_VERIFICATIONS = (
+    "_ffa_check_participants", "_ffa_check_room", "_ffa_check_accounts",
+    "_ffa_check_roster", "_ffa_check_count", "_ffa_check_slots",
+    "_ffa_score_shape_error", "_ffa_check_game_limit", "_ffa_check_downgrade",
+)
+
+
+def _ffa_report_verify(report, *, canonical_form, lobby, id_by_steam) -> str | None:
+    """Every check of _FFA_REPORT_VERIFICATIONS, in the body's order, on one
+    report and the lobby row as read; the first failing word, or None. Pure:
+    it reads nothing and writes nothing, so the list's flags call it as
+    they are and Credit calls it under its locks."""
+    members = list(lobby["member_ids"] or [])
+    word = (_ffa_check_participants(report) or _ffa_check_room(report)
+            or _ffa_check_accounts(report, id_by_steam)
+            or _ffa_check_roster(report, members, id_by_steam)
+            or _ffa_check_count(report, lobby, members))
+    if word:
+        return word
+    if _ffa_check_slots(report, members, id_by_steam) is not None:
+        return "slots"
+    if _ffa_score_shape_error(report, _ffa_lobby_config(lobby)["score_target"],
+                              len(report.players)):
+        return "shape"
+    return _ffa_check_game_limit(lobby) or _ffa_check_downgrade(canonical_form, lobby)
+
+
 def _ffa_with_settled(progress: dict, prior, named) -> dict:
     """The same progress, plus the number the recorded row holds -- but only
     when the report NAMED that number.
@@ -69156,9 +70100,9 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     the reporter is told that its account is not the one that was there.
 
     EVERY ANSWER GETS EXACTLY ONE DISPOSITION, AND THE TWO ARMS ARE DISJOINT BY
-    CONSTRUCTION. This helper has exactly two `raise` statements, and the side
-    of the re-derivation each one sits on IS the rule: the capture-failure arm
-    above it, and ONE terminal arm below it.
+    CONSTRUCTION. Past the replay guard at its top (QAPPLY-1, below), this
+    helper has two `raise` statements, and the side of the re-derivation each
+    sits on IS the rule: the capture-failure arm above it, ONE terminal below.
 
     THE TERMINAL ARM IS ONE STATEMENT ANSWERING TWO STATUSES — 409 for a
     lifecycle refusal, 403 for the signature downgrade — so "the two terminal
@@ -69190,7 +70134,14 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     is not merely dropped on the way out, it is never reachable from the
     response this arm builds, which is what makes the two arms disjoint by the
     shape of the code rather than by a rule somebody has to keep obeying.
-    This function always raises."""
+    This function always raises.
+
+    UNDER THE HELD-REPORT REPLAY (_QAPPLY_REPLAY set) it captures nothing:
+    the report is already held, and a capture would roll back the admin's
+    transaction. It raises the same status with the admin's sentence for
+    the word (_qapply_refusal_text) and writes nothing."""
+    if _QAPPLY_REPLAY.get() is not None:
+        raise _QapplyRefused(status, _qapply_refusal_text(reason, report, progress), progress)
     _kept = await _quarantine_report(
         db, mode="ffa", reason=reason, status_code=status,
         payload=report.model_dump(), group_id=lobby_uuid,
@@ -69262,12 +70213,25 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         raise HTTPException(422, "game_points_at_leave is required on every left_early entry "
                                  "that is not absent; missing for " + ", ".join(_missing_figure))
     _rdm_journal = _RDM_JOURNAL_MODE.get()
-    if _rdm_journal is None:
+    # QAPPLY-1: the held-report replay (an admin's Accept, no request). Each
+    # site that reads it is named in _QAPPLY_REPLAY's comment.
+    _qapply = _QAPPLY_REPLAY.get()
+    if _qapply is not None and _qapply.get("kind") != "accept":
+        raise RuntimeError("submit_ffa_match runs under the replay only for Accept")
+    # The session check and the lobby's due journal windows belong to a
+    # report from the network only: neither the journal settlement nor the
+    # replay carries a request.
+    if _rdm_journal is None and _qapply is None:
         await _check_steam_session(request, report.reported_by_steam_id, db)
         await _ffa_settle_due_windows_for_report(db, report.lobby_id)
     canonical_form = _verify_ffa_hmac(report)
     if not canonical_form:
         raise HTTPException(403, "Invalid FFA match signature")
+    # Bans part 2a (S4, BAN-R5): on both paths (a request, and a journaled
+    # payload settled with none), a report whose reporter or any listed player
+    # is actively banned is refused before anything is written.
+    await _ban_lock_and_gate(db, [p.steam_id for p in report.players], request,
+                             actor=report.reported_by_steam_id)
     # Two INDEPENDENT facts derived from the verified form:
     #   kills_in_canonical — the kills values are covered by the signature
     #     (v2 form). Three things read it: the absent-refutation guard, the
@@ -69292,14 +70256,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid lobby_id format")
     steams = [p.steam_id for p in report.players]
-    if len(set(steams)) != len(steams) or len(steams) < 2:
+    _who = _ffa_check_participants(report)
+    if _who == "players":
         raise HTTPException(400, "Need at least two distinct players")
-    if report.winner_steam_id not in set(steams):
+    if _who == "winner":
         raise HTTPException(400, "Winner is not among the players")
-    if report.reported_by_steam_id not in set(steams):
+    if _who == "reporter":
         raise HTTPException(400, "Reporter is not a participant")
     await _assert_no_service_subject(db, affected_steam_ids=steams)
-    if not (report.photon_room_id or "").strip():
+    if _ffa_check_room(report):
         raise HTTPException(400, "photon_room_id is required")
     # §6 casual path: the ranked AUTHORITY is the LOBBY ROW alone, decided
     # below the lobby lock as `rated = _lobby_ranked`; the report's is_ranked
@@ -69333,6 +70298,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
+    # QAPPLY-1 (F1): under the replay, the game's claim is the first check
+    # below the lobby lock, read for the game the report is of
+    # (_qapply_game_of): a game that a Credit paid from a sibling held row is
+    # refused as credited, and one an Accept applied as recorded, before any
+    # check that a later write to the lobby moves (the game number, the
+    # gate's pace anchor, the game limit).
+    if _qapply is not None:
+        _claim = await _qapply_claim_of(db, lobby_uuid, _qapply_game_of(report, _expected_game))
+        if _claim is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS[
+                "game_credited" if _claim == "credit" else "recorded"], {})
     # The early lookup preserves validation order, but it cannot authorize a
     # journal or settlement after waiting for this lobby lock.  Rebuild the
     # complete participant map from live identities below the lock so account
@@ -69342,7 +70318,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             Player.steam_id.in_(steams), Player.deleted_at.is_(None))
     )).all()
     id_by_steam = {r.steam_id: r.id for r in prows}
-    if len(id_by_steam) != len(steams):
+    if _ffa_check_accounts(report, id_by_steam):
         raise HTTPException(404, "One or more players not registered")
     # V3 P3: a journaled payload settles only while its window is open and it
     # is still the report the class order chooses, re-checked under the lobby
@@ -69383,7 +70359,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # duplicate comparison does not take this flag: it takes
     # kills_in_canonical, because a kills difference is settlement-deciding
     # wherever kills are signed and not only where they break a tie.
-    _lobby_kills_capable = bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
+    _lobby_kills_capable = _ffa_lobby_kills_capable(lobby)
     kills_break_ties = kills_in_canonical and _lobby_kills_capable
     # Duplicate-room replay FIRST — before the status/shape/limit branches
     # below, every one of which quarantines (Codex Aug-3 r4 find 1: an honest
@@ -69441,10 +70417,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         #   * both bind -> the lifecycle refusal, which does the same. Round 2
         #     ignored the capture's answer here, so a report that hit the
         #     pending bound was answered 409 "kept" with nothing kept.
-        _roster_bound = (member_set
-                         and reported_ids == member_set
-                         and report.reported_by_steam_id in id_by_steam)
-        if not _roster_bound:
+        if _ffa_check_roster(report, members, id_by_steam):
             raise FfaReportRefusal(403, "Report must cover exactly the lobby roster",
                                    _progress)
         _closed_shape = _ffa_score_shape_error(report, _score_target,
@@ -69455,11 +70428,21 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 reason="score_shape_mismatch",
                 why=f"target={_score_target} (lobby {lobby['status']}): {_closed_shape}",
                 detail=_closed_shape, progress=_progress)
-        await _ffa_record_and_refuse(
-            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
-            reason=f"lobby_{lobby['status']}",
-            why=f"lobby status is {lobby['status']}",
-            detail="Lobby is not active", progress=_progress)
+        # QAPPLY-1: under the replay a closed lobby whose word is served
+        # (lobby_completed, lobby_canceled) goes on to every check below;
+        # any other status keeps today's refusal (without a capture).
+        if _qapply is None or f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
+            await _ffa_record_and_refuse(
+                db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
+                reason=f"lobby_{lobby['status']}",
+                why=f"lobby status is {lobby['status']}",
+                detail="Lobby is not active", progress=_progress)
+    elif _qapply is not None:
+        # QAPPLY-1: the replay applies a game only to a CLOSED lobby. A live
+        # sitting's next report names the number this game would take, and
+        # a live lobby's admission expiry, above, writes its seats' queue
+        # rows and leases; this refusal rolls both back with the rest.
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["lobby_open"], _progress)
     # Roster validation (review finds 1/3): member_ids is the lock-time roster
     # ORDERED BY SLOT (queue rows get pruned; this array doesn't). The report
     # must cover the roster EXACTLY — a subset would let a hostile reporter
@@ -69474,17 +70457,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,
             reason="ffa_lobby_no_roster", why="lobby row carries no member_ids",
             detail="Lobby has no recorded roster", progress=_progress)
-    if reported_ids != member_set:
+    # (The reporter is a live player of the report here: the participant and
+    # account checks above refused every other report.)
+    if _ffa_check_roster(report, members, id_by_steam):
         raise FfaReportRefusal(403, "Report must cover exactly the lobby roster",
                                _progress)
-    if len(report.players) != int(lobby["player_count"] or len(members)):
+    if _ffa_check_count(report, lobby, members):
         raise FfaReportRefusal(403, "Report player count does not match the lobby",
                                _progress)
-    slot_by_pid = {pid: i for i, pid in enumerate(members)}
-    for p in report.players:
-        pid = id_by_steam[p.steam_id]
-        if slot_by_pid.get(pid) != p.slot:
-            raise FfaReportRefusal(403, f"Slot mismatch for {p.steam_id}", _progress)
+    _slot_bad = _ffa_check_slots(report, members, id_by_steam)
+    if _slot_bad is not None:
+        raise FfaReportRefusal(403, f"Slot mismatch for {_slot_bad}", _progress)
     # Engine invariants (review find 2): the winner holds the unique round
     # maximum, and a complete game of this lobby ends at its frozen score
     # target — or at the module default, which is what a client that missed
@@ -69560,7 +70543,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # Rate ceiling: a lobby's games are real matches taking minutes each. This
     # bounds a compromised client's fabrication rate even inside a live lobby
     # (a full server-issued per-game nonce is the next hardening step).
-    if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
+    if _ffa_check_game_limit(lobby):
         # Status-checked like every other terminal refusal here: round 2 threw
         # the capture's answer away, so a report arriving once the per-group
         # pending bound was full got a 409 that said "kept" over nothing kept.
@@ -69583,7 +70566,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # capture itself runs in its own transaction after a rollback, so no lock
     # is held across it. Quarantined, not dropped, so the vanishing-rare
     # honest case (mid-sitting DLL downgrade) stays admin-recoverable.
-    if canonical_form == "v1" and _lobby_kills_capable:
+    if _ffa_check_downgrade(canonical_form, lobby):
         # 403, and status-checked for the same reason the 409s are: the client's
         # outbox spends the report either way, so an answer that depends on the
         # capture having happened must ask whether it did.
@@ -69698,6 +70681,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # open and it is still the report the class order chooses.
     _rdm_settle = None
     _rdm_on = await _asm_readmit_on(db, lobby)
+    if _rdm_on and _qapply is not None:
+        # QAPPLY-1 (R13): a readmission lobby's reports settle through its
+        # journal; the replay refuses it before that branch, which would
+        # journal the held body and commit.
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], _progress)
     if _rdm_on:
         _rdm_gate = await _ffa_report_gate(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=_game_number, report=report,
@@ -69717,6 +70705,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         await db.execute(text(
             "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
         ), {"pid": pid})
+    # QAPPLY-1 (R4): the replay's gate, locked form, after the players pass,
+    # on rows read again under those locks (#208). It refuses unless no
+    # participant has a later result and every participant's FFA rating is
+    # as the last recorded game left it.
+    if _qapply is not None:
+        await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=_game_number,
+                           player_ids=reported_ids, received_at=_qapply["received_at"],
+                           locked=True, progress=_progress)
 
     # Server-side placements: (rounds desc, points desc, kills desc); ties
     # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
@@ -69864,7 +70860,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # payable elapsed, defeating the pace ceiling. clock_timestamp() here runs
     # after the lobby lock above, and the identical value is bound into the
     # INSERT, so the next report's anchor is exactly this report's meter end.
-    _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
+    # QAPPLY-1 (R5): under the replay the clock is the held row's created_at,
+    # a server time at the report's receipt, which the gate has already
+    # checked is not earlier than this lobby's previous game.
+    if _qapply is not None:
+        _now_dt = _qapply["received_at"]
+    else:
+        _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
     _anchor = max(_anchor_candidates) if _anchor_candidates else _now_dt
     elapsed_seconds = max(30.0, (_now_dt - _anchor).total_seconds())
     paid_battles = _ffa_paid_battles(battles_total, elapsed_seconds, _n_live_meter)
@@ -69904,6 +70906,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                "es": int(elapsed_seconds), "endts": _now_dt})
     except IntegrityError as ie:
         await db.rollback()
+        # QAPPLY-1: under the replay a rollback ends the admin's action; it
+        # answers a refusal and writes nothing more (no re-lock, no echo).
+        if _qapply is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS["insert_race"], {})
         # EVERY answer from here down re-reads the progress, because the
         # rollback released the lobby's lock and `_progress` is now a snapshot
         # from before it. Taken ONCE, above the branch, so the failure path
@@ -69961,6 +70967,9 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # connection mid-statement, a statement timeout) takes the same answer
         # for the same reason — the transaction is rolled back either way.
         await db.rollback()
+        if _qapply is not None:
+            # QAPPLY-1: the same end as the arm above, with the retry status.
+            raise _QapplyRefused(503, _QAPPLY_TEXTS["insert_failed"], {})
         _fail_progress = await _ffa_progress_relocked(db, lobby_uuid)
         print(f"[FFA-REPORT] insert refused by the database for lobby "
               f"{lobby_uuid} game {_game_number} — nothing committed: "
@@ -70044,42 +71053,29 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # IN this game — roster ghosts must not inflate the rate OR reach the
         # pace ceiling by roster padding.
         n_live = len(report.players) - len(unrated)
-        # Opponent-tier factor, NORMALISED to the x1.5 calibration field:
-        # FFA_G_PER_PLAYER_MIN is calibrated "at tier x1.5" (the default-1500
-        # field — learning #258), so the typical ranked lobby takes factor 1.0
-        # and a Grand-Master field roughly doubles the rate. `pre` is only
-        # populated for ranked games, so an unranked FFA takes tier 1.0 →
-        # factor ≈0.67, preserving "casual pays less than ranked".
+        # The amounts are _ffa_game_awards' (QAPPLY-1: the Credit route calls
+        # the same helper). `pre` is only populated for ranked games, so an
+        # unranked FFA has no opponent ratings and takes tier 1.0.
         opp_ratings = [pre[s][0] for s in pre
                        if s != sid_ and s not in unrated]
-        tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
-                     if opp_ratings else 1.0)
-        pool = (_ffa_battle_rate(n_live) * paid_battles
-                * _ffa_pool_shape(place, beaten, n_live)
-                * (tier_mult / 1.5))
-        xp = max(FFA_MIN_XP, int(round(pool * FFA_XP_SHARE * 100)))
+        _aw = _ffa_game_awards(place=place, beaten=beaten, n_live=n_live,
+                               paid_battles=paid_battles, opp_ratings=opp_ratings)
+        xp = _aw["xp"]
         row = (await db.execute(text(
             "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp,"
             "       ffa_xp_earned = COALESCE(ffa_xp_earned,0) + :xp"
             " WHERE id = :pid"
             " RETURNING total_xp AS new_xp, (COALESCE(total_xp,0) - :xp) AS old_xp"
         ), {"xp": xp, "pid": pid})).mappings().first()
-        new_xp = row["new_xp"] if row else xp
         old_xp = row["old_xp"] if row else 0
-        gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
-        # Flat 55% half, FLOORED AT 1g (§5c correction 3): the ffa_placement
-        # ledger row is the back-pay idempotency marker, so a live player must
-        # ALWAYS produce one — a zero-rounded payout would suppress the row
-        # and a later 164 rerun would back-pay this game at the legacy rate.
-        place_gold = max(1, int(round(pool * (1.0 - FFA_XP_SHARE))))
-        # Level-reward gold (bug #117 audit item: `_maybe_grant_level_rewards`
-        # is called from submit_match and inlined in the 2v2 path, but FFA had
-        # NO level rewards at all — an FFA-only player banked nothing for
-        # dinging. Inlined here because we hold `pid`, not an ORM object.)
-        old_lvl, _, _ = level_from_xp(old_xp)
-        new_lvl, _, _ = level_from_xp(new_xp)
-        level_gold = (sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
-                      if new_lvl > old_lvl else 0)
+        # The XP drip gold and the level-reward gold read the XP total as the
+        # UPDATE above found it.
+        _aw = _ffa_game_awards(place=place, beaten=beaten, n_live=n_live,
+                               paid_battles=paid_battles, opp_ratings=opp_ratings,
+                               old_xp=old_xp)
+        gold_delta = _aw["xp_gold"]
+        place_gold = _aw["place_gold"]
+        level_gold = _aw["level_gold"]
         # ONE players UPDATE per player: the canonical tuple-lock order
         # (#197/#202) must not gain a second write site inside the loop.
         total_gold = gold_delta + place_gold + level_gold
@@ -70575,6 +71571,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                          _rdm_settle, match_id)
     await _asm_report_entered(db, lobby, lobby_uuid, _game_number)
     await _ffa_advance_lobby_slot(db, lobby_uuid)
+    if _qapply is not None:
+        # QAPPLY-1 (R7, G4): the held row's status and the moderator record,
+        # in this transaction, before its one commit.
+        await _qapply_finish(db, _qapply, lobby_uuid=lobby_uuid, match_id=match_id,
+                             game=_game_number, player_ids=reported_ids)
     await db.commit()
     for _asm_line in _asm_log_expired(lobby_uuid, _asm_rep_expired):
         print(_asm_line)
@@ -71780,7 +72781,7 @@ async def place_ffa_bet(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id])
 
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
@@ -72122,8 +73123,14 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
     return n
 
 
-async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str) -> int:
+async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str,
+                            bettor=None) -> int:
     """Refund every OPEN wager on a lobby that died WITHOUT ever starting.
+
+    With `bettor` (a players.id), only that account's own open wagers on the
+    lobby: the ban's step for a banned member of a lobby that stays (BAN-R21:
+    the account keeps no wager of that lobby). The lobby is not dissolved and
+    every other wager on it stays live.
 
     Runs inside the CALLER's transaction, inside a savepoint: a refund problem
     must never take down the disband/abandon/deletion that called it (#187),
@@ -72149,10 +73156,12 @@ async def _refund_lobby_bets(db: AsyncSession, mode: str, lobby_id, reason: str)
             rows = (await db.execute(text("""
                 SELECT id, player_id FROM lobby_bets
                  WHERE mode = :m AND lobby_id = :l AND status = 'open'
+                   AND (CAST(:b AS uuid) IS NULL OR player_id = CAST(:b AS uuid))
                  ORDER BY created_at, id
                  LIMIT 100
                  FOR NO KEY UPDATE
-            """), {"m": mode, "l": lobby_id})).mappings().all()
+            """), {"m": mode, "l": lobby_id,
+                    "b": str(bettor) if bettor is not None else None})).mappings().all()
             await _assert_no_service_subject(
                 db, affected_player_ids=[r["player_id"] for r in rows])
             for row in rows:
@@ -72439,7 +73448,7 @@ async def place_lobby_bet(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    await _check_ban_or_raise(db, steam_id)
+    await _ban_lock_and_gate(db, [steam_id], exclusive=[steam_id])
 
     # Validate mode against the closed set BEFORE it reaches any interpolated
     # SQL (#188).
@@ -72895,6 +73904,18 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_team_hmac(report):
         raise HTTPException(403, "Invalid team match signature")
+    # Bans part 2a (S4, BAN-R5): refused before it is journaled or settled
+    # when the reporter or any of the four is actively banned.
+    # Not under the identity lock on purpose: the report window's receipt
+    # takes the EXCLUSIVE identity guards of the whole game next
+    # (_guard_identities), and a shared key taken here would have to become
+    # exclusive there, so two reporters of one game would wait for each other
+    # until the server ended one report. The reads that hold come after it:
+    # the receipt reads the ban of every account the report names under those
+    # guards, before its first write (_report_window_receive), and the settle
+    # reads it again under its own (_settle_writer_ban_check).
+    await _ban_gate_any_or_raise(db, report.reported_by_steam_id,
+                                 _report_steams("team", report), request)
     _windowed = await _report_window_receive(db, "team", report)
     if _windowed is not None:
         return _windowed
@@ -72915,6 +73936,9 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
     steams = {report.t1a.steam_id, report.t1b.steam_id, report.t2a.steam_id, report.t2b.steam_id}
     if len(steams) != 4:
         raise HTTPException(400, "All four players must be distinct")
+    # Bans part 2a (F1): the writer's own check, under the identity locks,
+    # before the series row lock below.
+    await _settle_writer_ban_check(db, steams, report.reported_by_steam_id, in_window=in_window)
     await _assert_no_service_subject(db, affected_steam_ids=steams)
     if report.t1_rounds_won == report.t2_rounds_won:
         raise HTTPException(400, "Match must have a winner")
@@ -72952,6 +73976,8 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
         # incident class (a live series cancelled mid-game) always leaves the
         # row behind, so nothing recoverable is lost by rejecting outright.
         raise HTTPException(404, "team_series not found")
+    # Bans part 2a (F1 b): a series the ban void ended records and pays nothing.
+    _refuse_record_ended_by_ban(series, in_window)
     await _assert_no_service_subject(
         db, affected_player_ids=[series["t1a_id"], series["t1b_id"],
                                  series["t2a_id"], series["t2b_id"]])
@@ -74776,20 +75802,813 @@ async def _quarantine_later_rated(db, mode: str, player_ids, since) -> tuple:
 
 
 async def _quarantine_later_rated_count(db, mode: str, player_ids, since) -> int:
-    """The accept gate's count (_quarantine_later_rated's first number), for
-    the accept route and the triage view's c1."""
+    """The count of later rated results (_quarantine_later_rated's first
+    number), for the triage view's c1."""
     return (await _quarantine_later_rated(db, mode, player_ids, since))[0]
 
 
 def _quarantine_accept_verdict(results: int, players: int) -> tuple:
     """(can_accept, the blocked reason in words) from _quarantine_later_rated.
-    The ONE computation the Admin list and the digest feed both call, so the
-    two can never say different things about one row."""
+    No production caller since QAPPLY-1: the Admin list and the digest feed
+    both read _qapply_verdict, so the two still say one thing per row."""
     if not results:
         return True, ""
     who = max(int(players or 0), 1)
     return False, (f"{who} player{'s have' if who != 1 else ' has'} played rated games since; "
                    "adding this game now would need a full replay")
+
+
+# ── QAPPLY-1: Accept applies a held FFA report; Credit pays without ratings ──
+# Two admin actions on a held FFA report (match_report_quarantine):
+#   * Accept replays the held body through submit_ffa_match under
+#     _QAPPLY_REPLAY (_qapply_run), so every check and effect of a network
+#     report runs on it, in one transaction, at the held row's own receipt
+#     time. It applies only when the gate (_qapply_gate) passes: no
+#     participant has a later FFA result and every participant's FFA rating
+#     is as the last recorded game left it.
+#   * Credit pays each participant the XP and the gold that settlement would
+#     have paid (_ffa_game_awards), moves no rating, and is refused when the
+#     gate and the game number would both let Accept apply the row now.
+# Both serve only the words of _QAPPLY_SERVABLE_REASONS, refuse team rows and
+# readmission lobbies, and write their moderator record through
+# _modlog_write in the same transaction as their effects.
+#
+# THE LOCK ORDER: the held row (FOR UPDATE), the lobby (FOR NO KEY UPDATE),
+# the participants' players rows in str(id) order (FOR NO KEY UPDATE), then,
+# under Accept only, their glicko_ratings_ffa rows in that order (FOR UPDATE).
+# Every other path that locks or writes a held row takes no lobby, player or
+# rating lock while holding it: the discard route and the janitor's filing
+# write the held row alone (the janitor with SKIP LOCKED); the triage and
+# digest reads take no row lock; the capture (_quarantine_report) reads held
+# rows with no row lock and inserts new ones, under an advisory lock on the
+# group (outside a journal window it first rolls the report's transaction
+# back, releasing its lobby lock).
+
+# The reason words both actions serve; every other word, a word added later
+# included, is refused and the row stays held.
+_QAPPLY_SERVABLE_REASONS = frozenset({"lobby_completed", "lobby_canceled", "ffa_game_number_mismatch"})
+
+# Part 2 of the gate compares glicko_ratings_ffa.rating with a row's
+# rating_after, both DOUBLE PRECISION. Settlement stores rating = the new
+# rating and rating_after = rating_before + rating_change, where
+# rating_change is rounded to 0.1, so the two differ by at most 0.05 on a row
+# a real settle wrote; the comparison allows that and a little float error.
+_QAPPLY_RATING_TOLERANCE = 0.051
+
+# Every sentence an admin can receive from the list, Accept and Credit of
+# this lane: plain words and numbers, at most 180 characters with the widest
+# numbers the code formats into them (the released client cuts there).
+_QAPPLY_TEXTS = {
+    "not_found": "This held report was not found.",
+    "reviewed": "This held report was already reviewed.",
+    "held_credited": "This held report was already credited.",
+    "held_applied": "This held report was already applied as a match.",
+    "settled_by_hand": ("This lobby is from before 31 Jul 2026. Its lost games were settled by hand, "
+                        "so this report cannot be applied. Discard it."),
+    "team": "Only FFA reports can be applied or credited; this report stays held.",
+    "word": "This report was held for a reason that is never applied or credited; discard it if it is not needed.",
+    "body": "The stored report cannot be read, so it cannot be applied or credited.",
+    "unsigned": "The stored report's signature does not check out, so it cannot be applied or credited.",
+    "no_lobby": "The lobby of this report no longer exists, so it cannot be applied or credited.",
+    "readmit": "This lobby used seat readmission; its held reports cannot be applied or credited yet.",
+    "lobby_open": "This lobby is still open; Accept and Credit work on this report once the lobby has closed.",
+    "lobby_state": "This lobby's state does not allow the game to be applied or credited.",
+    "service": "A player of this report is a service account, so it cannot be applied or credited.",
+    "account": "A player of this report no longer has an account, so it cannot be applied or credited.",
+    "roster": "The report's players or seats are not this lobby's roster, so it cannot be applied or credited.",
+    "shape": "The report's score is not a complete game, so it cannot be applied or credited.",
+    "incomplete": "The stored report is not a complete game report, so it cannot be applied.",
+    "leave_figure": "The report lacks a leaver's score at the time they left, so it cannot be applied or credited.",
+    "limit": "The lobby already holds its maximum number of games, so this game cannot be applied or credited.",
+    "downgrade": "The report uses an old signature this lobby does not accept, so it cannot be applied or credited.",
+    "reporter": "The player who sent this report could not report this game, so it cannot be applied or credited.",
+    "recorded": "This game is already recorded; there is nothing to apply or credit. Discard this report.",
+    "other_lobby": "This game's room is recorded under another lobby; discard this report.",
+    "clock": ("This report was received before the lobby's previous game ended, "
+              "so it cannot be applied or credited here; it stays held."),
+    "later": ("{n} of its players played a later game, so this game cannot be applied now. "
+              "Credit can pay its XP and gold."),
+    "rating": ("{n} of its players have a rating that changed outside a recorded game, so this game "
+               "cannot be applied now. Credit can pay its XP and gold."),
+    "ahead": "This report is game {tail}; the lobby is on game {next}. Apply game {next} of this lobby first.",
+    "behind": ("This report is game {tail}, a number the lobby has passed, so it cannot be applied. "
+               "Credit can pay its XP and gold."),
+    "no_number": "This report names no game number, so it cannot be applied or credited.",
+    "insert_race": "Another account of this game was recorded at the same moment; nothing was applied. Refresh the list.",
+    "insert_failed": "The server could not record this game; nothing was applied. Try again.",
+    "wagers": "This game's wagers could not be settled; nothing was applied. Try again.",
+    "retry": "The server could not finish this action now; nothing was changed. Try again.",
+    "busy": ("Another request is using this game's players or lobby, so the action stopped at its time "
+             "limit; nothing was changed. Try again in a moment."),
+    "bad_id": "This held report's id is not valid, so nothing was changed.",
+    "note": "The note holds characters that cannot be stored; remove them and try again.",
+    "admin": "This action needs an admin account and a valid admin signature; nothing was changed.",
+    "refused": "The server refused to apply this report; it stays held.",
+    "can_accept": "Accept can apply this game now, with its ratings; use Accept instead of Credit.",
+    "credited_before": "This report's XP and gold were already credited.",
+    "game_credited": "This game was already credited from another held report of it, so it cannot be applied.",
+    "game_applied": ("This game was already applied from another held report of it; there is nothing to "
+                     "credit. Discard this report."),
+    "game_paid": ("This game was already credited from another held report of it; it is not paid twice. "
+                  "Discard this report."),
+    "claimed": "This game was already applied or credited from another held report; nothing was changed.",
+    "sibling_credited": ("Another held report of this lobby was credited as game {g}; credit this one only "
+                         "if it is a different game."),
+}
+
+# Which sentence each word of _ffa_report_verify carries in Credit and in the
+# list's flags.
+_QAPPLY_CHECK_TEXT = {
+    "players": "incomplete", "winner": "incomplete", "reporter": "reporter", "room": "incomplete",
+    "accounts": "account", "roster": "roster", "count": "roster", "slots": "roster",
+    "shape": "shape", "limit": "limit", "downgrade": "downgrade",
+}
+
+# Which sentence a refusal of the body's capture helper carries under the
+# replay, by the word it would have stored. ffa_game_number_mismatch is
+# _qapply_number_text's.
+_QAPPLY_WORD_TEXT = {
+    "score_shape_mismatch": "shape",
+    "ffa_lobby_no_roster": "roster",
+    "lobby_game_limit": "limit",
+    "v1_canonical_downgrade": "downgrade",
+    "ffa_game_contradiction": "recorded",
+    "ffa_replay_roster_mismatch": "recorded",
+    "ffa_room_other_lobby": "other_lobby",
+    "late_reporter": "reporter",
+    "left_reporter": "reporter",
+    "lag_reporter": "reporter",
+}
+
+# The body's own refusals (HTTPException detail -> sentence), for the route's
+# answer. A detail outside this table answers "refused" (a 5xx "retry").
+_QAPPLY_BODY_TEXT = {
+    "Invalid FFA match signature": "unsigned",
+    "Invalid lobby_id format": "incomplete",
+    "Need at least two distinct players": "incomplete",
+    "Winner is not among the players": "incomplete",
+    "Reporter is not a participant": "incomplete",
+    "photon_room_id is required": "incomplete",
+    "One or more players not registered": "account",
+    "Lobby not found": "no_lobby",
+    "service_account_forbidden": "service",
+    "Report must cover exactly the lobby roster": "roster",
+    "Report player count does not match the lobby": "roster",
+    "Lobby is not active": "lobby_state",
+    "Could not settle this game's wagers - retry": "wagers",
+}
+
+
+class _QapplyRefused(FfaReportRefusal):
+    """A refusal raised under the held-report replay. Its detail is already
+    an admin's sentence (_QAPPLY_TEXTS); the route answers it as raised."""
+
+
+def _qapply_number_text(tail, expected: int) -> str:
+    """The sentence for a report whose game number is not the lobby's next."""
+    if tail is None:
+        return _QAPPLY_TEXTS["no_number"]
+    if int(tail) > int(expected):
+        return _QAPPLY_TEXTS["ahead"].format(tail=int(tail), next=int(expected))
+    return _QAPPLY_TEXTS["behind"].format(tail=int(tail))
+
+
+def _qapply_refusal_text(reason: str, report, progress) -> str:
+    """The admin's sentence for a refusal of the body's capture helper under
+    the replay (the word it would have stored)."""
+    if reason == "ffa_game_number_mismatch":
+        return _qapply_number_text(_ffa_room_game_no(report.photon_room_id),
+                                   int((progress or {}).get("expected_game") or 0))
+    if reason.startswith("lobby_"):
+        return _QAPPLY_TEXTS["lobby_state"]
+    return _QAPPLY_TEXTS[_QAPPLY_WORD_TEXT.get(reason, "refused")]
+
+
+def _qapply_answer(ex: HTTPException) -> HTTPException:
+    """The route's answer for a refusal out of the body or the credit path:
+    the same status, with an admin's sentence. The service-policy wait of
+    _qapply_service_ready is answered as raised, with its Retry-After."""
+    if isinstance(ex, _QapplyServiceWait):
+        return ex
+    if isinstance(ex, _QapplyRefused):
+        return HTTPException(ex.status_code, str(ex.detail))
+    d = str(ex.detail)
+    key = _QAPPLY_BODY_TEXT.get(d)
+    if key is None and d.startswith("Slot mismatch for "):
+        key = "roster"
+    if key is None and d.startswith("game_points_at_leave is required"):
+        key = "leave_figure"
+    if key is None:
+        key = "retry" if ex.status_code >= 500 else "refused"
+    return HTTPException(ex.status_code, _QAPPLY_TEXTS[key])
+
+
+# The held row as both actions read it: locked, with its body as text bound
+# by the same size limit as the QDIG reader (_qdig_read_body).
+_QAPPLY_SQL_HELD = """
+    SELECT q.id, q.mode, q.reason, q.group_id, q.photon_room_id, q.player_ids, q.status,
+           q.created_at,
+           CASE WHEN octet_length(q.payload::text) <= CAST(:body_max AS bigint)
+                THEN q.payload::text END AS payload,
+           octet_length(q.payload::text) > CAST(:body_max AS bigint) AS payload_oversize,
+           false AS payload_unread
+      FROM match_report_quarantine q
+     WHERE q.id = CAST(:qid AS uuid)
+       FOR UPDATE
+"""
+# The lobby as the read form sees it, with no lock.
+_QAPPLY_SQL_LOBBY_READ = """
+    SELECT l.*,
+           (SELECT COALESCE(MAX(m.game_number), 0) FROM ffa_matches m WHERE m.lobby_id = l.id) AS highest
+      FROM ffa_lobbies l
+     WHERE l.id = CAST(:lid AS uuid)
+"""
+# Has this game been recorded: its room, or the number it names in its lobby.
+_QAPPLY_SQL_RECORDED = """
+    SELECT EXISTS (SELECT 1 FROM ffa_matches m WHERE m.photon_room_id = CAST(:room AS varchar))
+        OR EXISTS (SELECT 1 FROM ffa_matches m
+                    WHERE m.lobby_id = CAST(:lid AS uuid)
+                      AND m.game_number = CAST(:g AS smallint))
+"""
+# Gate part 1: the participants' FFA rows of games that ended after T, of
+# every kind (ranked, casual, invalidated).
+_QAPPLY_SQL_LATER = """
+    SELECT COUNT(*) AS n, COUNT(DISTINCT f.player_id) AS players
+      FROM ffa_match_players f
+      JOIN ffa_matches m ON m.id = f.match_id
+     WHERE f.player_id = ANY(CAST(:pids AS uuid[]))
+       AND m.ended_at > CAST(:t AS timestamptz)
+"""
+# Gate part 2: the participants whose stored FFA rating is not the
+# rating_after of their last rated FFA row at or before T (or who have a
+# rating row and no such row, or such a row and no rating row).
+_QAPPLY_SQL_DRIFT = """
+    SELECT COUNT(*) FROM (
+        SELECT (SELECT g.rating FROM glicko_ratings_ffa g WHERE g.player_id = p.pid) AS stored,
+               (SELECT f.rating_after
+                  FROM ffa_match_players f
+                  JOIN ffa_matches m ON m.id = f.match_id
+                 WHERE f.player_id = p.pid AND f.rating_after IS NOT NULL
+                   AND m.ended_at <= CAST(:t AS timestamptz)
+                 ORDER BY m.ended_at DESC, m.id DESC
+                 LIMIT 1) AS last_after
+          FROM unnest(CAST(:pids AS uuid[])) AS p(pid)) s
+     WHERE NOT ((s.stored IS NULL AND s.last_after IS NULL)
+                OR (s.stored IS NOT NULL AND s.last_after IS NOT NULL
+                    AND abs(s.stored - s.last_after) <= CAST(:tol AS double precision)))
+"""
+# The rating rows, locked one by one in str(id) order (the body's statement).
+_QAPPLY_SQL_LOCK_RATING = "SELECT 1 FROM glicko_ratings_ffa WHERE player_id = :pid FOR UPDATE"
+# Credit's tier ratings: each participant's rating_before on their first
+# rated FFA row after T, and the stored rating.
+_QAPPLY_SQL_TIER = """
+    SELECT p.pid,
+           (SELECT f.rating_before
+              FROM ffa_match_players f
+              JOIN ffa_matches m ON m.id = f.match_id
+             WHERE f.player_id = p.pid AND f.rating_before IS NOT NULL
+               AND m.ended_at > CAST(:t AS timestamptz)
+             ORDER BY m.ended_at, m.id
+             LIMIT 1) AS first_before,
+           (SELECT g.rating FROM glicko_ratings_ffa g WHERE g.player_id = p.pid) AS stored
+      FROM unnest(CAST(:pids AS uuid[])) AS p(pid)
+"""
+# A credit receipt already on file for this held row.
+_QAPPLY_SQL_RECEIPT = """
+    SELECT EXISTS (SELECT 1 FROM gold_transactions WHERE reference_id = CAST(:qid AS varchar))
+"""
+# Migration 168 paid lost FFA games of 2026-07-30 by hand, outside a recorded
+# match and outside the hold, so no match row, held row or claim names them,
+# and a claim row (one held row, one game number) could not cover a lobby.
+# Accept and Credit therefore refuse EVERY held FFA report of a lobby made
+# before the end of that UTC day, read from the lobby row's created_at; a
+# lost game of such a lobby is settled by a migration, as 168 did.
+_QAPPLY_LOBBY_SETTLED_BEFORE = datetime(2026, 7, 31, tzinfo=timezone.utc)
+_QAPPLY_SQL_LOBBY_BEFORE_168 = """
+    SELECT created_at < CAST(:bound AS timestamptz) FROM ffa_lobbies WHERE id = CAST(:lid AS uuid)
+"""
+# The kind of the claim made FROM one held row (M1), or none.
+_QAPPLY_SQL_CLAIM_OF_ROW = """
+    SELECT kind FROM ffa_game_claims WHERE quarantine_id = CAST(:qid AS uuid) LIMIT 1
+"""
+# The game's claim (migration 426): one row per lobby and game number that an
+# Accept applied or a Credit paid from a held report. Read under the lobby's
+# row lock by both actions; the insert takes the key or returns nothing.
+_QAPPLY_SQL_CLAIM_READ = """
+    SELECT kind FROM ffa_game_claims
+     WHERE lobby_id = CAST(:lid AS uuid) AND game_number = CAST(:g AS smallint)
+"""
+_QAPPLY_SQL_CLAIM = """
+    INSERT INTO ffa_game_claims (lobby_id, game_number, kind, quarantine_id)
+    VALUES (CAST(:lid AS uuid), CAST(:g AS smallint), CAST(:kind AS text), CAST(:qid AS uuid))
+    ON CONFLICT ON CONSTRAINT pk_ffa_game_claims DO NOTHING
+    RETURNING game_number
+"""
+# The credited games of a lobby, for the list's sentence about a sibling row.
+_QAPPLY_SQL_EXISTS = "SELECT EXISTS (SELECT 1 FROM match_report_quarantine WHERE id = CAST(:qid AS uuid))"
+_QAPPLY_SQL_CLAIMS_CREDITED = """
+    SELECT game_number FROM ffa_game_claims
+     WHERE lobby_id = CAST(:lid AS uuid) AND kind = 'credit'
+     ORDER BY game_number
+"""
+# The bounds of Accept's and Credit's one transaction (FIX-1). In the
+# database: a lock wait ends at lock_timeout and a statement, its lock waits
+# included, at statement_timeout, both set transaction-local (is_local true)
+# as the transaction's first statement, before the admin check's read and the
+# held row's lock. In the
+# process: the whole unit, the COMMIT included (which neither database bound
+# covers), ends at _QAPPLY_DEADLINE_S. Either end rolls back and answers the
+# "busy" sentence with nothing written, also when a best-effort block of the
+# body caught the database bound's error (F6: the unit's mark, read before
+# each commit the unit reaches). A player's report that waits on a row
+# one of these actions holds therefore waits at most the deadline.
+_QAPPLY_LOCK_TIMEOUT_MS = 2000
+_QAPPLY_STATEMENT_TIMEOUT_MS = 5000
+_QAPPLY_DEADLINE_S = 8.0
+_QAPPLY_SQL_BOUNDS = ("SELECT set_config('lock_timeout', CAST(:lt AS text), true), "
+                      "set_config('statement_timeout', CAST(:st AS text), true)")
+
+
+async def _qapply_bound(db) -> None:
+    """The two database bounds, set before the first lock (see above)."""
+    await db.execute(text(_QAPPLY_SQL_BOUNDS), {
+        "lt": f"{int(_QAPPLY_LOCK_TIMEOUT_MS)}ms", "st": f"{int(_QAPPLY_STATEMENT_TIMEOUT_MS)}ms"})
+
+
+async def _qapply_admin(db, req, action: str, qid: str) -> None:
+    """The admin check of Accept and Credit, inside their bounded unit (after
+    _qapply_bound): its read is the transaction's second statement. A
+    refusal answers the admin sentence with the check's own status."""
+    try:
+        await _require_admin(db, req.admin_steam_id, action, qid, req.hmac_signature)
+    except HTTPException as ex:
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["admin"], {})
+
+
+# QAPPLY-1 (F4): the seconds kept between the end of a held-report unit (its
+# deadline, _QAPPLY_DEADLINE_S) and the service-policy cache's next scheduled
+# refresh. test_f4_the_deadline_and_margin_fit_inside_the_shortest_schedule
+# holds the deadline plus this margin below the shortest schedule a fill
+# leaves.
+_QAPPLY_SERVICE_MARGIN_S = 2.0
+
+
+class _QapplyServiceWait(HTTPException):
+    """_qapply_service_ready's refusal: 503 service_policy_unavailable with
+    Retry-After, answered by the route as raised (_qapply_answer)."""
+
+
+async def _qapply_service_ready(db) -> None:
+    """Awaited as the last statement before each held-report unit
+    (`async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit(...)`).
+
+    It reads the service set as any request does (_service_player_uuids: a
+    fill when the cache is empty or its refresh is due; the lookup's own 503
+    passes through, so no unit starts). Then, with no await after that read,
+    it refuses with 503 service_policy_unavailable and a Retry-After of the
+    whole seconds until the next refresh is due, plus 1, unless that refresh
+    is due no sooner than _QAPPLY_DEADLINE_S plus _QAPPLY_SERVICE_MARGIN_S
+    from now. A refusal writes nothing.
+
+    This is leg 1 of two (F7). The unit is cancelled at its deadline, so a
+    lookup inside it normally finds the cache filled and reads no row. In one
+    interleaving it does not: the lookup stamps its schedule with the time it
+    STARTED, and no lock orders two lookups, so a lookup that began before
+    this one and ends inside the unit can move the schedule back; with the
+    60 s schedule of an empty set and a read stalled for about 50 s, the
+    refresh falls due inside the unit and the guard fills the cache from the
+    unit's transaction. Leg 2 is why that fill caches what any request would:
+    nothing in the unit's reach inserts or deletes a players row or writes
+    its steam_id or id (test_f7_nothing_in_the_unit_changes_what_the_service_
+    lookup_reads), and the unit's transaction reads at READ COMMITTED, so its
+    fill reads the rows a fill on another connection reads at that instant."""
+    await _service_player_uuids(db)
+    left = _SERVICE_UUID_REFRESH_SECONDS - (time.monotonic() - _service_uuid_cache_monotonic)
+    if left < _QAPPLY_DEADLINE_S + _QAPPLY_SERVICE_MARGIN_S:
+        raise _QapplyServiceWait(
+            status_code=503, detail="service_policy_unavailable",
+            headers={"Retry-After": str(max(0, int(left)) + 1)})
+
+
+def _qapply_out_of_time(ex: BaseException) -> bool:
+    """The unit's deadline, or a database bound of this transaction
+    (55P03 lock_timeout, 57014 statement_timeout)."""
+    if isinstance(ex, TimeoutError):
+        return True
+    return _evc_reason(ex).endswith((" 55P03", " 57014"))
+
+
+def _qapply_game_of(report, expected: int) -> int:
+    """The game number a held report's claim is looked up by: the number the
+    report names (_ffa_named_game_number, the one derivation), else the
+    lobby's next game. A report that names no number is never settled (the
+    body's game number check, _ffa_game_number_refusal, refuses it); the
+    next game is only the number its claim is looked up by."""
+    named = _ffa_named_game_number(report.photon_room_id)
+    return expected if named is None else named
+
+
+async def _qapply_claim_of(db, lobby_uuid, game: int):
+    """The kind of the claim on one game ('accept', 'credit'), or None."""
+    return (await db.execute(text(_QAPPLY_SQL_CLAIM_READ), {
+        "lid": str(lobby_uuid), "g": int(game)})).scalar()
+
+
+async def _qapply_claim(db, lobby_uuid, game: int, *, kind: str, qid: str) -> None:
+    """Takes the game's claim in the caller's transaction. The primary key
+    refuses a second claim of the game even where the caller's read of the
+    claim was skipped: the insert then returns nothing and this refuses."""
+    took = (await db.execute(text(_QAPPLY_SQL_CLAIM), {
+        "lid": str(lobby_uuid), "g": int(game), "kind": kind, "qid": qid})).scalar()
+    if took is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["claimed"], {})
+_QAPPLY_SQL_ACCEPTED = """
+    UPDATE match_report_quarantine
+       SET status = 'accepted', reviewed_at = NOW(), review_note = CAST(:note AS text),
+           reviewed_by = (SELECT id FROM players WHERE steam_id = CAST(:sid AS varchar))
+     WHERE id = CAST(:qid AS uuid)
+     RETURNING id
+"""
+_QAPPLY_SQL_CREDITED = """
+    UPDATE match_report_quarantine
+       SET status = 'credited', reviewed_at = NOW(), review_note = CAST(:note AS text),
+           reviewed_by = (SELECT id FROM players WHERE steam_id = CAST(:sid AS varchar))
+     WHERE id = CAST(:qid AS uuid)
+     RETURNING id
+"""
+_QAPPLY_SQL_CREDIT_XP = """
+    UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS integer),
+                       ffa_xp_earned = COALESCE(ffa_xp_earned, 0) + CAST(:xp AS integer)
+     WHERE id = CAST(:pid AS uuid)
+     RETURNING (COALESCE(total_xp, 0) - CAST(:xp AS integer)) AS old_xp
+"""
+_QAPPLY_SQL_CREDIT_GOLD = """
+    UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS integer),
+                       ffa_gold_earned = COALESCE(ffa_gold_earned, 0) + CAST(:g AS integer)
+     WHERE id = CAST(:pid AS uuid)
+"""
+_QAPPLY_SQL_LIVE_PLAYERS = """
+    SELECT id, steam_id FROM players
+     WHERE steam_id = ANY(CAST(:sids AS varchar[])) AND deleted_at IS NULL
+"""
+_QAPPLY_SQL_LOCK_PLAYER = "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+
+
+async def _qapply_gate(db, *, lobby, lobby_uuid, game: int, player_ids, received_at,
+                       locked: bool, progress=None) -> dict:
+    """THE gate of both actions (R4), one function in two forms.
+
+    T is the pace anchor the body uses: the latest end among the lobby's
+    other recorded games (_FFA_PACE_ANCHOR_SQL, every game but `game`), or
+    the lobby's creation when it is later or there is none. A held row
+    received before T is refused by the caller (clock_ok false). Part 1: no
+    FFA row of a participant belongs to a game that ended after T, of any
+    kind (ranked, casual, invalidated). Part 2: each participant's stored
+    FFA rating equals the rating_after of their last rated FFA row at or
+    before T (within _QAPPLY_RATING_TOLERANCE), or they have neither.
+    Part 2 does not see a deviation or a volatility that changed while the
+    rating stayed equal, nor a rating change of at most the tolerance.
+
+    locked=True (Accept, inside the replay, after the body's players pass,
+    whose locks keep any settle of these players from committing a row
+    until this transaction ends): the participants' rating rows are locked
+    too, in str(id) order, and a block raises _QapplyRefused (409).
+    locked=False (the list and the digest, which hold no lock, and Credit,
+    which holds the players' locks itself): no row lock here; returns the
+    verdict. Returns {"t", "clock_ok", "later", "later_players", "drift",
+    "ok"}."""
+    prev = (await db.execute(text(_FFA_PACE_ANCHOR_SQL),
+                             {"lid": lobby_uuid, "g": int(game)})).scalar()
+    t = max(lobby["created_at"], prev) if prev is not None else lobby["created_at"]
+    out = {"t": t, "clock_ok": received_at >= t, "later": 0, "later_players": 0, "drift": 0}
+    pids = sorted(player_ids or (), key=str)
+    if out["clock_ok"]:
+        if locked:
+            for pid in pids:
+                await db.execute(text(_QAPPLY_SQL_LOCK_RATING), {"pid": pid})
+        later = (await db.execute(text(_QAPPLY_SQL_LATER),
+                                  {"pids": pids, "t": t})).mappings().first()
+        out["later"] = int(later["n"] or 0)
+        out["later_players"] = int(later["players"] or 0)
+        out["drift"] = int((await db.execute(text(_QAPPLY_SQL_DRIFT), {
+            "pids": pids, "t": t, "tol": _QAPPLY_RATING_TOLERANCE})).scalar() or 0)
+    out["ok"] = out["clock_ok"] and not out["later"] and not out["drift"]
+    if locked and not out["ok"]:
+        raise _QapplyRefused(409, _qapply_gate_text(out), progress or {})
+    return out
+
+
+def _qapply_gate_text(g: dict) -> str:
+    if not g["clock_ok"]:
+        return _QAPPLY_TEXTS["clock"]
+    if g["later"]:
+        return _QAPPLY_TEXTS["later"].format(n=max(1, int(g["later_players"])))
+    return _QAPPLY_TEXTS["rating"].format(n=max(1, int(g["drift"])))
+
+
+def _qapply_held_check(row, body):
+    """The refusals both actions share before they touch the lobby: the mode,
+    the word, and the stored body. Returns a _QAPPLY_TEXTS key, or None."""
+    if row["mode"] != "ffa":
+        return "team"
+    if row["reason"] not in _QAPPLY_SERVABLE_REASONS:
+        return "word"
+    if not body.get("ok") or body.get("shape") != "ffa" or body.get("report") is None:
+        return "leave_figure" if body.get("why") == "leave_figure" else "body"
+    return None
+
+
+async def _qapply_verdict(db, row, body) -> dict:
+    """The list's and the digest's verdict for one held row, from the READ
+    form of the checks the actions make (the signature, the service
+    accounts, _ffa_report_verify, the record, the game's claim and the
+    gate), with no row lock; advisory: Accept and Credit decide again under
+    their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
+    def no(key, credit=False, **kw):
+        return {"can_accept": False, "accept_blocked_reason": _QAPPLY_TEXTS[key].format(**kw),
+                "can_credit": credit}
+    key = _qapply_held_check(row, body)
+    if key is not None:
+        return no(key)
+    report = body["report"]
+    if row["group_id"] is None:
+        return no("no_lobby")
+    lobby = (await db.execute(text(_QAPPLY_SQL_LOBBY_READ),
+                              {"lid": str(row["group_id"])})).mappings().first()
+    if lobby is None:
+        return no("no_lobby")
+    # The game's state first, as Accept reads it below the lobby lock (F1):
+    # recorded, or claimed (for the game the report names, or the lobby's
+    # next game when it names none), in Accept's sentences.
+    expected = max(int(lobby["games_played"] or 0), int(lobby["highest"] or 0)) + 1
+    room = (report.photon_room_id or "")[:64]
+    tail = _ffa_room_game_no(room)
+    named = _ffa_named_game_number(room)
+    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
+            "room": room, "lid": str(row["group_id"]),
+            "g": named if named is not None else 0})).scalar():
+        return no("recorded")
+    claim = await _qapply_claim_of(db, row["group_id"], _qapply_game_of(report, expected))
+    if claim is not None:
+        return no("game_credited" if claim == "credit" else "recorded")
+    if lobby["readmit_v1"]:
+        return no("readmit")
+    if lobby["status"] == "active":
+        return no("lobby_open")
+    if f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
+        return no("lobby_state")
+    # The verifications Credit makes, in their read form: the signature, the
+    # service accounts, then _ffa_report_verify on the live accounts.
+    canonical = _verify_ffa_hmac(report)
+    if not canonical:
+        return no("unsigned")
+    steams = [p.steam_id for p in report.players]
+    try:
+        await _assert_no_service_subject(db, affected_steam_ids=steams)
+    except HTTPException as ex:
+        return no("service" if ex.status_code == 403 else "retry")
+    prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
+    word = _ffa_report_verify(report, canonical_form=canonical, lobby=lobby,
+                              id_by_steam={r.steam_id: r.id for r in prows})
+    if word is not None:
+        return no(_QAPPLY_CHECK_TEXT[word])
+    gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=row["group_id"], game=expected,
+                              player_ids=row["player_ids"], received_at=row["created_at"],
+                              locked=False)
+    if not gate["clock_ok"]:
+        return no("clock")
+    # Credit pays only a report that names its game (see _qapply_credit). A
+    # credited sibling of this lobby under another number is named to the
+    # admin in place of the reason, since the two may be one game.
+    credited = (await db.execute(text(_QAPPLY_SQL_CLAIMS_CREDITED), {
+        "lid": str(row["group_id"])})).scalars().all()
+
+    def blocked(reason: str) -> dict:
+        can_credit = named is not None
+        if not can_credit:
+            reason = _QAPPLY_TEXTS["no_number"]
+        elif credited:
+            reason = _QAPPLY_TEXTS["sibling_credited"].format(g=int(credited[-1]))
+        return {"can_accept": False, "accept_blocked_reason": reason, "can_credit": can_credit}
+    if not gate["ok"]:
+        return blocked(_qapply_gate_text(gate))
+    if _ffa_game_number_refusal(tail, expected):
+        return blocked(_qapply_number_text(tail, expected))
+    return {"can_accept": True, "accept_blocked_reason": "", "can_credit": False}
+
+
+async def _qapply_finish(db, ctx: dict, *, lobby_uuid, match_id, game: int, player_ids) -> None:
+    """Accept's last writes, in the game's transaction before its one
+    commit: the game's claim (kind 'accept'), the held row 'accepted' and the
+    moderator record that says the report was applied and names the match.
+    The route tested the row's status under its lock, so this UPDATE finds it
+    by id."""
+    await _qapply_claim(db, lobby_uuid, game, kind="accept", qid=ctx["qid"])
+    done = (await db.execute(text(_QAPPLY_SQL_ACCEPTED), {
+        "qid": ctx["qid"], "sid": ctx["actor"], "note": ctx["note"] or None})).scalar()
+    if done is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["reviewed"], {})
+    await _modlog_write(db, actor=ctx["actor"], action="quarantine_accept",
+                        affected=await _modlog_steam_ids(db, sorted(player_ids, key=str)),
+                        reason=ctx["note"] or None, target_match_id=match_id,
+                        details={"quarantine_id": ctx["qid"], "mode": "ffa", "applied": True,
+                                 "match_id": str(match_id), "game": int(game)})
+    ctx["applied"] = match_id
+    _qapply_check_bound()
+
+
+async def _qapply_held(db, qid_uuid):
+    """The held row, locked, and its body read once (_qdig_read_body)."""
+    row = (await db.execute(text(_QAPPLY_SQL_HELD), {
+        "qid": str(qid_uuid), "body_max": QDIG_BODY_MAX_BYTES})).mappings().first()
+    if row is None:
+        raise _QapplyRefused(404, _QAPPLY_TEXTS["not_found"], {})
+    # THE status test of both actions, under the held row's lock: Accept,
+    # Credit and Discard each change a pending row only. A row that is not
+    # pending answers what its own claim says (M1): read by the row's id,
+    # never from the status word, since a row main's Accept marked
+    # 'accepted' was never applied and holds no claim.
+    if row["status"] != "pending":
+        kind = (await db.execute(text(_QAPPLY_SQL_CLAIM_OF_ROW), {"qid": str(row["id"])})).scalar()
+        raise _QapplyRefused(409, _QAPPLY_TEXTS[
+            "held_credited" if kind == "credit" else "held_applied" if kind == "accept" else "reviewed"], {})
+    # A ledger row that references the held row is a credit already paid
+    # (this route's, or migration 421's): neither action pays it again, even
+    # where the row was set back to pending.
+    if (await db.execute(text(_QAPPLY_SQL_RECEIPT), {"qid": str(row["id"])})).scalar():
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["credited_before"], {})
+    row = dict(row)
+    try:
+        await _assert_no_service_subject(db, affected_player_ids=row["player_ids"] or ())
+    except HTTPException as ex:
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service" if ex.status_code == 403 else "retry"], {})
+    body = _qdig_read_body(row)
+    key = _qapply_held_check(row, body)
+    if key is None and row["group_id"] is None:
+        key = "no_lobby"
+    if key is not None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS[key], {})
+    # The 168 bound, for Accept and Credit alike (both call this function):
+    # the lobby row's own made-time decides; nothing the report says is read.
+    if (await db.execute(text(_QAPPLY_SQL_LOBBY_BEFORE_168), {
+            "lid": str(row["group_id"]), "bound": _QAPPLY_LOBBY_SETTLED_BEFORE})).scalar():
+        raise _QapplyRefused(410, _QAPPLY_TEXTS["settled_by_hand"], {})
+    return row, body["report"]
+
+
+async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
+    """Credit's work, under the replay variable (kind "credit"), so the seat
+    rules it shares with the body refuse without a capture. Locks in the
+    order of _qapply_gate's comment; writes deltas only (#326); commits
+    nothing (the route commits)."""
+    qid = str(row["id"])
+    canonical = _verify_ffa_hmac(report)
+    if not canonical:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["unsigned"], {})
+    try:
+        lobby_uuid = UUID(report.lobby_id)
+    except (ValueError, TypeError):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["incomplete"], {})
+    if str(lobby_uuid) != str(row["group_id"]):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["incomplete"], {})
+    lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL), {"lid": lobby_uuid})).mappings().first()
+    if lobby is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["no_lobby"], {})
+    # The game's state first below the lobby lock (F1): a game an Accept
+    # recorded, or one a Credit or an Accept claimed, is refused with the
+    # sentence of that state before any check that a later write to the
+    # lobby moves (the game limit, the number, the gate).
+    room = (report.photon_room_id or "")[:64]
+    tail = _ffa_room_game_no(room)
+    named = _ffa_named_game_number(room)
+    if (await db.execute(text(_QAPPLY_SQL_RECORDED), {
+            "room": room, "lid": str(lobby_uuid),
+            "g": named if named is not None else 0})).scalar():
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["recorded"], {})
+    if named is not None:
+        claim = await _qapply_claim_of(db, lobby_uuid, named)
+        if claim is not None:
+            raise _QapplyRefused(409, _QAPPLY_TEXTS["game_paid" if claim == "credit" else "game_applied"], {})
+    if lobby.get("readmit_v1"):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], {})
+    if lobby["status"] == "active":
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["lobby_open"], {})
+    if f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["lobby_state"], {})
+    highest = int((await db.execute(text(_FFA_LOBBY_HIGHEST_GAME_SQL),
+                                    {"lid": lobby_uuid})).scalar() or 0)
+    expected = max(int(lobby["games_played"] or 0), highest) + 1
+    steams = [p.steam_id for p in report.players]
+    try:
+        await _assert_no_service_subject(db, affected_steam_ids=steams)
+    except HTTPException as ex:
+        raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service" if ex.status_code == 403 else "retry"], {})
+    prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
+    id_by_steam = {r.steam_id: r.id for r in prows}
+    # Every verification the body makes of the report, in the body's order,
+    # under the lobby lock taken above (_ffa_report_verify; no copy here).
+    word = _ffa_report_verify(report, canonical_form=canonical, lobby=lobby, id_by_steam=id_by_steam)
+    if word is not None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS[_QAPPLY_CHECK_TEXT[word]], {})
+    reported_ids = set(id_by_steam.values())
+    _cfg = _ffa_lobby_config(lobby)
+    # The game a Credit pays is the number the report names: a report that
+    # names none cannot be told apart from its siblings, so it is not paid.
+    # Its claim was read under the lobby lock above.
+    if named is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["no_number"], {})
+    for pid in sorted(reported_ids, key=str):
+        await db.execute(text(_QAPPLY_SQL_LOCK_PLAYER), {"pid": pid})
+    gate = await _qapply_gate(db, lobby=lobby, lobby_uuid=lobby_uuid, game=expected,
+                              player_ids=reported_ids, received_at=row["created_at"],
+                              locked=False)
+    if not gate["clock_ok"]:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["clock"], {})
+    if gate["ok"] and not _ffa_game_number_refusal(tail, expected):
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["can_accept"], {})
+    await _qapply_claim(db, lobby_uuid, named, kind="credit", qid=qid)
+    # Who played, as settlement decides it: placements, the ghosts and the
+    # early-leave grace (_ffa_leave_decision), and in an assembly lobby the
+    # seat rules (_asm_report_rules, whose reporter refusals raise here
+    # without a capture).
+    kills_in_canonical = canonical == "v2"
+    kills_break_ties = kills_in_canonical and _ffa_lobby_kills_capable(lobby)
+
+    def _place_key(p) -> tuple:
+        return (p.rounds_won, p.points_total, p.kills if kills_break_ties else 0)
+    entries = sorted(report.players, key=lambda p: tuple(-v for v in _place_key(p))
+                     + (_ffa_sort_key(p.steam_id),))
+    placements: dict = {}
+    prev_key, prev_place = None, 0
+    for i, p in enumerate(entries):
+        k = _place_key(p)
+        placements[p.steam_id] = prev_place if k == prev_key else i + 1
+        prev_key, prev_place = k, placements[p.steam_id]
+    ghosts, graced, _log = _ffa_leave_decision(
+        report, kills_in_canonical,
+        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND, read_absent=True)
+    excluded = ghosts
+    reasons = {p.steam_id: set() for p in report.players}
+    game_no = named
+    if lobby.get("assembly_v1"):
+        excluded = await _asm_report_rules(
+            db, lobby=lobby, lobby_uuid=lobby_uuid, g=game_no, report=report,
+            id_by_steam=id_by_steam, unrated=excluded, progress={}, reasons=reasons,
+            settled_cls=None, gone_in_game=set())
+    unrated = excluded | graced
+    n_live = len(report.players) - len(unrated)
+    beaten = {p.steam_id: sum(1 for q in report.players if q.steam_id not in unrated
+                              and placements[q.steam_id] > placements[p.steam_id])
+              for p in report.players}
+    battles_total = sum(max(0, int(p.points_total)) for p in report.players)
+    elapsed = max(30.0, (row["created_at"] - gate["t"]).total_seconds())
+    paid = _ffa_paid_battles(battles_total, elapsed, n_live)
+    # The tier's ratings at the game's time: each participant's rating_before
+    # on their first rated FFA row after T, else the stored rating, else the
+    # default. A casual lobby rates nobody, so it takes no ratings (tier 1.0).
+    rating_of: dict = {}
+    if bool(lobby["is_ranked"]) if lobby.get("is_ranked") is not None else True:
+        trows = (await db.execute(text(_QAPPLY_SQL_TIER), {
+            "pids": sorted(reported_ids, key=str), "t": gate["t"]})).mappings().all()
+        by_pid = {r["pid"]: r for r in trows}
+        for sid_, pid in id_by_steam.items():
+            r = by_pid.get(pid) or {}
+            v = r.get("first_before")
+            if v is None:
+                v = r.get("stored")
+            rating_of[sid_] = float(v) if v is not None else 1500.0
+    paid_out = {}
+    for pid in sorted(reported_ids, key=str):
+        sid_ = next(s for s, i2 in id_by_steam.items() if i2 == pid)
+        if sid_ in unrated:
+            continue
+        opp = [rating_of[s] for s in rating_of if s != sid_ and s not in unrated]
+        aw = _ffa_game_awards(place=placements[sid_], beaten=beaten[sid_], n_live=n_live,
+                              paid_battles=paid, opp_ratings=opp)
+        got = (await db.execute(text(_QAPPLY_SQL_CREDIT_XP),
+                                {"xp": aw["xp"], "pid": pid})).mappings().first()
+        aw = _ffa_game_awards(place=placements[sid_], beaten=beaten[sid_], n_live=n_live,
+                              paid_battles=paid, opp_ratings=opp,
+                              old_xp=(got["old_xp"] if got else 0))
+        if aw["gold"] > 0:
+            await db.execute(text(_QAPPLY_SQL_CREDIT_GOLD), {"g": aw["gold"], "pid": pid})
+        for kind, amount in (("ffa_xp", aw["xp_gold"]), ("ffa_placement", aw["place_gold"]),
+                             ("level_reward", aw["level_gold"])):
+            if amount > 0:
+                db.add(GoldTransaction(player_id=pid, amount=amount, reason=kind, reference_id=qid))
+        paid_out[sid_] = {"xp": aw["xp"], "gold": aw["gold"], "gold_ffa_xp": aw["xp_gold"],
+                          "gold_ffa_placement": aw["place_gold"], "gold_level_reward": aw["level_gold"]}
+    await db.flush()
+    done = (await db.execute(text(_QAPPLY_SQL_CREDITED), {
+        "qid": qid, "sid": actor, "note": note or None})).scalar()
+    if done is None:
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["reviewed"], {})
+    await _modlog_write(db, actor=actor, action="quarantine_credit",
+                        affected=await _modlog_steam_ids(db, sorted(reported_ids, key=str)),
+                        reason=note or None,
+                        details={"quarantine_id": qid, "mode": "ffa", "players": paid_out})
+    return paid_out
 
 
 # ── Routes: match-report quarantine (July 30 lifecycle sweep) ──────────────
@@ -74805,14 +76624,16 @@ async def admin_list_quarantine(
 ):
     """Pending rejected reports, newest first.
 
-    `can_accept` is computed SERVER-side and is authoritative — the client only
-    renders it. Accepting a report re-applies Glicko, and Glicko is order
-    dependent: if any participant has been rated since this report was rejected,
-    applying it now would write a rating that never existed in that order. The
-    July 30 recovery needed a full chronological ladder replay for exactly this
-    reason, so Accept is offered only when nothing has moved since.
+    `can_accept`, `accept_blocked_reason` and `can_credit` are computed
+    SERVER-side from the read form of the held-report gate (_qapply_verdict:
+    no row lock, so the verdict is advisory; Accept and Credit decide again
+    under their locks). The client only renders them; the released client
+    ignores `can_credit`.
     """
-    await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
+    try:
+        await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
+    except HTTPException as ex:
+        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     # QDIG-1: the stored body is selected through its size (the same CASE as
     # every statement of the lane that selects it: above QDIG_BODY_MAX_BYTES
     # it never reaches Python, and the 50 rows hand Python at most
@@ -74851,19 +76672,17 @@ async def admin_list_quarantine(
         facts = _qdig_empty_facts()
     out = []
     for r, body in pairs:
-        # Has anything rated these players since? Any later result for a
-        # participant means an accept would land out of order. The verdict
-        # and its words are _quarantine_accept_verdict, which D1 also calls.
-        # A failed check answers one fixed sentence, never the exception's
+        # QAPPLY-1: the verdict is _qapply_verdict's, which D1 also calls. A
+        # failed check answers one fixed sentence, never the exception's
         # text (which can carry a statement and runs past 140 characters).
         try:
             async with db.begin_nested():
-                later = await _quarantine_later_rated(
-                    db, r["mode"], r["player_ids"], r["created_at"])
-            can_accept, blocked = _quarantine_accept_verdict(*later)
+                verdict = await _qapply_verdict(db, r, body)
+            can_accept, blocked = verdict["can_accept"], verdict["accept_blocked_reason"]
+            can_credit = verdict["can_credit"]
         except Exception as ex:
             print(f"[QDIG] admin list eligibility for {r['id']} not checked: {type(ex).__name__}")
-            can_accept, blocked = False, QDIG_ELIGIBILITY_FAILED
+            can_accept, blocked, can_credit = False, QDIG_ELIGIBILITY_FAILED, False
         # The human-readable result and reason, derived from the stored body
         # (the verbatim report, never trusted as authority): the score with
         # numbers, winner first, within the 64 characters the shipped client
@@ -74883,6 +76702,7 @@ async def admin_list_quarantine(
             "room": r["photon_room_id"], "status": r["status"],
             "can_accept": bool(can_accept),
             "accept_blocked_reason": blocked or "",
+            "can_credit": bool(can_credit),
         })
     return {"reports": out}
 
@@ -74895,11 +76715,17 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
     # for a string that is not one, and binds the note, which fails for a
     # string no text bind can carry (500). It binds the parsed id's canonical
     # text; the signature keeps the id as sent.
-    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine discard: the report's id, before the admin check and the UPDATE (r15 sweep)
+    try:
+        qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine discard: the report's id, before the admin check and the UPDATE (r15 sweep)
+    except HTTPException:
+        raise HTTPException(400, _QAPPLY_TEXTS["bad_id"])
     note = (req.note or "")[:500]
     if not _pg_text_ok(note):   # quarantine discard: the note, before the admin check and the UPDATE (r15 sweep)
-        raise HTTPException(422, "note is not storable text")
-    await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+        raise HTTPException(422, _QAPPLY_TEXTS["note"])
+    try:
+        await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+    except HTTPException as ex:
+        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])
     done = (await db.execute(text("""
         UPDATE match_report_quarantine
            SET status='discarded', reviewed_at=NOW(), review_note=:note,
@@ -74909,7 +76735,9 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
     """), {"qid": str(qid_uuid), "sid": req.admin_steam_id, "note": note})).mappings().first()
     if done is None:
         # Nothing changed: refused before any record or commit.
-        raise HTTPException(409, "Already reviewed")
+        if (await db.execute(text(_QAPPLY_SQL_EXISTS), {"qid": str(qid_uuid)})).scalar():
+            raise HTTPException(409, _QAPPLY_TEXTS["reviewed"])
+        raise HTTPException(404, _QAPPLY_TEXTS["not_found"])
     await _modlog_write(db, actor=req.admin_steam_id, action="quarantine_discard",
                         affected=await _modlog_steam_ids(db, done["player_ids"] or ()),
                         reason=note or None,
@@ -74921,50 +76749,117 @@ async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
 @app.post("/api/v1/admin/quarantine/{qid}/accept", tags=["Admin"])
 async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
                                   db: AsyncSession = Depends(get_db)):
-    """Marks a quarantined report approved for recovery.
+    """Applies a held FFA report (QAPPLY-1).
 
-    Deliberately does NOT re-run the submit path. Re-applying an old report
-    inline would rate it at today's ratings rather than at its own point in
-    history, which is precisely the corruption the July 30 recovery had to undo
-    with a chronological replay. This route records the admin's decision and
-    locks the row; the actual application is an ordered replay, run deliberately.
+    The held row is locked and its status tested under that lock; then its
+    stored body runs through the report route's own body, submit_ffa_match,
+    under the held-report replay (_qapply_run): every check of a network
+    report runs on it, the clock is the held row's created_at, and the gate
+    (_qapply_gate) runs after the body's players pass. When the game is
+    recorded, the held row is 'accepted' and the moderator record (which
+    says the report was applied and names the match) are written before the
+    body's one commit. Any refusal rolls back and writes nothing; the row
+    stays pending. Served: _QAPPLY_SERVABLE_REASONS; team rows and
+    readmission lobbies are refused.
 
-    The report's id is parsed before the admin check, and both statements bind
+    Under the replay the body makes every verification of the report again
+    (the signature, the service accounts, _FFA_REPORT_VERIFICATIONS, the
+    game number, the seat rules and the gate) on the rows as they are now.
+    Two steps of a network report do not run: the reporter's session check
+    (_check_steam_session), because the replay carries no request, and the
+    settlement of the lobby's due journal windows, which settles other
+    reports, not this one. What stands in for the session check is the hold
+    itself: the session check is the body's first step for a network
+    report, so a report reached a hold site only after its reporter's
+    session checked out when it was sent. The transaction runs under
+    _QAPPLY_DEADLINE_S and _qapply_bound's database bounds, and takes the
+    game's claim (ffa_game_claims), so a game is applied or credited once.
+
+    The report's id is parsed before the admin check, and the statements bind
     the parsed id's canonical text; the signature keeps the id as sent (review
     r15 sweep: a string that is not a UUID failed the uuid bind, 500).
     """
-    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
-    await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
-    row = (await db.execute(text(
-        "SELECT player_ids, created_at, status, mode FROM match_report_quarantine"
-        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": str(qid_uuid)})).mappings().first()
-    if row is None:
-        raise HTTPException(404, "Not found")
-    if row["status"] != "pending":
-        raise HTTPException(409, "Already reviewed")
-    # Acceptance is the durable authorization for a later ordered replay, so
-    # enforce the subject policy here even though this request does not apply
-    # ratings or rewards inline.
-    await _assert_no_service_subject(db, affected_player_ids=row["player_ids"] or ())
-    later = await _quarantine_later_rated_count(
-        db, row["mode"], row["player_ids"], row["created_at"])
-    if later:
-        # Re-checked under the row lock, not just at list time (#178/#208): the
-        # admin may have been looking at a stale screen.
-        raise HTTPException(409, f"{later} later rated game(s) — needs an ordered replay")
-    await db.execute(text("""
-        UPDATE match_report_quarantine
-           SET status='accepted', reviewed_at=NOW(),
-               reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
-         WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id})
-    await _modlog_write(db, actor=req.admin_steam_id, action="quarantine_accept",
-                        affected=await _modlog_steam_ids(db, row["player_ids"] or ()),
-                        reason=(req.note or "")[:500] or None,
-                        details={"quarantine_id": str(qid_uuid), "mode": row["mode"]})
-    await db.commit()
-    print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
-    return {"status": "accepted"}
+    try:
+        qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
+    except HTTPException:
+        raise HTTPException(400, _QAPPLY_TEXTS["bad_id"])
+    note = (req.note or "")[:500]
+    if not _pg_text_ok(note):
+        raise HTTPException(422, _QAPPLY_TEXTS["note"])
+    try:
+        await _qapply_service_ready(db)
+        async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("accept"):
+            await _qapply_bound(db)
+            await _qapply_admin(db, req, "quarantine_action", qid)
+            row, report = await _qapply_held(db, qid_uuid)
+            ctx = {"kind": "accept", "qid": str(qid_uuid), "received_at": row["created_at"],
+                   "actor": req.admin_steam_id, "note": note, "applied": None}
+            async with _qapply_run(ctx):
+                await submit_ffa_match(report, None, db)
+    except HTTPException as ex:
+        await _asm_rollback(db)
+        raise _qapply_answer(ex)
+    except BaseException as ex:
+        await _asm_rollback(db)
+        if _qapply_out_of_time(ex):
+            raise HTTPException(503, _QAPPLY_TEXTS["busy"])
+        raise
+    if ctx.get("applied") is None:
+        # The body answered without recording a game (an echo of a game
+        # already recorded): nothing of this action is kept.
+        await _asm_rollback(db)
+        raise HTTPException(409, _QAPPLY_TEXTS["recorded"])
+    print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}: applied as match {ctx['applied']}")
+    return {"status": "accepted", "applied": True, "match_id": str(ctx["applied"])}
+
+
+@app.post("/api/v1/admin/quarantine/{qid}/credit", tags=["Admin"])
+async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
+                                  db: AsyncSession = Depends(get_db)):
+    """Pays each participant of a held FFA report the XP and the gold that
+    settlement would have paid (_ffa_game_awards), moves no rating, and ends
+    the row 'credited' (QAPPLY-1). Signed with its own action word
+    (quarantine_credit). Refused when Accept could apply the row now, for
+    every word outside _QAPPLY_SERVABLE_REASONS, for team rows and
+    readmission lobbies, while the lobby is open, when a ledger row already
+    references the held row, when the report names no game number, when the
+    game already holds a claim (ffa_game_claims, from this or a sibling held
+    row), and when any verification the report route makes fails
+    (_ffa_report_verify, the signature, the service accounts). One
+    transaction under _QAPPLY_DEADLINE_S and _qapply_bound's bounds: the
+    game's claim, deltas, one ledger row per kind above 0 referencing the
+    held row, the held row's status and the moderator record."""
+    try:
+        qid_uuid = _mail_parse_uuid(qid, "qid")
+    except HTTPException:
+        raise HTTPException(400, _QAPPLY_TEXTS["bad_id"])
+    note = (req.note or "")[:500]
+    if not _pg_text_ok(note):
+        raise HTTPException(422, _QAPPLY_TEXTS["note"])
+    try:
+        await _qapply_service_ready(db)
+        async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("credit"):
+            await _qapply_bound(db)
+            await _qapply_admin(db, req, "quarantine_credit", qid)
+            row, report = await _qapply_held(db, qid_uuid)
+            ctx = {"kind": "credit", "qid": str(qid_uuid), "received_at": row["created_at"],
+                   "actor": req.admin_steam_id, "note": note}
+            async with _qapply_run(ctx):
+                paid = await _qapply_credit(db, row, report, actor=req.admin_steam_id, note=note)
+                _qapply_check_bound()
+                await db.commit()
+    except HTTPException as ex:
+        await _asm_rollback(db)
+        raise _qapply_answer(ex)
+    except BaseException as ex:
+        await _asm_rollback(db)
+        if _qapply_out_of_time(ex):
+            raise HTTPException(503, _QAPPLY_TEXTS["busy"])
+        raise
+    print(f"[QUARANTINE] {qid} credited by {req.admin_steam_id}: {len(paid)} player(s)")
+    return {"status": "credited",
+            "players": [{"steam_id": s, "xp": v["xp"], "gold": v["gold"]}
+                        for s, v in sorted(paid.items())]}
 
 
 # ── Quarantine triage: a read-only operator view (RJ-TRIAGE part 1) ────────
@@ -76078,9 +77973,8 @@ async def internal_quarantine_digest(
             for d, _b in sorted(qd["detail"], key=lambda db_: (db_[0]["digest_posted_at"] is not None,
                                                                  db_[0]["created_at"], str(db_[0]["id"]))):
                 try:
-                    qd["gates"][str(d["id"])] = await h.run(
-                        _quarantine_later_rated, d["mode"], d["player_ids"], d["created_at"],
-                        savepoint=True)
+                    # QAPPLY-1: the list's verdict, read form (no row lock).
+                    qd["gates"][str(d["id"])] = await h.run(_qapply_verdict, d, _b, savepoint=True)
                 except _TriageReadBudgetSpent:
                     raise
                 except Exception as ex:
@@ -76936,7 +78830,7 @@ def _qdig_feed_keys(row, v, facts, gate) -> dict:
     if gate is None:
         can_accept, blocked = None, "not computed within the read budget"
     else:
-        can_accept, blocked = _quarantine_accept_verdict(*gate)
+        can_accept, blocked = gate["can_accept"], gate["accept_blocked_reason"]
     report_names = {p["steam_id"]: p["name"] for p in body["players"]}
     played = _qdig_played_at(row, body)
     return {
@@ -79511,26 +81405,36 @@ async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
     return {"status": "ok"}
 
 
-@app.post("/api/v1/spectate/leave", tags=["Spectate"])
-async def spectate_leave(req: SpectateLeaseBody, request: Request,
-                         db: AsyncSession = Depends(get_db)):
-    if not await _strict_steam_session_ok(request, req.steam_id, db):
-        raise HTTPException(status_code=401, detail="session_required")
-    # Leave is intent, not departure proof. Enter durable drain first; only a
-    # later complete master inventory may clear it.
+async def _spectate_leave_rows(db: AsyncSession, steam_id: str, lease_id=None) -> None:
+    """The spectate leave's writes, for one lease of `steam_id` (`lease_id`) or,
+    with None, for every lease of it not yet revoked (the ban, F2 d): enter
+    durable drain first (a tombstone per game), then revoke the lease. The
+    lease is revoked at once; the drain mark keeps the slot taken until it
+    ends. Leave is intent, not departure proof; only a later complete master
+    inventory may clear the drain. Does NOT commit."""
+    pick = ("l.id = CAST(:lid AS UUID)" if lease_id is not None else "l.revoked_at IS NULL")
+    params = {"sid": steam_id, **({"lid": lease_id} if lease_id is not None else {})}
     await db.execute(text("""
         INSERT INTO spectate_drain_tombstones
             (room_name, region, ghost_steam_id, created_at)
         SELECT g.room_name, COALESCE(g.room_region, ''),
                l.spectator_steam_id, clock_timestamp()
           FROM spectate_leases l JOIN spectate_games g ON g.id = l.game_id
-         WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
+         WHERE """ + pick + """ AND l.spectator_steam_id = :sid
         ON CONFLICT (room_name, region, ghost_steam_id) DO NOTHING
-    """), {"lid": req.lease_id, "sid": req.steam_id})
+    """), params)
     await db.execute(text("""
-        UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, clock_timestamp())
-         WHERE id = CAST(:lid AS UUID) AND spectator_steam_id = :sid
-    """), {"lid": req.lease_id, "sid": req.steam_id})
+        UPDATE spectate_leases l SET revoked_at = COALESCE(l.revoked_at, clock_timestamp())
+         WHERE """ + pick + """ AND l.spectator_steam_id = :sid
+    """), params)
+
+
+@app.post("/api/v1/spectate/leave", tags=["Spectate"])
+async def spectate_leave(req: SpectateLeaseBody, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    await _spectate_leave_rows(db, req.steam_id, req.lease_id)
     await db.commit()
     return {"status": "ok"}
 
@@ -82052,18 +83956,18 @@ def _mail_actor_live_or_raise(rows: dict, steam_id: str) -> None:
 
 
 async def _mail_lock_admin(db: AsyncSession, admin_steam_id: str, *others: str,
-                           missing: dict | None = None, optional=(), handles: dict | None = None) -> dict:
+                           missing: dict | None = None, optional=(), handles: dict | None = None, roster: bool = False) -> dict:
     """The admin routes' entry into the lattice: lock the admin and every
-    other identity written, re-read them, and re-prove the admin grant under
-    the lock (_require_admin ran before the lock; the i18n grant route
-    re-proves the same way). The admin's authority is admin_users membership
-    (review r2): the admin's players row is locked when it exists and skipped
-    when it does not; a route that needs that row for itself (a broadcast's
-    sender) checks the returned row. Returns the re-read rows."""
+    other identity written, re-read them, and re-prove the grant under the
+    lock with _is_admin (on admin_users, review r2, and under no active ban,
+    BAN-R10). roster=True proves the roster alone (_is_admin_roster): only
+    admin_mail_broadcast hands it, whose sender gates answer the admin's ban
+    after the replay (_require_admin_roster). The admin's players row is
+    locked when it exists and skipped when it does not. Returns the rows."""
     rows = await _mail_lock_identities(db, admin_steam_id, *others, missing=missing,
                                        optional={str(admin_steam_id), *(str(s) for s in optional)},
                                        handles=handles)
-    if not await _is_admin(db, admin_steam_id):
+    if not (await _is_admin_roster(db, admin_steam_id) if roster else await _is_admin(db, admin_steam_id)):
         raise HTTPException(status_code=403, detail="Not an admin")
     return rows
 
@@ -83272,6 +85176,12 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
         db, actor_steam_id, subject_sid_pre, missing={subject_sid_pre: (400, "subject_deleted")},
         optional=optional, handles={subject_sid_pre: subject_pre["subject_id"]})
     _mail_actor_live_or_raise(rows, actor_steam_id)
+    # Bans part 2a (S6): the acting account must not be actively banned. Read
+    # under its EXCLUSIVE identity key, which _mail_lock_identities took just
+    # above in the transaction's one ordered pass (actor and subject), so a
+    # ban of the actor either committed before this read or waits for this
+    # transaction.
+    await _ban_gate_or_raise(db, actor_steam_id)
     actor_w = _mail_identity_to_write(rows, actor_steam_id)
     subject_w = _mail_identity_to_write(rows, subject_sid_pre)
     role, _langs = await _chat_moderator_scope(db, actor_steam_id)
@@ -83332,8 +85242,13 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
                                       reason=reason_txt)
         # The ban core's own record ("ban", or "ban_repeat" for a subject
         # already banned) carries the case: one record per action (MODLOG-1).
+        # The subject is banned by its RAW id, as admin_ban bans its target:
+        # the ban row's key, and the identity key _mail_lock_identities took
+        # above, so the core's own take of that key is one this transaction
+        # already holds. (A ban needs a live subject: the lattice refused a
+        # deleted one, so the re-read id is this one.)
         res = await _apply_ban_core(db, admin_steam_id=actor_w,
-                                    target_steam_id=subject_sid, reason=reason_txt,
+                                    target_steam_id=subject_sid_pre, reason=reason_txt,
                                     record_reason=reason_txt,
                                     record_details={"case_id": str(cid), "kind": case["kind"],
                                                     "via": via, "role": role,
@@ -83453,6 +85368,10 @@ async def internal_moderation_case_act(
     ), {"d": actor_discord_id})).scalar()
     if not linked:
         raise HTTPException(status_code=403, detail="not_linked")
+    # Bans part 2a (S6): the bot acts for the linked moderator, who must not
+    # be actively banned (the in-game route's admin check refuses one too):
+    # _moderation_case_act reads the actor's ban under the actor's exclusive
+    # identity key, in its one ordered pass with the subject's key.
     result = await _moderation_case_act(
         db, case_id=case_id, actor_steam_id=linked, action=str(payload.get("action", "") or ""),
         hours=payload.get("hours"), reason=str(payload.get("reason", "") or ""),
@@ -83489,14 +85408,16 @@ async def admin_mail_broadcast(req: _AdminMailBroadcastReq, db: AsyncSession = D
     key = _mail_parse_key(req.idempotency_key)
     fp = _mail_request_fp("broadcast", subject=req.subject, body=req.body)
     mfp = _mail_request_message_fp("broadcast", subject=req.subject, body=req.body)
-    await _require_admin(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
+    # The roster check alone, here and under the lock (roster=True below): the acting
+    # admin's ban is the sender gates' (after the replay), answered "banned".
+    await _require_admin_roster(db, req.admin_steam_id, "mail_broadcast", str(key), req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
         raise HTTPException(status_code=400, detail="actor_mismatch")
     # Identity lock + re-read + grant re-proof BEFORE the sender row is read
     # (the lattice). A broadcast is a message and needs its sender row
     # (mail_messages.sender_id) — the one privileged route where admin_users
     # membership alone is not enough; the re-read decides, under the lock.
-    rows = await _mail_lock_admin(db, req.admin_steam_id)
+    rows = await _mail_lock_admin(db, req.admin_steam_id, roster=True)
     me_row = rows.get(req.admin_steam_id)
     if me_row is None or me_row.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="admin_player_unknown")
@@ -83911,6 +85832,21 @@ _INVITE_END_LOBBY_SQL = (
     "       ended_at = c.at"
     "  FROM c"
     " WHERE mode = :mode AND lobby_id = :lid AND state = 'pending'"
+    " RETURNING mail_message_id"
+)
+
+# A ban ends every pending invite TO the banned account, in every lobby and
+# mode, as a kick ends them (FIX-2 class II): its accept would be refused by
+# the ban. Run by the ban core under the account's exclusive identity key,
+# which every accept and decline of the invitee takes first.
+_INVITE_END_INVITEE_SQL = (
+    "WITH c AS MATERIALIZED (SELECT clock_timestamp() AS at)"
+    " UPDATE lobby_invites"
+    "   SET state = CASE WHEN expires_at <= c.at THEN 'expired' ELSE 'void' END,"
+    "       end_reason = CASE WHEN expires_at <= c.at THEN NULL ELSE 'invitee_kicked' END,"
+    "       ended_at = c.at"
+    "  FROM c"
+    " WHERE state = 'pending' AND invitee_player_id = CAST(:pid AS uuid)"
     " RETURNING mail_message_id"
 )
 

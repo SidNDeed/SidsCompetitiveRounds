@@ -766,7 +766,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 438   # MODLOG-1 at its merge of main ac07e3e5 (migration 420): 436 plus the moderator log's two read routes (statically-nonconsumer); QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
+    assert len(manifest) == 439   # QAPPLY-1: 438 plus the held-report Credit route (statically-nonconsumer, in the group of Accept and Discard); MODLOG-1 at its merge of main ac07e3e5 (migration 420): 436 plus the moderator log's two read routes (statically-nonconsumer); QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
     # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
@@ -820,7 +820,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 433   # MODLOG-1 at its merge of main ac07e3e5 (migration 420): 431 plus the moderator log's two read routes; QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
+    assert len(static) == 434   # QAPPLY-1: 433 plus the held-report Credit route; MODLOG-1 at its merge of main ac07e3e5 (migration 420): 431 plus the moderator log's two read routes; QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
     # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
     # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
     # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
@@ -1700,7 +1700,19 @@ def test_the_helper_closure_stays_affordable():
     # steep stretch (177, 184, 203, 203 and 212 at positions 382 to 386 on
     # main). The bound moves to 225, ~5% over the measurement, for that
     # reason and no other.
-    assert code_p90 <= 225, f"p90 code closure {code_p90} of {total}"
+    # The stack of QAPPLY-1, the ban sweep and the bot text lane
+    # (claude/stack-1120, 2026-11-20): 228 measured at POST
+    # /api/v1/pc/trades/accept, rank 396 of 440 routes (216 on main 234ea0f8;
+    # 224 at QAPPLY-1's tip and at the ban sweep's, 216 at the bot text
+    # lane's, each the same walk over that tree). Neither lane alone moves the
+    # rank past 224: QAPPLY-1 adds one route (the credit route, 440 routes)
+    # and the ban sweep raises closures below the rank above it (on main the
+    # two moderator log reads measure 213 and 216 and GET
+    # /api/v1/broadcast/target 219; at the ban sweep's tip 221, 224 and 227;
+    # here 221, 224 and 230), so with both the rank position lands on the
+    # trades routes at 228. The bound moves to 239, ~5% over the measurement,
+    # for that reason and no other.
+    assert code_p90 <= 239, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1816,17 +1828,43 @@ def test_the_helper_closure_stays_affordable():
     # router and EVIDENCE_ROOT), and +2 the route does run, the admin_evidence
     # health word and its route tuple (the four report endpoints held as
     # values, not walked). Inside 596, so the bound stays.
+    # QAPPLY-1 (2026-11-18), on the base a82771f8: the worst is GET
+    # /api/v1/health at 597 (596 at the base), +1 by name, main's
+    # _QAPPLY_BUILD (the health word the route runs); no other code binding
+    # of that closure is new. The bound moves to 627, ~5% over the
+    # measurement, for that reason and no other. The other five bounds hold
+    # (code 86 / 219, whole 239 / 423 / 860 over 440 routes).
     # voided-streak lane on the moderator log stack (2026-11-18), the merge
     # of e3c8b2a2: 597 measured at GET /api/v1/health (596 at e3c8b2a2, the
     # same walk over that tree): +1 by name, main._VOIDED_STREAK_BUILD, the
     # lane's build marker, which the health route reads in both arms. The
     # bound moves to 597, the measured value, for that reason and no other.
+    # ban sweep (bans part 2a), merged onto main 234ea0f8: 598 measured at
+    # GET /api/v1/health (597 on main 234ea0f8): +1 by name,
+    # main._BAN_SWEEP_BUILD, the lane's build marker, which the health route
+    # reads in both arms. The bound moves to 598, the measured value, for that
+    # reason and no other.
+    # The stack of QAPPLY-1 and the ban sweep (claude/stack-1120), at its
+    # merge of the ban sweep: the two lanes' bounds were set on two trees
+    # (627 over QAPPLY-1's base, 598 over main 234ea0f8); the merge keeps
+    # QAPPLY-1's 627, which holds both lanes' measurements, until the stack's
+    # closing item measures its own tip and records the value here.
     # bot text lane (2026-11-20), its build marker: 598 measured at GET
     # /api/v1/health (597 at 0a3faa13, the same walk over that tree): +1 by
     # name, main._BOT_TEXT_BUILD, which the health route reads in both arms;
     # the two trees' reached sets are otherwise equal by name. The bound
     # moves to 598, the measured value, for that reason and no other.
-    assert code_worst <= 598, f"worst code closure {code_worst} of {total}"
+    # The stack, at its merge of the bot text lane: the 627 above stays (it
+    # holds all three lanes' measurements) until the closing item.
+    # The stack of QAPPLY-1, the ban sweep and the bot text lane
+    # (claude/stack-1120, 2026-11-20), its closing item: 600 measured at GET
+    # /api/v1/health (597 on main 234ea0f8, the same walk over that tree):
+    # +3 by name, main._QAPPLY_BUILD, main._BAN_SWEEP_BUILD and
+    # main._BOT_TEXT_BUILD, the three lanes' build markers, which the health
+    # route reads in both arms; no other code binding of that closure is new.
+    # The bound moves to 600, the measured value, for that reason and no
+    # other.
+    assert code_worst <= 600, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

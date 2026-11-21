@@ -458,8 +458,9 @@ def test_a_ban_locks_the_banned_players_lobbies_in_order_and_holds_them_through_
     then 1v2, FOR NO KEY UPDATE, before any queue-row delete, and holds the
     locks while _pc_lease_drain runs (stubbed: it records how each lobby row
     is held, so no case waits its 65 s); the banned player's seats go and
-    their invites end void with sender_left. Mutants: the order reversed
-    (waiting on 2v2, the 1v2 row is held and the FFA row free); the drain
+    their invites end void with sender_left. Mutants: the order reversed,
+    the ban core's loop walking _BAN_LOBBY_TABLES backwards (waiting on
+    2v2, the 1v2 row is held and the FFA row free); the drain
     run before the locks (no lobby row of the ban's is held at the drain);
     the locks taken FOR UPDATE (a key share is refused at the drain)."""
     expect_waiting = {"ffa": "no_key", "ovt": "free"}
@@ -474,12 +475,13 @@ def test_a_ban_locks_the_banned_players_lobbies_in_order_and_holds_them_through_
         assert not obs["seated_after"], obs
         assert obs["after"] == {m: VOID_LEFT for m in _BAN_ORDER}, obs
 
-        # mutant 1: the order reversed (1v2, 2v2, FFA)
+        # mutant 1: the order reversed (1v2, 2v2, FFA). The ban core's lobby
+        # loop walks the module's closed list _BAN_LOBBY_TABLES (FFA, 2v2,
+        # 1v2); the mutant walks that list backwards, on the loop's own line.
         reversed_core = _source_mutant(
             main._apply_ban_core,
-            ('("ffa", "ffa_queue", "ffa_lobbies")', "@@first@@"),
-            ('("ovt", "ovt_queue", "ovt_lobbies")', '("ffa", "ffa_queue", "ffa_lobbies")'),
-            ("@@first@@", '("ovt", "ovt_queue", "ovt_lobbies")'))
+            ("        for _lmode, _lqt, _llt in _BAN_LOBBY_TABLES:\n",
+             "        for _lmode, _lqt, _llt in tuple(reversed(_BAN_LOBBY_TABLES)):\n"))
         with pytest.MonkeyPatch.context() as mp2:
             mp2.setattr(main, "_apply_ban_core", reversed_core)
             obs = await _ban_scene(env)

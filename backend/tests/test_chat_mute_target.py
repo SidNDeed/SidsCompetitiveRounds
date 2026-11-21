@@ -29,6 +29,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import main
+import ban_gate_statements as _GATE
+
+_SHARED_KEY = next(q for q in _GATE.GATE_LOCKS if "_shared(" in q)
+_ONE_BAN_READ = _GATE.text_statements(main._is_banned)[0]
 
 ADMIN, MOD = "76561198000000009", "76561198000000007"
 DETAIL = "target_steam_id must be a numeric steam id"
@@ -114,8 +118,10 @@ def _client(monkeypatch):
         seen["hmac"].append((action, target))
         return True
 
-    async def session_ok(request, sid, _db):
+    async def _session_ok_body(request, sid, _db, **_kw):
         seen["session"].append(sid)
+    from soft_check_standin import SoftCheckStandIn
+    session_ok = SoftCheckStandIn(behave=_session_ok_body)   # records keywords (M3)
 
     async def admin_ok(_db, adm, action, target, sig):
         seen["hmac"].append((action, target))
@@ -241,8 +247,15 @@ def test_the_unmute_revokes_a_key_outside_the_domain_only_when_a_row_carries_it(
             r, db, out = call(bad, actor, chan, 0)
             assert r.status_code == 422 and r.json() == {"detail": DETAIL}, (actor, chan, bad, r.text)
             assert seen == proof(bad, actor, chan), (actor, chan, bad, seen)
-            assert len(db.log) == 1 and db.log[0][0].startswith("UPDATE chat_mutes") and arm in db.log[0][0], db.log
-            assert db.log[0][1]["sid"] == bad and db.committed == 0, (actor, chan, bad, db.log, db.committed)
+            # bans part 2a: the acting account passes the ban gate first (main._ban_lock_and_gate: its shared
+            # identity key, then its ban read, each the product's own text, ban_gate_statements), keyed on the
+            # actor, admin or moderator alike
+            gate = [(q, b) for q, b in db.log if q in _GATE.GATE_LOCKS or q in _GATE.BAN_READS]
+            assert gate == [(q, {"sid": actor}) for q in (_SHARED_KEY, _ONE_BAN_READ)], (actor, gate)
+            rest = [(q, b) for q, b in db.log if (q, b) not in gate]
+            assert db.log[:len(gate)] == gate, db.log
+            assert len(rest) == 1 and rest[0][0].startswith("UPDATE chat_mutes") and arm in rest[0][0], db.log
+            assert rest[0][1]["sid"] == bad and db.committed == 0, (actor, chan, bad, db.log, db.committed)
             assert "[CHAT-MOD]" not in out, out
         for key in LEGACY:
             r, db, out = call(key, actor, chan, 1)

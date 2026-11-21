@@ -122,7 +122,26 @@ def test_the_borrowed_placement_rule_is_the_settlements():
     assert [f.strip() for f in m.group(1).split(",")] == [
         "p.rounds_won", "p.points_total", "p.kills if kills_break_ties else 0"]
     assert "kills_break_ties = kills_in_canonical and _lobby_kills_capable" in src
-    assert "_lobby_kills_capable = bool(lobby[\"kills_tiebreak\"])" in src
+    assert "_lobby_kills_capable = _ffa_lobby_kills_capable(lobby)" in src
+    # The lobby's capability is read in one place, the shared check that the
+    # settlement and Credit both call; Credit places by the settlement's key.
+    shared = inspect.getsource(main._ffa_lobby_kills_capable)
+    assert "return bool(lobby[\"kills_tiebreak\"]) if \"kills_tiebreak\" in lobby else False" in shared
+    credit = inspect.getsource(main._qapply_credit)
+    assert "kills_break_ties = kills_in_canonical and _ffa_lobby_kills_capable(lobby)" in credit
+    mc = re.search(r"def _place_key\(p\) -> tuple:\s*\n\s*return \((.*)\)\n", credit)
+    assert mc and mc.group(1) == m.group(1), "Credit's placement key is the settlement's"
+    # Neither reads the flag itself: no copy of the rule inline.
+    for fn in (main.submit_ffa_match, main._qapply_credit):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        reads = [ast.unparse(n) for n in ast.walk(tree)
+                 if (isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant)
+                     and n.slice.value == "kills_tiebreak")
+                 or (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get"
+                     and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value == "kills_tiebreak")
+                 or (isinstance(n, ast.Compare) and isinstance(n.left, ast.Constant)
+                     and n.left.value == "kills_tiebreak")]
+        assert reads == [], (fn.__name__, "reads the lobby's kills_tiebreak itself", reads)
 
 
 # ── kills: the gap and the paid thresholds ─────────────────────────────────
@@ -294,7 +313,12 @@ def test_census_one_accept_verdict():
 
     def calls(fn):
         return {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    assert "_quarantine_accept_verdict" in calls(fns["admin_list_quarantine"])
-    assert "_quarantine_accept_verdict" in calls(fns["_qdig_feed_keys"])
+    # QAPPLY-1: the list and D1 read one verdict, _qapply_verdict's; the
+    # feed keys take it as D1's gate.
+    assert "_qapply_verdict" in calls(fns["admin_list_quarantine"])
+    d1 = [n for n, fn in fns.items() if "_qapply_verdict" in {
+        a.id for c in ast.walk(fn) if isinstance(c, ast.Call) for a in c.args if isinstance(a, ast.Name)}]
+    assert d1, "D1 reads _qapply_verdict"
+    assert "_quarantine_accept_verdict" not in calls(fns["_qdig_feed_keys"])
     src = open(MAIN_SRC, encoding="utf-8").read()
     assert src.count("played rated games since") == 1

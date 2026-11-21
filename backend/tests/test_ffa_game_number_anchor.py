@@ -579,6 +579,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import main
 import schemas
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl
+# The ban read's tables (bans part 2a): every schema builder below runs
+# these after its own statements, from the model metadata.
+_BAN_READ_SETUP = (["DROP TABLE IF EXISTS %s" % t for t in BAN_READ_DROP_ORDER]
+                   + ban_read_ddl())
 
 MIGRATION = (pathlib.Path(__file__).resolve().parents[1]
              / "sql" / "327_ffa_game_number.sql")
@@ -745,9 +750,25 @@ def test_every_surface_that_names_a_game_reads_the_column_not_the_room_string():
     # had not (see _ffa_with_settled). The endpoint keeps the RAW tail beside
     # it because _ffa_game_number_refusal's message distinguishes a missing
     # tail from an out-of-domain one, and `None` cannot say which it was.
+    # QAPPLY-1 adds three, each the same comparison and never a source: the
+    # held-report sentence for a number refusal (_qapply_refusal_text), the
+    # list's verdict (_qapply_verdict) and the Credit (_qapply_credit). Each
+    # passes the raw tail only to _ffa_game_number_refusal and the number
+    # sentence; the game a held report names comes from _ffa_named_game_number.
     assert calls == ['    tail = _ffa_room_game_no(room_id)',
-                     '    _room_tail = _ffa_room_game_no(report.photon_room_id)']
+                     '    _room_tail = _ffa_room_game_no(report.photon_room_id)',
+                     '        return _qapply_number_text(_ffa_room_game_no(report.photon_room_id),',
+                     '    tail = _ffa_room_game_no(room)',
+                     '    tail = _ffa_room_game_no(room)']
     assert calls[0] in inspect.getsource(main._ffa_named_game_number)
+    assert calls[2] in inspect.getsource(main._qapply_refusal_text)
+    for fn in (main._qapply_verdict, main._qapply_credit):
+        src = inspect.getsource(fn)
+        assert src.count(calls[3]) == 1 and "_ffa_named_game_number(room)" in src
+        uses = [ln.strip() for ln in src.splitlines() if re.search(r"\btail\b", ln)]
+        assert uses[0] == calls[3].strip() and all(
+            "_ffa_game_number_refusal(tail, expected)" in u or "_qapply_number_text(tail, expected)" in u
+            for u in uses[1:]), (fn.__name__, uses)
     # The raw tail's ONLY use in the endpoint is that refusal rule.
     endpoint = _endpoint_src()
     assert endpoint.count("_room_tail") == 2
@@ -1286,7 +1307,12 @@ def test_the_leave_rule_has_exactly_one_definition():
     calls = [node for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
              and node.func.id == "_ffa_leave_decision"]
-    assert len(calls) == 4
+    # QAPPLY-1 adds the fifth: the held-report Credit (_qapply_credit) asks the
+    # same helper, with the same two values, which seats settlement would
+    # have left unrated (read_absent=True: Credit refuses a readmission lobby,
+    # the one case where the endpoint passes False).
+    assert len(calls) == 5
+    assert "_ffa_leave_decision(" in inspect.getsource(main._qapply_credit)
     for call in calls:
         grace_passes = [kw.value for kw in call.keywords
                         if kw.arg == "grace_half"]
@@ -1562,7 +1588,7 @@ def test_the_closed_lobby_capture_gate_reads_the_same_win_invariant():
     `max_rounds == _score_target` here would refuse to KEEP exactly the
     config-skew report the shape rule now settles (#279/#432)."""
     src = _endpoint_src()
-    block = src[src.index("_roster_bound = "):src.index('detail="Lobby is not active"')]
+    block = src[src.index("if _ffa_check_roster(report, members, id_by_steam):"):src.index('detail="Lobby is not active"')]
     assert "_ffa_score_shape_error" in block
     assert "max_rounds == _score_target" not in block
 
@@ -1746,15 +1772,22 @@ def test_a_distinct_account_of_a_captured_room_is_compared_and_kept():
 def test_a_variant_row_is_as_actionable_in_the_admin_queue_as_any_other():
     """Keeping a payload nobody can act on would be half a fix. The queue's
     three endpoints key on the row's id, its mode, its player_ids and its
-    created_at — never on photon_room_id, which the list only renders."""
+    created_at — never on photon_room_id, which the list only renders.
+    Since QAPPLY-1 the Accept and the Credit read the row through
+    _qapply_held, whose statement keys on the id alone."""
     listing = inspect.getsource(main.admin_list_quarantine)
     assert "q.status = 'pending'" in listing
     assert "photon_room_id = " not in listing
-    for fn in (main.admin_accept_quarantine, main.admin_discard_quarantine):
+    src = inspect.getsource(main.admin_discard_quarantine)
+    assert "WHERE id=CAST(:qid AS UUID)" in src or \
+           "WHERE id = CAST(:qid AS UUID)" in src
+    assert "photon_room_id" not in src
+    for fn in (main.admin_accept_quarantine, main.admin_credit_quarantine):
         src = inspect.getsource(fn)
-        assert "WHERE id=CAST(:qid AS UUID)" in src or \
-               "WHERE id = CAST(:qid AS UUID)" in src
-        assert "photon_room_id" not in src
+        assert "_qapply_held(db, qid_uuid)" in src and "photon_room_id" not in src
+    held = " ".join(main._QAPPLY_SQL_HELD.split())
+    assert held.split(" WHERE ", 1)[1].startswith("q.id = CAST(:qid AS uuid)")
+    assert "photon_room_id = " not in held
 
 
 def test_an_encoding_difference_is_not_a_distinct_account():
@@ -1963,6 +1996,17 @@ def test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds():
     # dict in scope again.
     tree = ast.parse(inspect.getsource(main._ffa_record_and_refuse))
     raises = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+    # QAPPLY-1: the helper's first statement after its docstring is the
+    # held-report replay guard, whose raise answers an admin (no network
+    # client reads it) and captures nothing. It is set apart here, once, by
+    # its own test, and the split below is asserted over the other raises.
+    fn = tree.body[0]
+    guard = fn.body[1]
+    assert isinstance(guard, ast.If) and ast.unparse(guard.test) == "_QAPPLY_REPLAY.get() is not None", \
+        ast.unparse(guard)
+    assert len(guard.body) == 1 and isinstance(guard.body[0], ast.Raise) and \
+        ast.unparse(guard.body[0].exc.func) == "_QapplyRefused", ast.unparse(guard)
+    raises = [n for n in raises if n is not guard.body[0]]
     # WHICH SIDE OF THE RE-DERIVATION EACH EXIT SITS ON, asserted before the
     # total, because the total on its own is ambiguous and the helper's
     # docstring was read against it. "The two terminal answers" are two values
@@ -2110,7 +2154,11 @@ def test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing():
     for reason in ('"ffa_room_other_lobby"', '"ffa_replay_roster_mismatch"',
                    '"ffa_lobby_no_roster"', '"lobby_game_limit"',
                    '"v1_canonical_downgrade"', 'f"lobby_{lobby[\'status\']}"'):
-        i = src.index(reason)
+        # The capture SITE is the `reason=` argument (QAPPLY-1 reads the
+        # closed-lobby word once before it, in the replay's servable-word
+        # test, which captures nothing).
+        assert src.count("reason=" + reason) == 1, reason
+        i = src.index("reason=" + reason)
         assert "_ffa_record_and_refuse" in src[max(0, i - 400):i], reason
     # The bare _quarantine_report call, whose answer nobody read, is gone from
     # this endpoint entirely.
@@ -2149,7 +2197,7 @@ def test_a_closed_lobbys_unbound_report_is_not_answered_as_a_lifecycle_refusal()
     src = _endpoint_src()
     blk = src[src.index('if lobby["status"] != "active":'):
               src.index("# Roster validation")]
-    assert "_roster_bound" in blk
+    assert "_ffa_check_roster(report, members, id_by_steam)" in blk
     assert 'raise FfaReportRefusal(403, "Report must cover exactly the lobby roster"' in blk
     assert blk.count("_ffa_record_and_refuse") == 2
     assert "score_shape_mismatch" in blk
@@ -2814,6 +2862,8 @@ async def _setup(rows, games_played=None):
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
             await conn.execute(text(stmt))
         if games_played is not None:
             await conn.execute(text(
@@ -4063,6 +4113,8 @@ async def _endpoint_fixture(games_played, recorded_number, recorded_room,
     async with engine.begin() as conn:
         for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
             await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
+            await conn.execute(text(stmt))
     pids = {}
     match_id = uuid.uuid4()
     async with sm() as db:
@@ -4108,8 +4160,8 @@ async def _call_endpoint(sm, report):
     saved_secret = main.MATCH_HMAC_SECRET
     saved_session = main._check_steam_session
 
-    async def _no_session_check(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session_check = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     main.MATCH_HMAC_SECRET = ""
     main._check_steam_session = _no_session_check
@@ -4850,6 +4902,8 @@ async def _money_setup(players):
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         for stmt in [s for s in MONEY_SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
             await conn.execute(text(stmt))
     pids = {}
     async with sm() as db:
@@ -6005,6 +6059,8 @@ async def _settling_fixture(games_played, recorded_number, recorded_room):
         recorded_room=recorded_room)
     async with engine.begin() as conn:
         for stmt in [s for s in _SETTLE_SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+        for stmt in _BAN_READ_SETUP:
             await conn.execute(text(stmt))
     return engine, sm, pids, mid
 

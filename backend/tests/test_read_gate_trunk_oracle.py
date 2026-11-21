@@ -26,7 +26,9 @@ No stage row exists in any schema, so the lane runs in `off`.
 """
 from __future__ import annotations
 
+import ast
 import base64
+import inspect
 import io
 import json
 import math
@@ -103,6 +105,31 @@ NOISE = [
 # runs around them; a row moved to another price is still a difference.
 TIES = [
     ("GET", "/api/v1/shop/items", "/items", "price", "id"),
+]
+
+# Answers a landing changes ON PURPOSE, where trunk's answer is deterministic:
+# (method, the URL's exact path with the query left out, JSON path, trunk's
+# value, the lane's value, reason). The values are the bytes on the wire,
+# written out here; the oracle never imports the product's own table. compare()
+# accepts a lane answer that differs from trunk's only when the statuses are
+# equal, the headers are equal but for a content-length that matches each
+# side's own body, the paths that differ are exactly the paths declared here for
+# that request, and each holds the row's trunk value on trunk and the row's lane
+# value on the lane. intended_closing() names every row that describes nothing:
+# each row is USED (trunk old, lane new: before the landing) or SETTLED (both
+# hold the lane's value: trunk caught up after the landing). A SETTLED row may
+# be removed.
+INTENDED = [
+    ("GET", "/api/v1/admin/quarantine", "/detail",
+     "Not an admin",
+     "This action needs an admin account and a valid admin signature; nothing was changed.",
+     "The held-report apply lane answers every refusal of the quarantine surface with one of its "
+     "own plain sentences: admin_list_quarantine catches _require_admin's refusal and answers the "
+     "same status with the admin sentence. The lane's test that holds the list route's refusal: "
+     "test_qapply_pg.py::test_m2_malformed_input_to_each_route_answers_its_table_sentence "
+     "(403 with qapply_texts.tsv's admin sentence). The released client (v1.40.3 and v1.41.0, "
+     "ApiClient.FetchAdminQuarantine) puts a refused answer's body into AdminQuarantineError and "
+     "shows it; no client code at either tag matches the old text."),
 ]
 
 
@@ -356,25 +383,105 @@ def build_day_leaks(requests, results, days):
     return leaks
 
 
+def _same(value, want) -> bool:
+    """value is want, of the same JSON type (1 is not True, 1 is not 1.0)."""
+    return type(value) is type(want) and value == want
+
+
+def _intended_rows(req):
+    """The INTENDED rows of this request: its method and its URL's exact path."""
+    path = req["url"].split("?")[0]
+    return [row for row in INTENDED if row[0] == req["method"] and row[1] == path]
+
+
+def _content_length_holds(x) -> bool:
+    """Exactly one content-length, and it is the length of this side's own body."""
+    lengths = [v for k, v in x["headers"] if k == "content-length"]
+    return len(lengths) == 1 and lengths[0] == str(len(base64.b64decode(x["body"])))
+
+
+def _intended(req, b, l) -> int:
+    """The number of (request, path) pairs INTENDED accepts for a lane answer l
+    that differs from trunk's deterministic answer b, or 0 when it accepts
+    none: every condition must hold (see INTENDED)."""
+    if b["status"] != l["status"]:
+        return 0
+    if (sorted((k, v) for k, v in b["headers"] if k != "content-length")
+            != sorted((k, v) for k, v in l["headers"] if k != "content-length")):
+        return 0
+    if not (_content_length_holds(b) and _content_length_holds(l)):
+        return 0
+    rows = _intended_rows(req)
+    declared = {row[2] for row in rows}
+    db, dl = _decode(b), _decode(l)
+    if not declared or isinstance(db, bytes) or isinstance(dl, bytes):
+        return 0
+    if _paths(db, dl) != declared:
+        return 0
+    for _method, _url, path, old, new, _reason in rows:
+        try:
+            if not (_same(_at(db, path), old) and _same(_at(dl, path), new)):
+                return 0
+        except (KeyError, IndexError, ValueError, TypeError):
+            return 0
+    return len(declared)
+
+
+def intended_closing(requests, base, lane):
+    """Every INTENDED row that describes nothing, by name: a row must name at
+    least one request of the list, and over the requests it names it must be
+    USED (trunk holds the old value and the lane the new one) or SETTLED (both
+    hold the lane's value), the same state at every one of them."""
+    problems = []
+    for row in INTENDED:
+        method, url, path, old, new, _reason = row
+        states = set()
+        for req, b, l in zip(requests, base, lane):
+            if (req["method"], req["url"].split("?")[0]) != (method, url):
+                continue
+            try:
+                vb, vl = _at(_decode(_settle(req, b)), path), _at(_decode(_settle(req, l)), path)
+            except (KeyError, IndexError, ValueError, TypeError):
+                states.add("neither")
+                continue
+            if _same(vb, old) and _same(vl, new):
+                states.add("used")
+            elif _same(vb, new) and _same(vl, new):
+                states.add("settled")
+            else:
+                states.add("neither")
+        if not states:
+            problems.append(("INTENDED row names no request of the list", method, url, path))
+        elif states not in ({"used"}, {"settled"}):
+            problems.append(("INTENDED row is neither USED nor SETTLED", method, url, path, sorted(states)))
+    return problems
+
+
 def compare(requests, base, lane, ctl):
     """Every disagreement of the lane with trunk, judged against the frozen
     replay. Returns (problems, counts).
 
     An answer the control reproduces exactly is DETERMINISTIC: the lane must
-    equal it exactly. Otherwise every path where any two of the three bodies
+    equal it exactly, or differ from it only as INTENDED declares for that
+    request (_intended; counts["intended"] is the number of (request, path)
+    pairs accepted so). Otherwise every path where any two of the three bodies
     differ must be a path NOISE declares for this request, every declared
     value present on any side must pass its validator, the statuses must be
     equal, and the headers equal except a content-length that matches its own
     body. A trunk variation NOISE does not declare is itself a problem: the
     oracle then cannot compare that answer, and says so. Every side is
     settled first (_settle: the TIES lists' equal-key runs in tiebreak order)."""
-    problems, counts = [], {"deterministic": 0, "varying": 0, "validated": 0}
+    problems, counts = [], {"deterministic": 0, "varying": 0, "validated": 0, "intended": 0}
     for req, b, l, c in zip(requests, base, lane, ctl):
         b, l, c = (_settle(req, x) for x in (b, l, c))
         where = (req["site"], req["method"], req["url"], req["session"])
         if _answer(b) == _answer(c) and not _carries_declared(req, b):
             counts["deterministic"] += 1
             if _answer(l) != _answer(b):
+                accepted = _intended(req, b, l)
+                if accepted:
+                    counts["intended"] += accepted
+                    continue
                 problems.append(where + ("differs from a deterministic trunk answer",
                                          b["status"], l["status"],
                                          sorted(set(map(tuple, l["headers"])) ^ set(map(tuple, b["headers"]))),
@@ -445,13 +552,15 @@ def test_1403_replay_matches_trunk_oracle(three_lanes, tmp_path, capsys):
     assert os.path.normcase(os.path.abspath(WORKTREE)) in lane["main"], lane["main"]
     assert len(base["results"]) == len(lane["results"]) == len(ctl["results"]) == len(requests)
     problems, counts = compare(requests, base["results"], lane["results"], ctl["results"])
+    # Every INTENDED row is USED or SETTLED over the requests it names (see INTENDED).
+    problems += intended_closing(requests, base["results"], lane["results"])
     statuses = {}
     for r in base["results"]:
         statuses[r["status"]] = statuses.get(r["status"], 0) + 1
     with capsys.disabled():
         print(f"\n[bv-a oracle] base {sha[:8]} requests {len(requests)} "
               f"(calls {CALLS_AT_TAG}) frozen at {freeze} deterministic {counts['deterministic']} "
-              f"varying {counts['varying']} validated {counts['validated']} "
+              f"varying {counts['varying']} validated {counts['validated']} intended {counts['intended']} "
               f"trunk statuses {sorted(statuses.items())} problems {len(problems)}")
         for q, b, c in zip(requests, base["results"], ctl["results"]):
             b, c = _settle(q, b), _settle(q, c)
@@ -556,7 +665,7 @@ def test_settle_control(monkeypatch):
     assert not compare(shop, [base], [lane], [ctl])[0]
     assert not compare(shop, [base], [base], [ctl])[0]
     counts = compare(shop, [base], [lane], [ctl])[1]
-    assert counts == {"deterministic": 1, "varying": 0, "validated": 0}, counts
+    assert counts == {"deterministic": 1, "varying": 0, "validated": 0, "intended": 0}, counts
     # a row at another price is a difference
     assert compare(shop, [base], [_shop((1, 100), (2, 100), (7, 100), (3, 200), (5, 300))], [ctl])[0]
     # a changed row inside a run is a difference
@@ -602,3 +711,72 @@ def test_build_day_sweep_control():
     h2h = [{"site": "s", "method": "GET", "url": "/api/v1/h2h/1/2", "session": True}]
     declared = _r(b'{"profile": {"last_seen_s": "2026-10-30"}, "line": "2026-10-30"}')
     assert [leak[4] for leak in build_day_leaks(h2h, [declared], days)] == ["/line"]
+
+
+def _quarantine_row():
+    (row,) = [r for r in INTENDED if r[:3] == ("GET", "/api/v1/admin/quarantine", "/detail")]
+    return row
+
+
+def test_intended_control():
+    """INTENDED accepts the declared difference with the row's exact values,
+    and nothing else: the lane's value or trunk's value not the row's, a second
+    differing path, a status, a header other than content-length, a
+    content-length that does not match its own body, a sibling URL under the
+    same prefix and the same path under another method are each a problem."""
+    _m, url, _p, old, new, _reason = _quarantine_row()
+    req = [{"site": "s", "method": "GET", "url": url + "?admin_steam_id=1&hmac_signature=00", "session": False}]
+
+    def ans(detail, status=403, **more):
+        return _r(_encode(dict({"detail": detail}, **more)), status=status)
+    trunk, lane = ans(old), ans(new)
+    problems, counts = compare(req, [trunk], [lane], [trunk])
+    assert not problems, problems
+    assert counts == {"deterministic": 1, "varying": 0, "validated": 0, "intended": 1}, counts
+    # the lane's value is not the row's
+    assert compare(req, [trunk], [ans(new + " ")], [trunk])[0]
+    # trunk's value is not the row's
+    other = ans("Bad admin signature")
+    assert compare(req, [other], [lane], [other])[0]
+    # a second path differs that the row does not declare
+    two_t, two_l = ans(old, n=1), ans(new, n=2)
+    assert compare(req, [two_t], [two_l], [two_t])[0]
+    # the status differs
+    assert compare(req, [trunk], [ans(new, status=401)], [trunk])[0]
+    # a header other than content-length differs
+    typed = dict(lane, headers=[h for h in lane["headers"] if h[0] != "content-type"]
+                 + [["content-type", "text/plain"]])
+    assert compare(req, [trunk], [typed], [trunk])[0]
+    # a content-length that does not match its own body (on either side)
+    bad = dict(lane, headers=[["content-length", "25"], ["content-type", "application/json"]])
+    assert compare(req, [trunk], [bad], [trunk])[0]
+    bad_t = dict(trunk, headers=[["content-length", "97"], ["content-type", "application/json"]])
+    assert compare(req, [bad_t], [lane], [bad_t])[0]
+    # the same difference on a request the row does not name
+    for method, sibling in (("GET", url + "/00000000-0000-4000-8000-000000000001/discard"),
+                            ("POST", url + "/00000000-0000-4000-8000-000000000001/discard"),
+                            ("POST", url + "?admin_steam_id=1&hmac_signature=00")):
+        q = [{"site": "s", "method": method, "url": sibling, "session": False}]
+        assert compare(q, [trunk], [lane], [trunk])[0], (method, sibling)
+
+
+def test_intended_closing_control():
+    """The closing check: a USED row and a SETTLED row pass; a row whose request
+    holds the OLD value on both sides is named; a row that names no request of
+    the list is named; and the test of record calls the check."""
+    _m, url, path, old, new, _reason = _quarantine_row()
+    req = [{"site": "s", "method": "GET", "url": url + "?admin_steam_id=1&hmac_signature=00", "session": s}
+           for s in (False, True)]
+    trunk, lane = (_r(_encode({"detail": v}), status=403) for v in (old, new))
+    assert intended_closing(req, [trunk, trunk], [lane, lane]) == []          # USED
+    assert intended_closing(req, [lane, lane], [lane, lane]) == []            # SETTLED
+    stale = intended_closing(req, [trunk, trunk], [trunk, trunk])
+    assert [p[:4] for p in stale] == [("INTENDED row is neither USED nor SETTLED", "GET", url, path)], stale
+    mixed = intended_closing(req, [trunk, lane], [lane, lane])
+    assert [p[:4] for p in mixed] == [("INTENDED row is neither USED nor SETTLED", "GET", url, path)], mixed
+    elsewhere = [dict(q, url="/api/v1/mod-version") for q in req]
+    gone = intended_closing(elsewhere, [trunk, trunk], [lane, lane])
+    assert gone == [("INTENDED row names no request of the list", "GET", url, path)], gone
+    calls = {n.func.id for n in ast.walk(ast.parse(inspect.getsource(test_1403_replay_matches_trunk_oracle)))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "intended_closing" in calls, calls

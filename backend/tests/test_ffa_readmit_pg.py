@@ -17,6 +17,7 @@ import os
 import sys
 
 import pytest
+from sqlalchemy import event
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
@@ -1369,37 +1370,140 @@ def test_h5_offer_holds_the_shared_identity_key_through_commit(monkeypatch):
     run_env(monkeypatch, body)
 
 
-def test_h5_report_repeats_participant_lookup_below_the_lobby_lock(monkeypatch):
-    """H5 report side: a participant deleted while a report waits for the
-    lobby lock is rejected before journaling; no raw identity is recreated."""
-    async def body(env):
-        lob = await _rdm_lobby(env)
-        await env.at(lob, 60.0)
-        results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
-                   lob.sids[2]: (2, 5), lob.sids[3]: (1, 2)}
-        rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
-        real = main._ffa_lock_lobby_slot
-        reached, release = asyncio.Event(), asyncio.Event()
-        once = {"done": False}
+def _bound_route_sessions(env, timeout="10s"):
+    """Every connection the case's session maker opens from here on runs with
+    lock_timeout `timeout` (the engine is NullPool: each session is a new
+    connection), so a lock wait inside a route ends in 55P03 within the
+    test, never at the test run's bound. Returns the remover."""
+    engine = env.sm.kw["bind"].sync_engine
 
-        async def before_lock(db, lid):
-            if str(lid) == str(lob.lid) and not once["done"]:
-                once["done"] = True
-                reached.set()
-                await release.wait()
-            return await real(db, lid)
+    def _on_connect(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("SET lock_timeout = '%s'" % timeout)
+        cur.close()
 
-        env.mp.setattr(main, "_ffa_lock_lobby_slot", before_lock)
-        filing = asyncio.create_task(env.submit(rep))
+    event.listen(engine, "connect", _on_connect)
+    return lambda: event.remove(engine, "connect", _on_connect)
+
+
+async def _h5_take_while_report_waits_at_lobby_lock(env):
+    """A report of a started readmission lobby paused at its lobby lock;
+    meanwhile a second session asks member 4's identity key exclusive under
+    a 2 s lock_timeout of its own. Returns (the take's SQLSTATE or None when
+    it was granted, the report's answer)."""
+    lob = await _rdm_lobby(env)
+    await env.at(lob, 60.0)
+    results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
+               lob.sids[2]: (2, 5), lob.sids[3]: (1, 2)}
+    rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
+    real_lock = main._ffa_lock_lobby_slot
+    reached, release = asyncio.Event(), asyncio.Event()
+    once = {"done": False}
+
+    async def before_lock(db, lid):
+        if str(lid) == str(lob.lid) and not once["done"]:
+            once["done"] = True
+            reached.set()
+            await release.wait()
+        return await real_lock(db, lid)
+
+    env.mp.setattr(main, "_ffa_lock_lobby_slot", before_lock)
+    filing = asyncio.create_task(env.submit(rep))
+    refused = None
+    try:
         await asyncio.wait_for(reached.wait(), 10)
-        deleted = await A._delete_member(env, lob.sids[3])
+        try:
+            async with env.conn.transaction():
+                await env.conn.execute("SET LOCAL lock_timeout = '2s'")
+                await env.conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))", lob.sids[3])
+        except Exception as exc:          # the caller asserts on the SQLSTATE
+            refused = getattr(exc, "sqlstate", repr(exc))
+    finally:
         release.set()
-        answer = await filing
-        raw = await env.conn.fetchval(
-            "SELECT count(*) FROM ffa_report_journal WHERE strpos(payload::text, $1) > 0",
-            lob.sids[3])
-        assert deleted.status == 200 and answer.status == 404 and raw == 0, \
-            ("H5 report identity", deleted.status, answer.status, raw)
+    answer = await filing
+    env.mp.setattr(main, "_ffa_lock_lobby_slot", real_lock)
+    return refused, answer
+
+
+def test_h5_window_mutant_a_gate_without_the_identity_lock_leaves_it_open(monkeypatch):
+    """The mutant of part A below: the report's gate replaced by one that
+    takes no identity key. The same exclusive take is then granted while the
+    report waits at its lobby lock, so part A's 55P03 is the gate's lock."""
+    async def body(env):
+        remove_bound = _bound_route_sessions(env)
+        try:
+            async def gate_without_lock(db, steam_ids, *a, **kw):
+                return None
+            env.mp.setattr(main, "_ban_lock_and_gate", gate_without_lock)
+            refused, answer = await _h5_take_while_report_waits_at_lobby_lock(env)
+            assert refused is None and answer.status in (200, 202), \
+                ("H5 mutant", refused, answer.status, answer.body)
+        finally:
+            remove_bound()
+    run_env(monkeypatch, body)
+
+
+def test_h5_report_repeats_participant_lookup_below_the_lobby_lock(monkeypatch):
+    """H5 report side: a participant deleted while a report is in flight is
+    rejected before journaling; no raw identity is recreated.
+
+    Changed for bans part 2a (the ban gate of submit_ffa_match). The report
+    now takes the shared identity lock of every listed player in its gate
+    (_ban_lock_and_gate) before its participant lookup, and holds it to the
+    end of its transaction. delete_player_data takes the same key exclusive
+    first. So a deletion can no longer land between the participant lookup
+    and the lobby lock, the window this test used to open by pausing the
+    report there: the deletion waits for the report (both writers take the
+    identity key first and the lobby row second, one order). Paused there,
+    the old choreography waited for the deletion while the deletion waited
+    for the paused report, until the run's bound. Part A proves the window
+    closed: while the report waits at the lobby lock, the member's identity
+    key cannot be taken exclusive (55P03 under a 2 s lock_timeout of its
+    own). Part B keeps the rule with the pause at the gate's entry, where the
+    report holds no identity key: the deletion lands first, the report is
+    answered 404 and journals nothing of the deleted member."""
+    async def body(env):
+        remove_bound = _bound_route_sessions(env)
+        try:
+            # Part A: the report waits at the lobby lock holding the key.
+            refused, answer = await _h5_take_while_report_waits_at_lobby_lock(env)
+            assert refused == "55P03" and answer.status in (200, 202), \
+                ("H5 window closed", refused, answer.status, answer.body)
+
+            # Part B: the deletion lands while the report waits at the gate.
+            lob = await _rdm_lobby(env)
+            await env.at(lob, 60.0)
+            results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
+                       lob.sids[2]: (2, 5), lob.sids[3]: (1, 2)}
+            rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
+            real_gate = main._ban_lock_and_gate
+            reached, release = asyncio.Event(), asyncio.Event()
+            once = {"done": False}
+
+            async def before_gate(db, steam_ids, *a, **kw):
+                if lob.sids[3] in list(steam_ids) and not once["done"]:
+                    once["done"] = True
+                    reached.set()
+                    await release.wait()
+                return await real_gate(db, steam_ids, *a, **kw)
+
+            env.mp.setattr(main, "_ban_lock_and_gate", before_gate)
+            filing = asyncio.create_task(env.submit(rep))
+            try:
+                await asyncio.wait_for(reached.wait(), 10)
+                deleted = await A._delete_member(env, lob.sids[3])
+            finally:
+                release.set()
+            answer = await filing
+            env.mp.setattr(main, "_ban_lock_and_gate", real_gate)
+            raw = await env.conn.fetchval(
+                "SELECT count(*) FROM ffa_report_journal WHERE strpos(payload::text, $1) > 0",
+                lob.sids[3])
+            assert deleted.status == 200 and answer.status == 404 and raw == 0, \
+                ("H5 report identity", deleted.status, answer.status, raw)
+        finally:
+            remove_bound()
     run_env(monkeypatch, body)
 
 

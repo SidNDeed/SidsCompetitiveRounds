@@ -5755,7 +5755,12 @@ async def player_tournaments(steam_id: str, limit: int = 10, db: AsyncSession = 
 
 
 @router.get("/players/{steam_id}/penalty", response_model=TournamentPenaltyResponse)
-async def player_penalty(steam_id: str, db: AsyncSession = Depends(get_db)):
+async def player_penalty(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    # This GET writes (it recomputes and commits the account's cached penalty)
+    # and acts for the account its path names; no client calls it, so an
+    # actively banned account is refused like every route of the BAN class.
+    import main as _main
+    await _main._ban_lock_and_gate(db, [steam_id], request)
     player = await _get_player_by_steam(db, steam_id)
     await _recompute_player_penalty(db, player.id)
     await db.commit()

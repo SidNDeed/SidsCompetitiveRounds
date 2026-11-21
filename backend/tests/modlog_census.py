@@ -35,7 +35,8 @@ CENSUS = {
     ('POST', '/api/v1/admin/moderation-cases/{case_id}/act'): (MOD, 'mail_case', (('main', '_moderation_case_act'), ('main', '_apply_ban_core'), )),  # main.admin_moderation_case_act
     ('POST', '/api/v1/admin/pc/portrait/clear'): (MOD, 'cards', (('main', 'admin_pc_portrait_clear'), )),  # main.admin_pc_portrait_clear
     ('POST', '/api/v1/admin/pc/trades/reverse'): (MOD, 'cards', (('main', '_admin_pc_trade_reverse_tx'), )),  # main.admin_pc_trade_reverse
-    ('POST', '/api/v1/admin/quarantine/{qid}/accept'): (MOD, 'results', (('main', 'admin_accept_quarantine'), )),  # main.admin_accept_quarantine
+    ('POST', '/api/v1/admin/quarantine/{qid}/accept'): (MOD, 'results', (('main', '_qapply_finish'), )),  # main.admin_accept_quarantine
+    ('POST', '/api/v1/admin/quarantine/{qid}/credit'): (MOD, 'results', (('main', '_qapply_credit'), )),  # main.admin_credit_quarantine
     ('POST', '/api/v1/admin/quarantine/{qid}/discard'): (MOD, 'results', (('main', 'admin_discard_quarantine'), )),  # main.admin_discard_quarantine
     ('POST', '/api/v1/admin/records/exclude'): (MOD, 'results', (('main', 'admin_record_exclude'), )),  # main.admin_record_exclude
     ('POST', '/api/v1/admin/resolve-flag-restoration'): (MOD, 'results', (('main', 'admin_resolve_flag_restoration'), )),  # main.admin_resolve_flag_restoration

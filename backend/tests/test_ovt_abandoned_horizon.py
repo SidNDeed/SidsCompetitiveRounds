@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import main
+from ban_read_tables import BAN_READ_DROP_ORDER, ban_read_ddl
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1721,11 +1722,19 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # QDIG-1 adds one decline at one site and no waiter: the held-report
     # janitor's row lock (_QDIG_SQL_JANITOR_LOCK, FOR UPDATE SKIP LOCKED, in
     # _qdig_janitor_pass). Before it: 42/31/39/28.
+    # QAPPLY-1 adds one waiter at one site and no decline: the held-report
+    # gate's lock on each participant's FFA rating row (_qapply_gate,
+    # SELECT 1 FROM glicko_ratings_ffa WHERE player_id = :pid FOR UPDATE).
+    # The walk reaches it through the report route's body, which calls the
+    # gate only under the held-report replay; no janitor sets that, so only
+    # an admin's Accept takes this lock. It waits on a settle or a rating
+    # write of the same player, never on a janitor row. Before it: 43/31/40/28.
     assert [r["func"] for r in census["declines"]].count("_qdig_janitor_pass") == 1, census["declines"]
+    assert [r["func"] for r in census["waits"]].count("_qapply_gate") == 1, census["waits"]
     assert len(census["declines"]) == 43, census["declines"]
-    assert len(census["waits"]) == 31, census["waits"]   # 25 before the queue-row lock became visible
+    assert len(census["waits"]) == 32, census["waits"]   # 25 before the queue-row lock became visible
     assert len(census["decline_sites"]) == 40, census["decline_sites"]
-    assert len(census["wait_sites"]) == 28, census["wait_sites"]   # 22 before: the four queue-row lock literals
+    assert len(census["wait_sites"]) == 29, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
 def test_a_lock_taking_path_outside_the_counted_set_reds_the_census():
@@ -1897,7 +1906,12 @@ PIN_RE = re.compile(r'PIN main\.py:(\d+) "([^"]+)"')
 # photon_room_id FROM ovt_series ... FOR SHARE). It re-reads only the row
 # the live arm has just selected, by id, and keeps it only in the live arm's
 # statuses, so it opens no path to a row the live arm would not take.
-OVT_SERIES_STATUS_STATEMENTS = 32
+# 34 with the ban sweep (bans part 2a): _ban_void_lock's read of the banned
+# account's ACTIVE 1v2 series by roster, and _ban_void_apply's UPDATE of that
+# row from 'active' to 'canceled' (member_banned). Both take only 'active'
+# rows, by the banned account's seat; a 14-day-stuck active row holding the
+# account is ended by the ban like any other active one.
+OVT_SERIES_STATUS_STATEMENTS = 34
 
 
 def test_every_bug391_source_citation_resolves_to_what_it_names():
@@ -2279,7 +2293,7 @@ def _sink_schema() -> str:
     """
     schema = SCHEMA_120.read_text(encoding="utf-8")
     stmts = [f"DROP TABLE IF EXISTS {t}" for t in (
-        "ovt_match_cards", "gold_transactions", "glicko_ratings",
+        "ovt_match_cards", "gold_transactions", "glicko_ratings", *BAN_READ_DROP_ORDER,
         "ovt_matches", "ovt_series", "players")]
     stmts.append(SINK_PLAYERS)
     for table in ("ovt_series", "ovt_matches"):
@@ -2298,6 +2312,9 @@ def _sink_schema() -> str:
     # A count of zero would build the pre-201 table and still pass (#342).
     assert added >= 7, added
     stmts.extend(SINK_EXTRAS)
+    # the 1v2 report reads every roster member's ban (bans part 2a): the ban
+    # read's tables, from the model metadata
+    stmts.extend(ban_read_ddl())
     out = [re.sub(r"--[^\n]*", "", s).strip() for s in stmts]
     assert not any(";" in s for s in out), "a statement still carries a ';'"
     return ";\n".join(out) + ";"
@@ -2374,8 +2391,8 @@ def _sink_patch(monkeypatch):
     a test key, so the REAL signature check runs on every report. Nothing
     that records, pays, compares or locks is replaced.
     """
-    async def _no_session(request, steam_id, db):
-        return None
+    from soft_check_standin import SoftCheckStandIn
+    _no_session = SoftCheckStandIn()   # admits every caller; records keywords (M3)
 
     async def _no_podium(db):
         return []

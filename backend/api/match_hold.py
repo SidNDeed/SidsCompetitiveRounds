@@ -251,7 +251,8 @@ async def _guard_identities(db, steam_ids):
     calls in that transaction may only reacquire its already-held subset;
     after rollback the caller starts this order again, using fresh reads.
     """
-    keys = sorted({str(s) for s in steam_ids if s is not None})
+    from identity_order import identity_lock_key
+    keys = sorted({str(s) for s in steam_ids if s is not None}, key=identity_lock_key)
     for steam in keys:
         await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
                          {"sid": steam})

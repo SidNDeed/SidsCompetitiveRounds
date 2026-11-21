@@ -387,9 +387,15 @@ class PermanentReportRefusal(_WindowHTTPException):
     not use this class; their journal entry remains retryable.
     """
 
-    def __init__(self, refusal):
+    # True when no report of the game can get past the refusal (a ban of an
+    # account it names, or a record a ban ended): the window then closes as
+    # refused (close_refused) instead of waiting for another report.
+    closes_window = False
+
+    def __init__(self, refusal, *, closes_window=False):
         super().__init__(status_code=refusal.status_code, detail=refusal.detail,
                          headers=refusal.headers)
+        self.closes_window = bool(closes_window)
 
 
 class ReportRefused(Exception):
@@ -403,6 +409,23 @@ class ReportAlreadyRecorded(Exception):
         self.physical_game = physical_game
         self.receipt = receipt
         super().__init__("physical game already recorded")
+
+
+async def close_refused(db, room, game_id, now):
+    """Close the window of (room, G) as refused, under the caller's window
+    lock: its terminal field superseded_at is set, and every held or journaled
+    report of G is kept for review. Nothing settles it afterwards (a terminal
+    window is never due, and a receipt answers as for a superseded one)."""
+    await db.execute(text(
+        "UPDATE match_report_windows SET superseded_at = CAST(:now AS timestamptz)"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND settled_at IS NULL AND superseded_at IS NULL"),
+        {"now": now, "room": room, "g": str(game_id)})
+    await db.execute(text(
+        "UPDATE match_report_journal SET state = 'kept', decided_at = CAST(:now AS timestamptz)"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND state IN ('held', 'journaled')"),
+        {"now": now, "room": room, "g": str(game_id)})
 
 
 async def _keep_permanently_refused(db, room, game_id, attempt):
@@ -684,6 +707,9 @@ async def _release_held(db, *, mode, room, game_id, now, settle,
         except PermanentReportRefusal as exc:
             if not await _keep_permanently_refused(db, room, game_id, exc.attempted_report):
                 raise
+            if exc.closes_window:
+                await close_refused(db, room, game_id, now)
+                break
             chosen = pick(await _journaled(db, room, game_id))
             continue
         break

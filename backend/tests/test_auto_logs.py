@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "api"))
 import auto_logs  # noqa: E402
 import main  # noqa: E402
 import schemas  # noqa: E402
+import ban_gate_statements as _GATE  # noqa: E402
 
 #: Every ceiling constant the auto-log path waits under, at its PRODUCTION
 #: value: read at import, before any test lowers one, so a test can give
@@ -1821,7 +1822,18 @@ def test_the_upload_lock_is_not_in_the_applications_identity_namespace(logdir, v
     db = _ok_db()
     _run(auto_logs.upload_auto_log(_request(), db))
 
-    lock_sql = [sql for sql, _ in db.log if LOCK_KEY in sql]
+    # Bans part 2a (F4): the writing transaction (T2) also takes the ban
+    # gate's SHARED identity key, once, to read the ban under the lock the ban
+    # core takes exclusive (main._ban_lock_and_gate; the statement read from
+    # the product by ban_gate_statements). Shared holders do not wait for one
+    # another, so a seat's match report, which takes the same key shared for
+    # its own gate, is not queued behind it; the route's OWN lock stays out of
+    # the identity namespace, which is this test's rule.
+    gate = [sql for sql, _ in db.log if _GATE.norm(sql) in _GATE.GATE_LOCKS]
+    assert [_GATE.norm(s) for s in gate] == [
+        "SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"], gate
+    lock_sql = [sql for sql, _ in db.log
+                if LOCK_KEY in sql and _GATE.norm(sql) not in _GATE.GATE_LOCKS]
     assert lock_sql, "no advisory lock taken at all"
     for sql in lock_sql:
         assert "CAST(:cls AS integer)" in sql, (
@@ -7731,9 +7743,18 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         "the blob's directory barrier is no longer inside the function the "
         "section's write hop calls")
 
+    import concurrent.futures
+    import threading
     opened = {}
     stalled = []
     flush_began = []
+    # The stall is a wait on this event, bounded by `stall`: an arm whose
+    # handler waits the stall out (the mutant) waits exactly as long as the
+    # old `time.sleep(stall)` made it, and an arm answered by the ceiling has
+    # the stall released at its answer (`_attempt`).
+    release = threading.Event()
+    WORK_END_CAP_S = 30.0
+    ABSENT = object()
 
     def rec_open(path, flags, mode=0o666):
         fd = os.open(str(path), flags, mode)
@@ -7755,14 +7776,24 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         if opened.get(fd, "").endswith(".log.gz"):
             stalled.append(opened[fd])
             flush_began.append(time.monotonic())
-            time.sleep(stall)
+            release.wait(stall)
 
     def _attempt(db, handler=None):
         """What the HANDLER took, not what the loop took to drain.
 
         A stalled flush leaves a worker thread running after the handler has
         answered, and nothing takes a thread back once it has picked the
-        work up. Round 7's hops ran on the loop's default executor, which
+        work up. So, for the arm's duration, the case records the future of
+        every call put on the module's two pools (an instance attribute over
+        each pool's `submit`, taken off again in the `finally`); the stall is
+        RELEASED when the handler has answered, and the arm waits (at most
+        WORK_END_CAP_S) until those calls have ended -- the write's directory
+        flush and the cleanup that waited for the write's lock -- before it
+        puts `os` back and returns. Those calls then run under this case's
+        own patches; left parked, they woke seconds after the case had
+        returned and ran under a later case's (AL1). The release comes after
+        the clock has stopped, so it changes no timing below. Round 7's hops
+        ran on the loop's default executor, which
         `asyncio.run` waits for on its way to closing the loop, so timing the
         run measured that teardown and reported a deadline as missed on a
         request that met it; since round 8 they run on the module's volume
@@ -7791,12 +7822,37 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
             seen["took"] = time.monotonic() - (
                 flush_began[-1] if flush_began else started)
 
+        submitted = []
+        pools = (auto_logs._VOLUME_POOL, auto_logs._CPU_POOL)
+        priors = []
+
+        def recording(real_submit):
+            def submit(fn, /, *args, **kwargs):
+                fut = real_submit(fn, *args, **kwargs)
+                submitted.append(fut)
+                return fut
+            return submit
+
         real_os = auto_logs.os
         auto_logs.os = _OsProxy(open=rec_open, fsync=slow_fsync)
         try:
+            for pool in pools:
+                priors.append((pool, vars(pool).get("submit", ABSENT)))
+                pool.submit = recording(pool.submit)
             _run(call())
         finally:
+            for pool, prior in reversed(priors):
+                if prior is ABSENT:
+                    vars(pool).pop("submit", None)
+                else:
+                    pool.submit = prior
+            release.set()
+            _done, left = concurrent.futures.wait(submitted, timeout=WORK_END_CAP_S)
             auto_logs.os = real_os
+            release.clear()
+        assert not left, (
+            "the arm's pool work had not ended %.0fs after its stall was "
+            "released: %d call(s) still running" % (WORK_END_CAP_S, len(left)))
         return seen["refused"], seen["took"]
 
     # LIVE: a flush that does not return inside T ends the span.
@@ -9780,10 +9836,11 @@ def test_every_automatic_cleanup_waits_on_a_worker_thread():
                         and isinstance(node.func, ast.Name)
                         and node.func.id == "_discard_for_refusal"):
                     refusals[fn.name] = refusals.get(fn.name, 0) + 1
-    assert refusals == {"upload_auto_log": 5}, (
-        "the handler's refusal arms that clean up moved: %r -- the five are "
-        "the deadline, the cancellation, the re-check, the cap at the "
-        "re-check and the failed INSERT" % (refusals,))
+    assert refusals == {"upload_auto_log": 6}, (
+        "the handler's refusal arms that clean up moved: %r -- the six are "
+        "the deadline, the cancellation, the ban read under the identity "
+        "lock in the writing transaction (bans part 2a, F4), the re-check, "
+        "the cap at the re-check and the failed INSERT" % (refusals,))
 
     site = "        gone = await _release_marked_blob_off_loop(own)\n"
     assert src.count(site) == 1, src.count(site)
@@ -11536,9 +11593,11 @@ def test_a_count_that_reached_the_cap_before_the_insert_refuses_and_discards(
     assert isinstance(out, HTTPException) and out.status_code == 429, out
     assert out.headers.get("Retry-After"), out.headers
     assert not db.sql_for(INSERT_KEY), "the upload was INSERTed past the cap"
-    assert len(db.sql_for(LOCK_KEY)) == 2, (
-        "the lock was taken %d time(s); T1 and T2 each take it"
-        % len(db.sql_for(LOCK_KEY)))
+    own = [s for s in db.sql_for(LOCK_KEY) if _GATE.norm(s) not in _GATE.GATE_LOCKS]
+    assert len(own) == 2, (
+        "the lock was taken %d time(s); T1 and T2 each take it" % len(own))
+    # and the ban gate's shared identity key once, in T2 alone (bans part 2a, F4)
+    assert len(db.sql_for(LOCK_KEY)) - len(own) == 1, db.sql_for(LOCK_KEY)
     assert _blobs(logdir) == [] and _markers(logdir) == []
     printed = capsys.readouterr().out
     assert "on the re-check before the INSERT" in printed, printed
@@ -12092,3 +12151,66 @@ def test_the_336_prose_states_the_one_copy_the_tree_carries():
             ("    # the precondition reads objects, not files\n", False)):
         mutated = src.replace(anchor, anchor + plant, 1)
         assert bool(_336_prose_findings(mutated, size, digest)) is reds, plant
+
+
+# -- bans part 2a: the admission read takes no lock ----------------------------
+#
+# The route's ban read before admission is a plain read (main._ban_gate_or_raise):
+# a banned account's upload is refused 409 there, before the scrub, with no
+# advisory lock taken and nothing written. The read under the identity lock is
+# the writing transaction's (T2). The statements are the product's own
+# (ban_gate_statements), never retyped.
+
+_ONE_BAN_READ = [s for s in _GATE.text_statements(main._is_banned)]
+assert len(_ONE_BAN_READ) == 1, _ONE_BAN_READ
+
+
+def _banned_db():
+    db = _ok_db()
+    db.script[_ONE_BAN_READ[0]] = [[("cheating",)]]
+    return db
+
+
+def _drive_banned():
+    db = _banned_db()
+    try:
+        out = _run(auto_logs.upload_auto_log(_request(), db))
+    except HTTPException as ex:
+        out = ex
+    return out, db
+
+
+def test_a_banned_upload_is_refused_before_admission_and_takes_no_lock(logdir, verified):
+    out, db = _drive_banned()
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert [s for s, _ in db.log if LOCK_KEY in s] == [], db.log
+    assert not db.sql_for(COUNT_KEY) and not db.sql_for(INSERT_KEY), db.log
+    assert _blobs(logdir) == [] and _markers(logdir) == []
+    # control: the same request for an account with no ban is admitted, and
+    # the gate's shared identity key is taken once, in the writing transaction
+    db = _ok_db()
+    _run(auto_logs.upload_auto_log(_request(), db))
+    assert db.sql_for(INSERT_KEY), db.log
+    gate = [s for s, _ in db.log if _GATE.norm(s) in _GATE.GATE_LOCKS]
+    assert len(gate) == 1, gate
+    insert_at = max(i for i, (s, _) in enumerate(db.log) if INSERT_KEY in s)
+    gate_at = [i for i, (s, _) in enumerate(db.log) if _GATE.norm(s) in _GATE.GATE_LOCKS][0]
+    assert gate_at < insert_at
+
+
+def test_mutant_admission_read_under_the_identity_lock_takes_a_lock(logdir, verified, monkeypatch):
+    """The form before this fix: the admission read under the identity lock.
+    The refused upload then takes an advisory lock, which the test above
+    refuses."""
+    plain = main._ban_gate_or_raise
+    shared = [s for s in _GATE.GATE_LOCKS if "_shared(" in s]
+    assert len(shared) == 1, shared
+
+    async def locked(db, steam_id, request=None):
+        # _ban_lock_and_gate's own pass for one id: the shared key, then the read
+        await db.execute(main.text(shared[0]), {"sid": steam_id})
+        await plain(db, steam_id, request)
+    monkeypatch.setattr(main, "_ban_gate_or_raise", locked)
+    out, db = _drive_banned()
+    assert isinstance(out, HTTPException) and out.status_code == 409, out
+    assert [s for s, _ in db.log if LOCK_KEY in s] != []

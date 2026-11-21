@@ -48,10 +48,21 @@ MEANINGFUL = frozenset({
 # --- FROZEN (generated once at a30d37f6, 2026-11-02T18:11:21Z, by the round-7 gg
 # generator from the real walks; nothing added by hand; never regenerated) ---
 SHAPES = frozenset({
+    # FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a), 20 Nov 2026): five shapes of
+    # match_hold._guard_identities at 71e83a2e (the local import of identity_lock_key
+    # and the key= of its sorted call, 9d8da712 of 18 Nov), added AFTER the code: a
+    # recorded deviation from the frozen-first order of REHEARSAL-FOUR-R6 (1)(b).
+    # The two shapes they replace (the body without ImportFrom, and the sorted
+    # call with keywords=[]) were reached by no other walk at 71e83a2e and are
+    # taken out, so the frozen set equals the walks' reach both ways.
+    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|ImportFrom|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',
+    'Assign.value>Call(func=Name,args=[SetComp],keywords=[keyword])',
+    "AsyncFunctionDef.body>ImportFrom(module='identity_order',names=[alias],level=0)",
+    "Call.keywords>keyword(arg='key',value=Name)",
+    "ImportFrom.names>alias(name='identity_lock_key',asname=None)",
     '<root>>Assign(targets=[Name],value=Await,type_comment=-)',
     '<root>>Assign(targets=[Name],value=Call,type_comment=-)',
     '<root>>Assign(targets=[Tuple],value=Await,type_comment=-)',
-    '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|For|If|Return],decorator_list=[],returns=-,type_comment=-,type_params=[])',
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=-,type_comment=-,type_params=[])',
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If],decorator_list=[],returns=Constant,type_comment=-,type_params=[])',
     '<root>>AsyncFunctionDef(name=str,args=arguments,body=[Assign|Expr|If|Return],decorator_list=[],returns=Name,type_comment=-,type_params=[])',
@@ -85,7 +96,6 @@ SHAPES = frozenset({
     'Assign.value>Call(func=Name,args=[Attribute],keywords=[])',
     'Assign.value>Call(func=Name,args=[BoolOp],keywords=[])',
     'Assign.value>Call(func=Name,args=[Name],keywords=[])',
-    'Assign.value>Call(func=Name,args=[SetComp],keywords=[])',
     'Assign.value>Constant(value=int)',
     'Assign.value>Dict(keys=[Constant],values=[Call|Constant|Name])',
     'Assign.value>JoinedStr(values=[Constant|FormattedValue])',
@@ -533,6 +543,8 @@ IMPORTS = frozenset({
     ('from', 'main', 0, (('_lease_acquire', None), ('_lease_admission_gate', None), ('LEASE_TTL_ASSEMBLY', None))),
     ('from', 'main', 0, (('_lease_admission_gate', None), ('_lease_release', None))),
     ('import', None, 0, (('uuid', 'uuid_mod'),)),
+    # FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a)): match_hold._guard_identities' local import.
+    ('from', 'identity_order', 0, (('identity_lock_key', None),)),
 })
 # --- END FROZEN ---
 
@@ -720,6 +732,19 @@ ORDERED = ("<orders>",)
 ORDER_RECORD = {"sink": None}
 ORDER_SWITCH = {"bindings": None}
 GATE_ORDERS = frozenset({
+    # FIX-3C (ruling RULING-H8-GATE-GRAMMAR (a), 20 Nov 2026): the nine keys of
+    # match_hold._guard_identities taken at 71e83a2e by order_keys (fx3c gate_reach),
+    # replacing its eight keys of the round-9 tip; the code they admit (9d8da712,
+    # 18 Nov) PRECEDES this edit by two days, a recorded deviation from frozen-first.
+    ('14e759b1d07fbb49', 'order', '_guard_identities', ('body[3]', 'body[0]')),
+    ('3c8f34b21acea836', 'order', '_guard_identities', ()),
+    ('54e777e0898a78b2', 'order', '_guard_identities', ('body[2]',)),
+    ('64f607c2bb90af2f', 'order', '_guard_identities', ('body[1]',)),
+    ('78811599e5bb13e5', 'order', '_guard_identities', ('body[5]',)),
+    ('a0568a9263f109d9', 'order', '_guard_identities', ('body[4]',)),
+    ('b3bc4788edb22c98', 'order', '_guard_identities', ('body[4]', 'body[0]')),
+    ('b8b7efa7c5151ee3', 'order', '_guard_identities', ('body[6]',)),
+    ('e43093924623c2fb', 'order', '_guard_identities', ('body[3]',)),
     ('01602505519dd810', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[3]')),
     ('01b611593461db74', 'order', '_rdm_live_or_lapse', ('body[3]', 'body[0]')),
     ('01efad3d5d1a4363', 'order', '_asm_readmit_work', ('body[2]', 'body[0]')),
@@ -735,7 +760,6 @@ GATE_ORDERS = frozenset({
     ('13b5fd7b9f466b05', 'order', '_rdm_hold_s', ('body[1]',)),
     ('149b70a756c9fb62', 'order', '_ffa_queue_poll_inner', ('body[45]',)),
     ('14af1e2626555d3e', 'order', '_state_payload', ('body[1]',)),
-    ('14e759b1d07fbb49', 'order', '_guard_identities', ('body[2]', 'body[0]')),
     ('1632fd61e9b3c47f', 'order', '_rdm_claim', ('body[4]',)),
     ('1738b034ed3d760d', 'order', '_deadline_s', ('body[1]',)),
     ('17dfb7fef862bc50', 'order', '_asm_readmit_work', ('body[1]',)),
@@ -862,7 +886,6 @@ GATE_ORDERS = frozenset({
     ('75146ec0a8e5a4af', 'order', '_deadline_s', ('body[0]',)),
     ('766f98a81b978d6c', 'order', '_rdm_end_hold', ('body[4]',)),
     ('77964683923e6efb', 'order', 'match_hold_open', ('body[12]', 'body[0]')),
-    ('78811599e5bb13e5', 'order', '_guard_identities', ('body[4]',)),
     ('7c4f2b739751f105', 'order', '_rdm_end_hold', ('body[10]',)),
     ('7c9e736cfa26ce1f', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[5]')),
     ('7e206cbd71468270', 'order', '_rdm_claim', ('body[3]',)),
@@ -875,7 +898,6 @@ GATE_ORDERS = frozenset({
     ('87685f018d74456e', 'order', '_rdm_line', ('body[1]',)),
     ('879c8d57cd63322d', 'order', 'team_lobby_start', ('body[22]',)),
     ('87c4edab35692981', 'order', '_lease_acquire', ('body[1]', 'body[0]')),
-    ('87ce5985143ac2d2', 'order', '_guard_identities', ('body[1]',)),
     ('8867c14ec37fd70f', 'order', '_asm_deferred_departure', ('body[3]',)),
     ('89cac1cfd9654255', 'order', '_state_word', ('body[3]', 'body[0]')),
     ('8b58ec50a9f68fba', 'order', '_effective_closure', ('body[3]', 'body[1]')),
@@ -894,7 +916,6 @@ GATE_ORDERS = frozenset({
     ('960830ae832c2209', 'order', '_state_word', ('body[1]',)),
     ('9625dbece5e0725f', 'order', '_rdm_live_or_lapse', ('body[2]',)),
     ('99fb332ea9597af1', 'order', '_team_relock_existing_series', ('body[4]',)),
-    ('9b7d84624a9893a7', 'order', '_guard_identities', ()),
     ('9c1df66bab560ded', 'order', '_rdm_claim', ('body[9]',)),
     ('9d63eb3574ea65fd', 'order', '_hold_row', ('body[1]', 'body[0]')),
     ('9dab59895133d1c0', 'order', '_open_attempt_matches', ('body[0]',)),
@@ -903,7 +924,6 @@ GATE_ORDERS = frozenset({
     ('9f407da70b9c9ba2', 'order', '_rdm_end_hold', ('body[6]', 'orelse[1]')),
     ('9f559c7ab4cf2ab2', 'order', 'match_hold_claim', ('body[9]', 'body[3]')),
     ('a005df6e598a76a7', 'order', '_open_replay', ('body[3]', 'body[1]')),
-    ('a0568a9263f109d9', 'order', '_guard_identities', ('body[3]',)),
     ('a2421f3bd0c1b171', 'order', '_rdm_attempt', ('body[0]',)),
     ('a6769c7937bb30a3', 'order', '_asm_deferred_departure', ('body[4]', 'body[0]')),
     ('a79de91c9d3ccd78', 'order', '_effective_closure', ('body[1]', 'body[0]')),
@@ -916,13 +936,11 @@ GATE_ORDERS = frozenset({
     ('b3092c0e61db74d1', 'order', '_rdm_claim', ('body[2]',)),
     ('b3614d60954e03d4', 'order', '_write_open_attempt', ('body[1]',)),
     ('b3883a9c80d3b4ac', 'order', '_rdm_row', ()),
-    ('b3bc4788edb22c98', 'order', '_guard_identities', ('body[3]', 'body[0]')),
     ('b3fa1f92fe3c70fe', 'order', '_refuse_attempt', ()),
     ('b4300867b4f7facb', 'order', '_ffa_lock_roster', ('body[23]',)),
     ('b6962c41f3a87399', 'order', '_open_replay', ('body[11]',)),
     ('b73b327ecac0a63a', 'order', '_effective_closure', ()),
     ('b7de5a4ffbf927ea', 'order', '_open_replay', ('body[5]',)),
-    ('b8b7efa7c5151ee3', 'order', '_guard_identities', ('body[5]',)),
     ('ba2edf6032f13fd3', 'order', '_open_replay', ('body[6]',)),
     ('ba2edf6032f13fd3', 'order', 'match_hold_claim', ('body[9]', 'body[5]')),
     ('ba2edf6032f13fd3', 'order', 'match_hold_open', ('body[12]', 'body[1]', 'body[2]')),
@@ -951,7 +969,6 @@ GATE_ORDERS = frozenset({
     ('e1afb8d8257af380', 'order', '_hold_row', ()),
     ('e1e6c6cf8f157d7d', 'order', '_open_replay', ('body[4]',)),
     ('e3d3cc901629eae3', 'order', '_rdm_live_or_lapse', ('body[0]',)),
-    ('e43093924623c2fb', 'order', '_guard_identities', ('body[2]',)),
     ('e57324ba8da176e7', 'order', '_rdm_claim', ('body[11]',)),
     ('e653e90929d323fe', 'order', '_state_word', ('body[4]',)),
     ('e66d0f4d34a5bed2', 'order', '_rdm_live_or_lapse', ()),

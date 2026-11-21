@@ -16,7 +16,7 @@ sweep of every production statement that sets a setting, and, on the
 cluster CF_TEST_PG_DSN names (never skipped), the pg_settings answer itself,
 the GREEN control (a transaction-local set_config inside an ended
 transaction leaves nothing) and its session-scope counterpart. The driver
-controls (the report's case at main.py:17878 and one control per route) are
+controls (the report's case at main.py:17948 and one control per route) are
 in test_r8_ro_covered_pg.py.
 """
 
@@ -181,9 +181,16 @@ def test_r11_res_sweep_production_settings_statements():
     # setting bounds every later statement of the read; statement_timeout is
     # a literal name with a pg_settings row. The count moves from main's 20 to
     # 23 for these three and no other reason.
+    # Judged, +1 (QAPPLY-1 FIX-1): the held-report actions' bounds,
+    # main._QAPPLY_SQL_BOUNDS, two set_config calls with is_local the literal
+    # true and the literal names lock_timeout and statement_timeout (values
+    # bound as text), run by _qapply_bound as the first statement of Accept's
+    # and Credit's transaction, before the admin check's read and the held
+    # row's lock; neither route commits before the statements it bounds. The
+    # count moves from 23 to 24 for this one and no other reason.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 23, got
+    assert len(got) == 24, got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "
