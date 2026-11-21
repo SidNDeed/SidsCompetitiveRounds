@@ -721,6 +721,8 @@ COMPOSED = {
         'an internal cache, limit or room key, never shown',
     ('main.py', 'line', 'rows received before this capture this report own game number'):
         'an admin, portal or evidence surface, not a player label',
+    ('main.py', 'lt', 'ms'):
+        'a number with its unit symbol',
     ('main.py', 'lv', 'dms'):
         'a number with its unit symbol',
     ('main.py', 'lv', 'ms'):
@@ -749,6 +751,8 @@ COMPOSED = {
         'MAPPED ServerTextRules.SeriesScore',
     ('main.py', 'sitting', 'id IN WITH anchor AS SELECT player id player id ended at FROM matches '):
         'query text, not a label',
+    ('main.py', 'st', 'ms'):
+        'a number with its unit symbol',
     ('main.py', 'sv', 'dms'):
         'a number with its unit symbol',
     ('main.py', 'v', 'ms'):
