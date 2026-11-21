@@ -333,12 +333,17 @@ def test_the_controls_run_on_a_copy_in_both_directions(tmp_path):
 
 
 
-# The calls whose result the sweep reads through, each to its FIRST argument.
-# `local_test_imports(names)` answers `names` first, in their order, and only
-# adds modules after them, so every name of the argument is copied and the
-# argument is a lower bound of the copy list. The test below checks that
-# property against the real function, so the sweep's reading fails loudly if
-# the function changes.
+# The calls whose result the sweep reads through: each is read as its FIRST
+# argument's paths AND conftest.py. `local_test_imports(names)` answers `names`
+# first, in their order, and then adds every module of backend/tests that they
+# import -- and test files import conftest by name, so the function can add
+# conftest.py to a list that does not name it. Reading the argument and
+# conftest.py together, the sweep's reading of a wrapped list is, in respect
+# of conftest.py, never smaller than what the function can return: every
+# function that copies files from such a list is a site, needs the tripwire
+# copy and stands in the pinned set. The test below checks both properties
+# against the real function (the names come first; conftest.py can come
+# through the closure), so the reading fails loudly if the function changes.
 _RESOLVED_CALLS = ("local_test_imports",)
 
 # The helpers of backend/tests that copy conftest.py into a tree, by file and
@@ -370,9 +375,11 @@ def _names_conftest(node):
 def _conftest_copy_sites(sources):
     """Find copies by operation and resolve each helper's local path bindings.
 
-    A helper that names conftest.py and copies files, but whose copy of
-    conftest.py the sweep cannot resolve, is refused by name: the sweep may
-    not go blind to a copier without a red."""
+    A helper that copies files and either names conftest.py or holds a call
+    of a resolved function anywhere, but is no site, is refused by name: the
+    sweep may not go blind to a copier without a red. A call it does not
+    resolve (sorted(...), a slice, a sum around the wrapped list) is such a
+    case."""
     sites, missing, blind = [], [], []
     for filename, source in sources.items():
         tree = ast.parse(source, filename=filename)
@@ -407,7 +414,7 @@ def _conftest_copy_sites(sources):
                     return {node.value}
                 if isinstance(node, ast.Call):
                     if _call_name(node.func) in _RESOLVED_CALLS and node.args:
-                        return paths(node.args[0], seen)
+                        return paths(node.args[0], seen) | {"conftest.py"}
                     unresolved.append(_call_name(node.func) or type(node.func).__name__)
                     return set()
                 if isinstance(node, ast.Name):
@@ -435,7 +442,10 @@ def _conftest_copy_sites(sources):
                          and dst.rsplit("/", 1)[-1] == "conftest.py"]
             site = "%s:%d:%s" % (filename, function.lineno, function.name)
             if not conftests:
-                if copy_calls and any(_names_conftest(node) for node in nodes):
+                if copy_calls and any(
+                        _names_conftest(node)
+                        or (isinstance(node, ast.Call) and _call_name(node.func) in _RESOLVED_CALLS)
+                        for node in nodes):
                     blind.append("%s (unresolved: %s)" % (
                         site, ", ".join(sorted(set(unresolved))) or "none"))
                 continue
@@ -468,9 +478,15 @@ def test_every_conftest_copy_carries_the_review_tripwire(tmp_path):
 
     # THE READING OF A RESOLVED CALL, CHECKED AGAINST THE REAL FUNCTION: every
     # list a copier hands `local_test_imports` comes back first, in its order.
+    # Each pinned function is read on its own, not its whole file.
     checked = 0
-    for filename in sorted({c.split(":")[0] for c in _CONFTEST_COPIERS}):
-        for node in ast.walk(ast.parse(sources[filename], filename=filename)):
+    for copier in sorted(_CONFTEST_COPIERS):
+        filename, function_name = copier.split(":")
+        functions = [f for f in ast.walk(ast.parse(sources[filename], filename=filename))
+                     if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and f.name == function_name]
+        assert len(functions) == 1, (copier, len(functions))
+        for node in ast.walk(functions[0]):
             if (isinstance(node, ast.Call) and _call_name(node.func) in _RESOLVED_CALLS
                     and node.args and isinstance(node.args[0], (ast.Tuple, ast.List))):
                 names = tuple(e.value for e in node.args[0].elts
@@ -490,17 +506,27 @@ def test_every_conftest_copy_carries_the_review_tripwire(tmp_path):
     assert got == ["b_mod.py", "a_mod.py", "absent.py", "c_mod.py"], got
     print("local_test_imports returns its argument first, in order: %d copier lists "
           "and one planted tree checked" % checked)
+    # AND IT CAN ADD conftest.py TO A LIST THAT DOES NOT NAME IT: a test file
+    # that imports conftest by name brings it in through the closure, which is
+    # why a wrapped list is read as its argument and conftest.py together.
+    through = local_test_imports(("test_tripwire_rows_printed.py",))
+    assert "conftest.py" in through, (
+        "test_tripwire_rows_printed.py no longer brings conftest.py in through "
+        "the closure; the sweep's extra conftest.py stays a safe reading, but "
+        "this check needs another file that imports conftest: %r" % (through,))
 
-    # PLANTED, IN THE WRAPPED FORM: a copier taking its list from the call
-    # without the tripwire is refused by name; its twin with it is accepted; a
-    # copier whose list passes through a call the sweep does not resolve is
-    # refused as a blind spot, by name. The sweep reads each function on its
-    # own, so these read the planted source alone; the plain-form pair below
-    # reads it beside the whole tree.
+    # PLANTED, IN THE WRAPPED FORM: a copier taking its list from the call --
+    # a list that names test_control.py alone -- without the tripwire is
+    # refused by name; its twin with it is accepted; the same list inside
+    # sorted(...) is refused as a blind spot, by name; and a list passing
+    # through a call the sweep does not know, naming conftest.py, is refused
+    # the same way. The sweep reads each function on its own, so these read
+    # the planted source alone; the plain-form pair below reads it beside the
+    # whole tree.
     wrapped = (
         "def _planted_wrapped_copier(dst):\n"
         "    tests = dst / 'tests'\n"
-        "    for name in local_test_imports(('conftest.py', 'test_control.py')):\n"
+        "    for name in local_test_imports(('test_control.py',)):\n"
         "        shutil.copyfile(BACKEND / 'tests' / name, tests / name)\n"
     )
     try:
@@ -520,7 +546,24 @@ def test_every_conftest_copy_carries_the_review_tripwire(tmp_path):
     assert _conftest_copy_sites({"planted_wrapped": wrapped_twin}) == [
         "planted_wrapped:1:_planted_wrapped_copier"]
     print("planted wrapped positive twin accepted")
-    unknown = wrapped_twin.replace("local_test_imports(", "sorted_copy_list(")
+    in_sorted = wrapped_twin.replace(
+        "    for name in local_test_imports(('test_control.py',)):\n",
+        "    for name in sorted(local_test_imports(('test_control.py',))):\n")
+    assert in_sorted != wrapped_twin
+    try:
+        _conftest_copy_sites({"planted_sorted": in_sorted})
+    except AssertionError as exc:
+        assert str(exc) == (
+            "conftest-copy sweep cannot resolve the copy of conftest.py in: "
+            "planted_sorted:1:_planted_wrapped_copier (unresolved: sorted)"), str(exc)
+        print("planted wrapped list inside sorted refused: %s" % exc)
+    else:
+        raise AssertionError("the sweep went blind to a wrapped list inside sorted(...), "
+                             "with no red")
+    unknown = wrapped_twin.replace(
+        "    for name in local_test_imports(('test_control.py',)):\n",
+        "    for name in sorted_copy_list(('conftest.py', 'test_control.py')):\n")
+    assert unknown != wrapped_twin
     try:
         _conftest_copy_sites({"planted_unknown": unknown})
     except AssertionError as exc:
