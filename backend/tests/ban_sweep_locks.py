@@ -36,6 +36,8 @@ import ast
 import os
 import re
 
+from ban_sweep_census import default_texts  # the ONE statement-text reader (RULING CENSUS-1, ORDER 3)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = os.path.normpath(os.path.join(HERE, "..", "api"))
 
@@ -77,13 +79,11 @@ def _name_of(call):
     return f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
 
 
-def _sql_text(call) -> str:
-    if not call.args:
-        return ""
-    a = call.args[0]
-    if isinstance(a, ast.Call) and _name_of(a) == "text" and a.args:
-        a = a.args[0]
-    return "".join(c.value for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+def _sql_text(call, mod=None) -> str:
+    """The statement text of a call, read by ban_sweep_census.StatementTexts
+    (a module-level name reads within `mod`; with mod None, when it is bound
+    once at module level across backend/api)."""
+    return default_texts().call_text(mod, call)
 
 
 def _own_nodes(fn):
@@ -96,14 +96,14 @@ def _own_nodes(fn):
         stack.extend(ast.iter_child_nodes(n))
 
 
-def is_taking_statement(call) -> bool:
-    return isinstance(call, ast.Call) and _name_of(call) != "text" and bool(IDENTITY_KEY.search(_sql_text(call)))
+def is_taking_statement(call, mod=None) -> bool:
+    return isinstance(call, ast.Call) and _name_of(call) != "text" and bool(IDENTITY_KEY.search(_sql_text(call, mod)))
 
 
 def direct_takers(funcs: dict) -> set:
     """(module, name) of every function whose own body takes the identity key."""
     return {(m, n) for m, fs in funcs.items() for n, fn in fs.items()
-            if any(is_taking_statement(c) for c in _own_nodes(fn))}
+            if any(is_taking_statement(c, m) for c in _own_nodes(fn))}
 
 
 class _Resolver:
@@ -155,7 +155,7 @@ def reaches_taker(funcs, res, takers, mod, node, _seen=None) -> list:
     for c in nodes:
         if not isinstance(c, ast.Call):
             continue
-        if is_taking_statement(c):
+        if is_taking_statement(c, mod):
             out.append((mod, "<statement>", c.lineno))
             continue
         tgt = res.resolve(mod, c)
@@ -350,7 +350,7 @@ class KeyWalk:
                 if "savepoint" in bn.lower() or "nested" in bn.lower():
                     continue
                 states = {(0, (), sp, False) for _n, _t, sp, _f in states}
-            elif is_taking_statement(c):
+            elif is_taking_statement(c, self.mods[-1]):
                 states = self.take(states, stack, c.lineno)
             elif cn in TXN_ENDERS and self.res.resolve(self.mods[-1], c) is not None:
                 states = {(0, (), sp, False) for _n, _t, sp, _f in states}

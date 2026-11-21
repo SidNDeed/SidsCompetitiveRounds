@@ -45,7 +45,160 @@ is not INTERNAL alone.
 from __future__ import annotations
 
 import ast
+import os
 import re
+
+API = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "api"))
+
+
+# The ONE reader of statement text for the ban sweep's census files (RULING
+# CENSUS-1, ORDER 3). A statement argument is the first argument of a bare
+# text(...) call, or of a call whose first argument is not a text() call
+# (db.execute("...")). It reads as text when it is a string constant, a name
+# bound once at module level to such a text, or a + chain of those. Every
+# census function below reads statement text through call_text(); one that
+# cannot read an argument as text still reads its parts (the string constants
+# under it, and every name in it that reads), as each place read before.
+class StatementTexts:
+    def __init__(self, sources):
+        """sources: {module: source text or parsed module}."""
+        self.binds = {}
+        for mod, src in sources.items():
+            self.binds[mod] = _module_bindings(src if isinstance(src, ast.AST) else ast.parse(src))
+
+    def _bound(self, mod, name):
+        if mod is not None:
+            return self.binds.get(mod, {}).get(name, [])
+        return [v for b in self.binds.values() for v in b.get(name, [])]
+
+    def read(self, mod, x, _seen=()):
+        """The text of x, or None when the rule cannot read it."""
+        if isinstance(x, ast.Constant) and isinstance(x.value, str):
+            return x.value
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Add):
+            a = self.read(mod, x.left, _seen)
+            b = self.read(mod, x.right, _seen) if a is not None else None
+            return None if b is None else a + b
+        if isinstance(x, ast.Name) and x.id not in _seen:
+            vals = self._bound(mod, x.id)
+            if len(vals) == 1 and vals[0] is not None:
+                v = vals[0]
+                if isinstance(v, ast.Call) and _name_of(v) == "text" and isinstance(v.func, ast.Name) \
+                        and len(v.args) == 1 and not v.keywords:
+                    v = v.args[0]               # NAME = text(<readable>): the wrapper adds no text
+                return self.read(mod, v, _seen + (x.id,))
+        return None
+
+    def parts(self, mod, x):
+        """What the census reads of x: its text, or its readable parts."""
+        t = self.read(mod, x)
+        if t is not None:
+            return t
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Add):
+            return self.parts(mod, x.left) + self.parts(mod, x.right)
+        if isinstance(x, ast.JoinedStr):
+            return "".join(v.value if isinstance(v, ast.Constant) else self.parts(mod, v.value)
+                           for v in x.values if isinstance(v, (ast.Constant, ast.FormattedValue)))
+        return "".join(c.value for c in ast.walk(x) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+
+    def call_text(self, mod, call):
+        """What the census reads of a call's statement argument ("" for none)."""
+        a = statement_argument(call)
+        return "" if a is None else self.parts(mod, a)
+
+
+def statement_argument(call):
+    """A call's statement argument: X of text(X), or of execute(X) when X is
+    not itself a text() call (that call is read as itself); None for none."""
+    if not isinstance(call, ast.Call) or not call.args:
+        return None
+    a = call.args[0]
+    if isinstance(a, ast.Call) and _name_of(a) == "text" and a.args:
+        a = a.args[0]
+    return a
+
+
+def _module_bindings(tree):
+    """{name: [value or None, ...]}: every binding of a name at module level
+    (outside functions and classes), with its value when it is a plain
+    `name = value` or `name: T = value`; None for any other binding."""
+    out = {}
+    stack = list(tree.body)
+    while stack:
+        st = stack.pop()
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.setdefault(st.name, []).append(None)
+            continue
+        if isinstance(st, (ast.Import, ast.ImportFrom)):
+            for a in st.names:
+                out.setdefault((a.asname or a.name).split(".")[0], []).append(None)
+            continue
+        if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+            out.setdefault(st.targets[0].id, []).append(st.value)
+            continue
+        if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+            out.setdefault(st.target.id, []).append(st.value)
+            continue
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            stack.extend(x for x in getattr(st, field, []) if isinstance(x, ast.stmt))
+        for h in getattr(st, "handlers", []):
+            stack.extend(h.body)
+            if h.name:
+                out.setdefault(h.name, []).append(None)
+        heads = [getattr(st, f) for f in ("targets", "target", "items") if hasattr(st, f)]
+        for head in heads:
+            for n in ast.walk(ast.Module(body=[], type_ignores=[]) if head is None else
+                              (ast.Tuple(elts=list(head), ctx=ast.Load()) if isinstance(head, list) else head)):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                    out.setdefault(n.id, []).append(None)
+    return out
+
+
+def statement_text_failures(sources):
+    """sources: {module: source text}. The closed failure of ORDER 3: every
+    statement argument, in every function of every module the census reads,
+    that StatementTexts cannot read as text, as "module.function:line: form".
+    A statement argument here is X of a bare text(X), or X of execute(X) or
+    exec_driver_sql(X) when X is a string form (a constant, an f-string, a +,
+    or a module-level name), never an ORM construct or a local holding one."""
+    trees = {mod: ast.parse(src) for mod, src in sources.items()}
+    texts = StatementTexts(trees)
+    out = []
+    for mod, tree in sorted(trees.items()):
+        for fn in _functions(tree):
+            for c in _own_nodes(fn):
+                if not isinstance(c, ast.Call) or not c.args:
+                    continue
+                x = c.args[0]
+                if isinstance(c.func, ast.Name) and c.func.id == "text":
+                    pass
+                elif _name_of(c) in ("execute", "exec_driver_sql") and not (
+                        isinstance(x, ast.Call) and _name_of(x) == "text"):
+                    if not (isinstance(x, (ast.Constant, ast.JoinedStr, ast.BinOp))
+                            or isinstance(x, ast.Name) and x.id in texts.binds[mod]):
+                        continue
+                else:
+                    continue
+                if texts.read(mod, x) is None:
+                    form = type(x).__name__ if not isinstance(x, ast.Name) else (
+                        "module name" if x.id in texts.binds[mod] else "local name")
+                    out.append(f"{mod}.{fn.name}:{c.lineno}: {form} {ast.unparse(x)[:80]!r}")
+    return sorted(set(out))
+
+
+_TEXTS = {}
+
+
+def default_texts():
+    """The reader over backend/api as it stands on disk."""
+    if "api" not in _TEXTS:
+        srcs = {}
+        for fname in sorted(os.listdir(API)):
+            if fname.endswith(".py"):
+                with open(os.path.join(API, fname), encoding="utf-8") as fh:
+                    srcs[fname[:-3]] = fh.read()
+        _TEXTS["api"] = StatementTexts(srcs)
+    return _TEXTS["api"]
 
 STRICT, SOFT, BAN, ADMIN, INTERNAL, OPEN = "STRICT", "SOFT", "BAN", "ADMIN", "INTERNAL", "OPEN"
 # the two halves of an inline admin check: the roster (`not await
@@ -186,13 +339,14 @@ F4_LISTED = {
 }
 
 
-def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=None):
+def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=None, texts=None):
     """Every BAN-class route that writes and reaches neither the locking
     helper nor an identity locker, unless listed; every listed route that
-    no longer needs its entry; every locker whose own body holds no
-    identity lock."""
+    no longer needs its entry; every locker whose own body executes no
+    identity lock (a statement the reader reads, StatementTexts)."""
     listed = F4_LISTED if listed is None else listed
     lockers = IDENTITY_LOCKERS if lockers is None else lockers
+    texts = default_texts() if texts is None else texts
     res, _clf = census(rows, funcs_by_module)
     out, need = [], set()
     for method, path, module, name, _deps in rows:
@@ -206,11 +360,12 @@ def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=Non
     for key in sorted(set(listed) - need):
         out.append(f"{key[0]} {key[1]}: listed for F4 and needs no entry")
     for name in sorted(lockers):
-        fns = [f for m in funcs_by_module.values() for n, f in m.items() if n == name]
+        fns = [(m, f) for m, fs in funcs_by_module.items() for n, f in fs.items() if n == name]
         if not fns or not any(
-                (isinstance(c, ast.Constant) and isinstance(c.value, str) and _IDENTITY_LOCK_SQL.search(c.value))
+                (isinstance(c, ast.Call) and _name_of(c) != "text"
+                 and _IDENTITY_LOCK_SQL.search(texts.call_text(m, c)))
                 or (isinstance(c, ast.Call) and _name_of(c) in lockers and _name_of(c) != name)
-                for f in fns for c in _own_nodes(f)):
+                for m, f in fns for c in _own_nodes(f)):
             out.append(f"{name}: listed as an identity locker and takes no identity lock")
     return out
 
@@ -595,6 +750,7 @@ def void_sql_text(funcs_by_module, roots=VOID_ROOTS, module="main", module_sourc
         for c in ast.walk(local[n]):
             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in local:
                 stack.append(c.func.id)
+    reader = StatementTexts({module: module_source}) if module_source else default_texts()
     texts, names = [], set()
     for n in seen:
         for c in ast.walk(local[n]):
@@ -602,6 +758,8 @@ def void_sql_text(funcs_by_module, roots=VOID_ROOTS, module="main", module_sourc
                 texts.append(c.value)
             elif isinstance(c, ast.Name):
                 names.add(c.id)
+            elif isinstance(c, ast.Call) and _name_of(c) != "text":
+                texts.append(reader.call_text(module, c))
     if module_source:
         for node in ast.parse(module_source).body:
             if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names
@@ -686,14 +844,16 @@ def shared_and_exclusive_failures(sources, listed=None):
     reaches a LOCK_CALLERS call and an exclusive identity key, against the
     list, both ways."""
     listed = SHARED_AND_EXCLUSIVE if listed is None else listed
-    funcs = {}
+    funcs, trees = {}, {}
     for mod, src in sources.items():
-        tree = ast.parse(src)
+        tree = trees[mod] = ast.parse(src)
         funcs[mod] = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    texts = StatementTexts(trees)
     takers = set(EXCLUSIVE_TAKERS_BY_NAME)
-    for fs in funcs.values():
+    for mod, fs in funcs.items():
         for n, fn in fs.items():
-            if any(isinstance(c, ast.Call) and _name_of(c) != "text" and _EXCLUSIVE_KEY.search(_sql_texts(c))
+            if any(isinstance(c, ast.Call) and _name_of(c) != "text"
+                   and _EXCLUSIVE_KEY.search(texts.call_text(mod, c))
                    for c in _own_nodes(fn)):
                 takers.add(n)
     # The helper's own exclusive keys (exclusive=) are taken in its one ordered
@@ -711,17 +871,6 @@ def shared_and_exclusive_failures(sources, listed=None):
            for m, n in sorted(found - set(listed))]
     out += [f"{m}.{n}: listed and no longer reaches both" for m, n in sorted(set(listed) - found)]
     return out
-
-
-def _sql_texts(call):
-    """The string constants of a call's first argument (text("...") or a bare
-    string), concatenated parts included."""
-    if not call.args:
-        return ""
-    a = call.args[0]
-    if isinstance(a, ast.Call) and _name_of(a) == "text" and a.args:
-        a = a.args[0]
-    return "".join(c.value for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str))
 
 
 def _prefixed(v):
@@ -755,12 +904,14 @@ def identity_lock_failures(sources, single=None):
     not single takers); other advisory keys without a literal prefix."""
     single = SINGLE_KEY_TAKERS if single is None else single
     out, seen = [], set()
-    for mod, src in sorted(sources.items()):
-        for fn in _functions(ast.parse(src)):
+    trees = {mod: ast.parse(src) for mod, src in sources.items()}
+    texts = StatementTexts(trees)
+    for mod, tree in sorted(trees.items()):
+        for fn in _functions(tree):
             for c in _own_nodes(fn):
                 if not isinstance(c, ast.Call) or _name_of(c) == "text":
                     continue
-                sql = _sql_texts(c)
+                sql = texts.call_text(mod, c)
                 if not _ADVISORY.search(sql):
                     continue
                 if _IDENTITY_KEY.search(sql):
@@ -895,8 +1046,10 @@ def row_locks_before_the_gate(sources, ok=None):
     first locking-helper call (by source position), unless listed."""
     ok = ROW_LOCK_BEFORE_OK if ok is None else ok
     out, seen = [], set()
-    for mod, src in sorted(sources.items()):
-        for fn in _functions(ast.parse(src)):
+    trees = {mod: ast.parse(src) for mod, src in sources.items()}
+    texts = StatementTexts(trees)
+    for mod, tree in sorted(trees.items()):
+        for fn in _functions(tree):
             if fn.name in LOCK_CALLERS:
                 continue
             nodes = list(_own_nodes(fn))
@@ -905,8 +1058,11 @@ def row_locks_before_the_gate(sources, ok=None):
                 continue
             first = min(at)
             locks = sorted(c.lineno for c in nodes
-                           if isinstance(c, ast.Constant) and isinstance(c.value, str)
-                           and _ROW_LOCK_SQL.search(c.value) and c.lineno < first)
+                           if (isinstance(c, ast.Constant) and isinstance(c.value, str)
+                               and _ROW_LOCK_SQL.search(c.value)
+                               or isinstance(c, ast.Call) and _name_of(c) != "text"
+                               and _ROW_LOCK_SQL.search(texts.call_text(mod, c)))
+                           and c.lineno < first)
             if not locks:
                 continue
             seen.add((mod, fn.name))
@@ -986,8 +1142,11 @@ _WRITE_METHODS = frozenset({"add", "add_all", "delete", "merge", "commit"})
 
 def _write_call(call, cn):
     if cn == "text":
+        # the module is not known here: a name reads when it is bound once
+        # at module level across backend/api (StatementTexts, module None)
         return any(isinstance(c, ast.Constant) and isinstance(c.value, str) and _WRITE_SQL.search(c.value)
-                   for c in ast.walk(call))
+                   for c in ast.walk(call)) or bool(
+            call.args and _WRITE_SQL.search(default_texts().parts(None, call.args[0])))
     if isinstance(call.func, ast.Name) and cn in _WRITE_NAMES:
         return True
     if not (isinstance(call.func, ast.Attribute) and cn in _WRITE_METHODS):

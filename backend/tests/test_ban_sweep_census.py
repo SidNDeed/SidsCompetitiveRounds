@@ -1186,3 +1186,61 @@ def test_mutant_a_live_table_left_out_of_the_void_fails_the_census():
     classes = dict(TABLE_CLASSES, chat_mutes=(B.LIVE, "planted: a mute the ban must end"))
     text, _seen = _void_text(src)
     assert B.void_coverage_failures(classes, text) == ["chat_mutes: a LIVE table the void never names"]
+
+
+# ---- RULING CENSUS-1 ORDER 3: the one statement-text reader ----------------
+
+def _o3_sources(old=None, new=None):
+    srcs = _api_modules()
+    if old is not None:
+        assert srcs["main"].count(old) == 1, old
+        srcs["main"] = srcs["main"].replace(old, new)
+    return srcs
+
+
+def _o3_funcs(srcs):
+    return {m: {n.name: n for n in ast.parse(s).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for m, s in srcs.items()}
+
+
+_O3_LOCKER = "_identity_lock_many: listed as an identity locker and takes no identity lock"
+
+
+def test_order3_mutant_the_constant_s_execute_out_of_the_identity_locker_fails():
+    """Mutant 1: _identity_lock_many without its one execute of
+    _IDENTITY_KEY_SQL takes no identity lock. The control: the tree as it
+    stands names no locker."""
+    srcs = _o3_sources()
+    assert _O3_LOCKER not in B.ban_writers_without_the_lock([], _o3_funcs(srcs), texts=B.StatementTexts(srcs))
+    m = _o3_sources('            await db.execute(text(_IDENTITY_KEY_SQL), {"sid": sid})\n',
+                    "            pass\n")
+    assert _O3_LOCKER in B.ban_writers_without_the_lock([], _o3_funcs(m), texts=B.StatementTexts(m))
+
+
+def test_order3_mutant_another_key_expression_is_not_the_identity_key():
+    """Mutant 2: _IDENTITY_KEY_ARG given another key expression; the key
+    _identity_lock_many takes is then neither the identity key nor prefixed.
+    The control: the tree as it stands has no such failure."""
+    assert B.identity_lock_failures(_o3_sources()) == []
+    m = _o3_sources('_IDENTITY_KEY_ARG = "hashtext(CAST(:sid AS text))"',
+                    "_IDENTITY_KEY_ARG = \"hashtext(CAST(:sid AS text) || ':x')\"")
+    bad = B.identity_lock_failures(m)
+    assert "main._identity_lock_many: an advisory key that is neither the identity key nor prefixed" in bad, bad
+
+
+_O3_KEY_SQL = '_IDENTITY_KEY_SQL = "SELECT pg_advisory_xact_lock(" + _IDENTITY_KEY_ARG + ")"\n'
+
+
+def test_order3_mutant_a_constant_bound_to_a_call_s_result_is_not_read():
+    """Mutant 3: _IDENTITY_KEY_SQL bound to a call's result (not text()) is not
+    read, so _identity_lock_many takes no lock the census can read. The
+    control is mutant 1's: the tree as it stands names no locker."""
+    m = _o3_sources(_O3_KEY_SQL, '_IDENTITY_KEY_SQL = str("SELECT pg_advisory_xact_lock(" + _IDENTITY_KEY_ARG + ")")\n')
+    assert _O3_LOCKER in B.ban_writers_without_the_lock([], _o3_funcs(m), texts=B.StatementTexts(m))
+
+
+def test_order3_mutant_a_constant_bound_twice_is_not_read():
+    """Mutant 4: a second binding of _IDENTITY_KEY_SQL makes the name unread,
+    so _identity_lock_many takes no lock the census can read."""
+    m = _o3_sources(_O3_KEY_SQL, _O3_KEY_SQL + '_IDENTITY_KEY_SQL = "SELECT 1"\n')
+    assert _O3_LOCKER in B.ban_writers_without_the_lock([], _o3_funcs(m), texts=B.StatementTexts(m))

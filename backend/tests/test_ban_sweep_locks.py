@@ -58,12 +58,12 @@ def _arg(call, sel):
     return next((k.value for k in call.keywords if k.arg == sel), None)
 
 
-def _raw_takes(fn):
+def _raw_takes(fn, mod=None):
     """(sid expression, mode) of every taking statement in fn's own body."""
     out = []
     for c in K._own_nodes(fn):
-        if isinstance(c, ast.Call) and K.is_taking_statement(c):
-            sql = K._sql_text(c)
+        if isinstance(c, ast.Call) and K.is_taking_statement(c, mod):
+            sql = K._sql_text(c, mod)
             params = next((a for a in c.args[1:] if isinstance(a, ast.Dict)), None)
             expr = None
             if params is not None:
@@ -104,7 +104,7 @@ def check_fact(fact, funcs=None):
         return None if cs and all(_arg(c, kw) is None for c in cs) else f"{fname}: {callee} passes {kw}="
     if kind == "raw":                      # every own take keys `expect` in `mode`
         _, _, expect, mode = fact
-        takes = _raw_takes(fn)
+        takes = _raw_takes(fn, mod)
         return None if takes and set(takes) == {(expect, mode)} else f"{fname}: takes {takes}"
     if kind == "src":                      # the statement stands in the function
         _, _, snippet = fact
