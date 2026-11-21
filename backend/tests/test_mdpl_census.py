@@ -26,11 +26,19 @@ drop by dynamic SQL are read from each migration's own lookup. The reader
 holds a plain INSERT without a wait; that the deletion's plain inserts cannot
 wait (gold_transactions alone, keyed by its generated id) is read here too.
 
+STACK-SEAM-1 has two guards here. The owed judgements are held fixed by
+key: the sites whose "why" opens with "OWED under " are exactly
+OWED_SITES, _qapply_credit's three, and one is added or taken out only by
+a change of that test. The pin reads the client's string literals: no
+statement of a .cs file under plugin/ builds the quarantine's credit path,
+the precondition the owed sentence names.
+
 Pure Python: no database. Refreeze after a reviewed change with
 `python mdpl_census.py --freeze` (it keeps every judgement and writes an
 empty one for a new READ site, which this test refuses).
 """
 import ast
+import copy
 import json
 import os
 import re
@@ -434,21 +442,31 @@ def test_with_the_six_switches_off_the_reader_gives_the_census_as_first_frozen(m
     switch off, the census computed now is mdpl_census_base.json, the census
     frozen before the widening, exactly (step 1, every site's record, the
     unread statements), and no untyped store is measured. SWITCHES names every
-    switch the module has, so a new one is turned off here too."""
+    switch the module has, so a new one is turned off here too. When main.py
+    has moved since the base file's last commit, a red here can be the
+    source's and not the reader's. Prove the reader first (main.py at that
+    commit, read with every switch off, gives the base exactly), and only then
+    read the base again at the tip, with that proof first in its commit's
+    message."""
+    moved_source = (
+        "When main.py has moved since the base file's last commit, a red here can be the source's and not "
+        "the reader's. Prove the reader first (main.py at that commit, read with every switch off, gives the "
+        "base exactly), and only then read the base again at the tip, with that proof first in its commit's "
+        "message.")
     assert set(mc.SWITCHES) == {n for n in vars(mc) if n.isupper() and isinstance(vars(mc)[n], bool)}
     for name in mc.SWITCHES:
         monkeypatch.setattr(mc, name, False)
     m = mc.measured(mc.Source())
     with open(mc.BASE, encoding="utf-8") as fh:
         base = json.load(fh)
-    assert m["step1"] == base["step1"]
+    assert m["step1"] == base["step1"], moved_source
     got = {k: {f: d[f] for f in mc.BASE_FIELDS} for k, d in m["sites"].items()}
     new = sorted(set(got) - set(base["sites"]))
     gone = sorted(set(base["sites"]) - set(got))
     moved = sorted(k for k in set(got) & set(base["sites"]) if got[k] != base["sites"][k])
-    assert not new and not gone and not moved, {
-        "new": new[:10], "gone": gone[:10], "moved": [(k, base["sites"][k], got[k]) for k in moved[:5]]}
-    assert m["unread"] == base["unread"]
+    assert not new and not gone and not moved, (moved_source, {
+        "new": new[:10], "gone": gone[:10], "moved": [(k, base["sites"][k], got[k]) for k in moved[:5]]})
+    assert m["unread"] == base["unread"], moved_source
     assert "untyped" not in m
 
 
@@ -839,3 +857,278 @@ def test_a_new_entry_at_a_frozen_site_moves_its_record(frozen, src, mutated):
     _s1, got = mc.sites(mutated, entries=fz["entries"] + ["mdpl_plant_entry"])
     assert sorted(got[site]["entries"]) == sorted(fz["entries"] + ["mdpl_plant_entry"]), got[site]
     assert got[site]["class"] == fz["class"], got[site]  # the entry alone moved: red at the comparison
+
+
+# STACK-SEAM-1: the judgements this lane owes. A site whose "why" opens with
+# "OWED under " is one the census marks as not covered, with the work it waits
+# for named in the sentence. The set is fixed here, by key.
+OWED_SITES = frozenset({
+    "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0",
+    "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0",
+    "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0",
+})
+_OWED_HEAD = "OWED under "
+
+
+def _owed_failures(frozen):
+    """The site keys whose "why" opens with "OWED under ", against OWED_SITES, both ways."""
+    got = {k for k, d in frozen["sites"].items() if d.get("why", "").startswith(_OWED_HEAD)}
+    out = [f"{k}: an owed judgement not in OWED_SITES" for k in sorted(got - OWED_SITES)]
+    out += [f"{k}: in OWED_SITES and its why no longer opens with {_OWED_HEAD!r}"
+            for k in sorted(OWED_SITES - got)]
+    return out
+
+
+_OWED_MSG = ("STACK-SEAM-1: the owed judgements of mdpl_census_frozen.json are exactly OWED_SITES. "
+             "An owed judgement is added or taken out only by a change of this test.")
+
+
+def test_the_owed_judgements_are_the_listed_ones(frozen):
+    """STACK-SEAM-1. The credit route of the quarantine (POST
+    /api/v1/admin/quarantine/{qid}/credit, _qapply_credit) writes a credited
+    player's row without that player's identity key; the census judges its
+    three sites OWED. This test holds that set fixed, and the PIN test below
+    holds the precondition the owed sentence names: no shipped control builds
+    the credit path."""
+    bad = _owed_failures(frozen)
+    assert not bad, (_OWED_MSG, bad)
+
+
+def test_a_planted_fourth_owed_judgement_is_named(frozen):
+    """Control: an "OWED under" why on another site turns the check red."""
+    d = copy.deepcopy(frozen)
+    k = _site(d, "booster_grant | UPDATE players SET gold_earned")
+    assert k not in OWED_SITES
+    d["sites"][k]["why"] = _OWED_HEAD + "STACK-SEAM-1, planted by the control"
+    assert _owed_failures(d) == [f"{k}: an owed judgement not in OWED_SITES"]
+
+
+def test_an_owed_judgement_rewritten_is_named(frozen):
+    """Control: one of the three with its why changed turns the check red."""
+    d = copy.deepcopy(frozen)
+    k = sorted(OWED_SITES)[0]
+    d["sites"][k]["why"] = "covered, rewritten by the control"
+    assert _owed_failures(d) == [f"{k}: in OWED_SITES and its why no longer opens with {_OWED_HEAD!r}"]
+
+
+PLUGIN = os.path.normpath(os.path.join(HERE, "..", "..", "plugin"))
+_HOLE = "\x00"   # an interpolation hole, in a literal's text
+_CREDIT_END = re.compile(r"/credit(?=$|[?/\x00])")   # \x00 is _HOLE: a hole right after /credit
+
+
+def _cs_skip_char(t, i):
+    """t[i] == "'": the index after the C# character literal that starts there."""
+    i += 1
+    if t[i:i + 1] == "\\":
+        i += 2
+    while i < len(t) and t[i] != "'":
+        i += 1
+    return i + 1
+
+
+def _cs_literal(t, i, lits):
+    """t[i:] opens a string literal ("...", @"...", $"...", $@"..." or @$"...").
+    Appends (offset, text) for it and for every literal nested in its holes
+    (a hole's text is _HOLE in its own literal's text); returns the index
+    after its closing quote."""
+    start, j = i, i
+    verbatim = interp = False
+    while t[j] in "@$":
+        verbatim |= t[j] == "@"
+        interp |= t[j] == "$"
+        j += 1
+    assert t[j] == '"', (t[start:start + 20])
+    # @ and then three quotes opens a verbatim literal whose text starts with a
+    # quote (plugin/ApiClient.cs's asset match); a C# raw string literal takes no @.
+    if not verbatim and t.startswith('"""', j):
+        raise AssertionError((f"offset {j}: a C# 11 raw string literal; this reader does not read raw "
+                              "string literals and must learn them before this pin is trusted"))
+    j += 1
+    buf = []
+    while j < len(t):
+        c = t[j]
+        if c == "\\" and not verbatim:
+            buf.append(t[j:j + 2])
+            j += 2
+        elif c == '"':
+            if verbatim and t[j + 1:j + 2] == '"':
+                buf.append('"')
+                j += 2
+            else:
+                lits.append((start, "".join(buf)))
+                return j + 1
+        elif interp and c in "{}" and t[j + 1:j + 2] == c:
+            buf.append(c)
+            j += 2
+        elif interp and c == "{":
+            j = _cs_hole(t, j + 1, lits)
+            buf.append(_HOLE)
+        else:
+            buf.append(c)
+            j += 1
+    raise AssertionError(("an unclosed string literal", t[start:start + 40]))
+
+
+def _cs_hole(t, j, lits):
+    """t[j:] is the code of an interpolation hole; returns the index after its closing brace."""
+    depth = 0
+    while j < len(t):
+        c = t[j]
+        if c == '"' or (c in "@$" and t[j + 1:j + 3].lstrip("@$")[:1] == '"'):
+            j = _cs_literal(t, j, lits)
+        elif c == "'":
+            j = _cs_skip_char(t, j)
+        elif c == "{":
+            depth += 1
+            j += 1
+        elif c == "}":
+            if depth == 0:
+                return j + 1
+            depth -= 1
+            j += 1
+        else:
+            j += 1
+    raise AssertionError(("an unclosed interpolation hole", t[j - 40:j]))
+
+
+def _cs_statements(t):
+    """Every statement of C# text t (the text up to its ";", outside literals
+    and comments) that holds a literal: a list of [(offset, literal text)]."""
+    out, lits, i, n = [], [], 0, len(t)
+    at_line_start = True
+    while i < n:
+        c = t[i]
+        if t.startswith("//", i) or (at_line_start and c == "#"):
+            i = t.find("\n", i)
+            i = n if i < 0 else i
+        elif t.startswith("/*", i):
+            i = t.find("*/", i + 2)
+            i = n if i < 0 else i + 2
+        elif c == '"' or (c in "@$" and t[i + 1:i + 3].lstrip("@$")[:1] == '"'):
+            i = _cs_literal(t, i, lits)
+        elif c == "'":
+            i = _cs_skip_char(t, i)
+        elif c == ";":
+            if lits:
+                out.append(lits)
+            lits = []
+            i += 1
+        else:
+            i += 1
+        if i < n:
+            at_line_start = (t[i - 1] == "\n") or (at_line_start and t[i - 1] in " \t")
+    if lits:
+        out.append(lits)
+    return out
+
+
+def _credit_path_trips(t):
+    """The statements of C# text t that build the quarantine's credit path:
+    one statement holds a literal containing "admin/quarantine" and a literal
+    (the same or another) in which "/credit" ends it or is followed by "?",
+    "/" or a hole. A list of (line, the literal that holds /credit)."""
+    out = []
+    for lits in _cs_statements(t):
+        if not any("admin/quarantine" in s for _o, s in lits):
+            continue
+        for off, s in lits:
+            if _CREDIT_END.search(s):
+                out.append((t.count("\n", 0, off) + 1, s))
+    return out
+
+
+def _plugin_cs_files():
+    for root, _dirs, files in os.walk(PLUGIN):
+        for f in sorted(files):
+            if f.endswith(".cs"):
+                yield os.path.join(root, f)
+
+
+def _cs_text(path):
+    with open(path, encoding="utf-8-sig") as fh:   # text mode: CRLF reads as LF
+        return fh.read()
+
+
+# The shipped statements, copied from plugin/ApiClient.cs (discard :8492-8493, accept :8506-8507).
+_SHIPPED_DISCARD = ('            string url = $"{baseUrl}/api/v1/admin/quarantine/"\n'
+                    '                       + $"{UnityWebRequest.EscapeURL(reportId ?? "")}/discard";')
+_SHIPPED_ACCEPT = ('            string url = $"{baseUrl}/api/v1/admin/quarantine/"\n'
+                   '                       + $"{UnityWebRequest.EscapeURL(reportId ?? "")}/accept";')
+
+
+def test_no_shipped_control_builds_the_credit_path():
+    """STACK-SEAM-1, the PIN. The owed judgements of _qapply_credit rest on
+    the credit route answering an admin's request alone: no control in the
+    plugin builds POST /api/v1/admin/quarantine/{qid}/credit. A C# literal
+    reader over every .cs file under plugin/ ("...", @"...", $"...", $@"...",
+    literals nested in a hole; comments skipped) trips on a statement that
+    holds "admin/quarantine" and a literal ending in "/credit" (or "/credit"
+    then "?", "/" or a hole). Its limit: it sees literals within one statement, so a
+    path built from a variable that holds "credit" is not seen; the item's
+    precondition stays a reading at the lane that builds the control."""
+    found = []
+    for path in _plugin_cs_files():
+        for line, lit in _credit_path_trips(_cs_text(path)):
+            found.append(f"{os.path.relpath(path, os.path.dirname(PLUGIN))}:{line}: {lit!r}")
+    assert not found, ("STACK-SEAM-1: a plugin statement builds the quarantine's credit path; "
+                       "the owed judgements of _qapply_credit must be met first", found)
+
+
+def test_the_pin_reads_the_shipped_accept_statement_as_no_credit_path():
+    """Control 1: the shipped accept statement does not trip (and is the shipped one)."""
+    assert _SHIPPED_ACCEPT in _cs_text(os.path.join(PLUGIN, "ApiClient.cs"))
+    lits = _cs_statements(_SHIPPED_ACCEPT)
+    assert [s for _o, s in lits[0]] == [_HOLE + "/api/v1/admin/quarantine/", "", _HOLE + "/accept"]
+    assert _credit_path_trips(_SHIPPED_ACCEPT) == []
+
+
+def test_the_pin_reads_the_shipped_discard_statement_as_no_credit_path():
+    """Control 2: the shipped discard statement, with its nested literal, does not trip."""
+    assert _SHIPPED_DISCARD in _cs_text(os.path.join(PLUGIN, "ApiClient.cs"))
+    assert _credit_path_trips(_SHIPPED_DISCARD) == []
+
+
+def test_the_pin_trips_on_a_composed_credit_statement():
+    """Control 3: the shipped accept statement with accept made credit, its nested hole kept."""
+    t = _SHIPPED_ACCEPT.replace("}/accept\"", "}/credit\"")
+    assert t != _SHIPPED_ACCEPT
+    assert _credit_path_trips(t) == [(2, _HOLE + "/credit")]
+
+
+def test_the_pin_trips_on_an_interpolated_credit_statement():
+    """Control 4: one $"..." literal holding both, with a hole that holds a nested literal."""
+    t = 'string url = $"{baseUrl}/api/v1/admin/quarantine/{UnityWebRequest.EscapeURL(reportId ?? "")}/credit";'
+    assert _credit_path_trips(t) == [(1, _HOLE + "/api/v1/admin/quarantine/" + _HOLE + "/credit")]
+
+
+def test_the_pin_trips_on_a_composed_credit_statement_with_a_query():
+    """Control 5: a composed credit statement with a query string."""
+    t = _SHIPPED_ACCEPT.replace("}/accept\"", "}/credit?x=1\"")
+    assert t != _SHIPPED_ACCEPT
+    assert _credit_path_trips(t) == [(2, _HOLE + "/credit?x=1")]
+
+
+def test_the_pin_trips_on_a_credit_path_followed_by_a_hole():
+    """Control 6: "/credit" with a hole right after it (a query string built in the hole)."""
+    t = 'string url = $"{baseUrl}/api/v1/admin/quarantine/{id}/credit{qs}";'
+    assert _credit_path_trips(t) == [(1, _HOLE + "/api/v1/admin/quarantine/" + _HOLE + "/credit" + _HOLE)]
+
+
+def test_the_pin_reader_refuses_a_raw_string_literal():
+    """Control 7: a C# 11 raw string literal stops the reader rather than being misread."""
+    with pytest.raises(AssertionError):
+        _cs_statements('var s = """raw""";')
+
+
+# The shipped statement, copied from plugin/ApiClient.cs (:2773; :2788 is its .zip twin).
+_SHIPPED_VERBATIM = r'var matches = Regex.Matches(json, @"""browser_download_url""\s*:\s*""([^""]+\.dll)""");'
+
+
+def test_the_pin_reads_a_verbatim_literal_that_opens_with_a_quote():
+    """Control 8: a verbatim literal whose text opens with an escaped quote
+    (@ and then three quotes, as in the shipped statement) is read as one
+    literal, and is not refused as a raw string literal, which takes no @."""
+    assert _SHIPPED_VERBATIM in _cs_text(os.path.join(PLUGIN, "ApiClient.cs"))
+    lits = _cs_statements(_SHIPPED_VERBATIM)
+    assert [s for _o, s in lits[0]] == [r'"browser_download_url"\s*:\s*"([^"]+\.dll)"']
+    assert _credit_path_trips(_SHIPPED_VERBATIM) == []

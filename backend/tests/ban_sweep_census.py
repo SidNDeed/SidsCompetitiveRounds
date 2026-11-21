@@ -816,6 +816,12 @@ SINGLE_KEY_TAKERS = {
     ("main", "cancel_lobby_bet"): _ONE,
     ("main", "set_allow_spectators"): _ONE,
     ("main", "_invite_identity_lock"): _ONE,
+    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, taken once for the
+    # request's own steam id (the target's, in admin_grant_achievement).
+    ("main", "toggle_ranked"): _ONE,
+    ("main", "generate_link_code"): _ONE,
+    ("main", "unlock_achievement"): _ONE,
+    ("main", "admin_grant_achievement"): _ONE,
     ("tournaments", "signup"): _ONE,
 }
 

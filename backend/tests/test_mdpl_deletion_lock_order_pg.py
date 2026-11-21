@@ -698,3 +698,42 @@ def test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deleti
         what = getattr(main, "_DELETION_WAIT_WHAT", "?")
         assert ("deletion attempt 1 met a held %s;" % what) in out, out[-2000:]
     case(monkeypatch, body, prefix="mdpl")
+
+
+def test_a_banned_host_s_lobby_and_the_next_member_s_deletion_after_the_tombstone_both_finish(monkeypatch, capsys):
+    """_lobby_seat_left_core's host store (judged READ): when the stored host leaves, the
+    earliest fresh member becomes host, an id neither caller keyed. Here P's deletion stands
+    past its tombstone holding P's lobby rows, the ban of the host H waits for it at the lobby
+    row, both finish, and the lobby stays open under Q, not P or H; the case-row pair stays
+    under the class's scene."""
+    async def body(env):
+        _arm(env)
+        _admin_armed(env)
+        _order_only(env)
+        lid, (h, p, q) = await env.lobby("team", 3)
+        await env.fresh("team", lid)
+        (mod,) = await env.players(1)
+        await env.conn.execute(
+            "INSERT INTO admin_users (steam_id, granted_at) VALUES ($1, NOW())"
+            " ON CONFLICT DO NOTHING", mod.sid)
+        capsys.readouterr()
+        at = _parks(env)
+        spot = at(RELAY_PASS_MARK, "before")
+        td = asyncio.create_task(_delete(env, p))
+        await _parked(spot, td)            # past the tombstone; P's lobby row held (main.py:47524-47527)
+        tb = asyncio.create_task(env.call(_ban_route(mod, h)))
+        state, w = await _settle(env, tb, by=spot.pid)
+        assert state == "waits", (state, w)   # the ban core's FOR NO KEY UPDATE on the lobby row (main.py:51691-51693)
+        await _past_deadlock_check(env)
+        a, b = await _finish([td, tb], [spot])
+        out = capsys.readouterr().out
+        assert not _circle_closed(a, b, out), ("outcomes", _name(a), _name(b))
+        assert not _bad(a, b), ("outcomes", _name(a), _name(b))
+        assert a.status == 200 and a["status"] == "anonymized", a
+        assert b.status == 200, b
+        row = await env.conn.fetchrow(
+            "SELECT status, host_player_id FROM team_lobbies WHERE id = $1", lid)
+        assert (row["status"], row["host_player_id"]) == ("open", q.id), (dict(row), h.id, p.id, q.id)
+        assert await env.conn.fetchval(
+            "SELECT deleted_at IS NOT NULL FROM players WHERE id = $1", p.id), "P not tombstoned"
+    case(monkeypatch, body, prefix="mdpl")
