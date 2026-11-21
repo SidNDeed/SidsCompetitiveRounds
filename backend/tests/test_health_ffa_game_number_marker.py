@@ -333,9 +333,47 @@ def test_the_controls_run_on_a_copy_in_both_directions(tmp_path):
 
 
 
+# The calls whose result the sweep reads through, each to its FIRST argument.
+# `local_test_imports(names)` answers `names` first, in their order, and only
+# adds modules after them, so every name of the argument is copied and the
+# argument is a lower bound of the copy list. The test below checks that
+# property against the real function, so the sweep's reading fails loudly if
+# the function changes.
+_RESOLVED_CALLS = ("local_test_imports",)
+
+# The helpers of backend/tests that copy conftest.py into a tree, by file and
+# function. The test requires the sweep to see exactly these, so a helper that
+# drops out of its sight (as the six did when their lists were wrapped in a
+# call) is a red and not a quieter green.
+_CONFTEST_COPIERS = frozenset({
+    "test_health_ffa_game_number_marker.py:_copy_tree",
+    "test_health_lead_forfeit_pergame_marker.py:_copy_tree",
+    "test_health_match_hold_marker.py:_copy_tree",
+    "test_health_ovt_solo_split_marker.py:_copy_tree",
+    "test_health_team_dc_fallback_marker.py:_copy_tree",
+    "test_health_tournament_fence_marker.py:_copy_tree",
+})
+
+_COPY_CALLS = ("copyfile", "copy", "copy2")
+
+
+def _call_name(func):
+    return (func.attr if isinstance(func, ast.Attribute)
+            else func.id if isinstance(func, ast.Name) else "")
+
+
+def _names_conftest(node):
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value.replace("\\", "/").rsplit("/", 1)[-1] == "conftest.py")
+
+
 def _conftest_copy_sites(sources):
-    """Find copies by operation and resolve each helper's local path bindings."""
-    sites, missing = [], []
+    """Find copies by operation and resolve each helper's local path bindings.
+
+    A helper that names conftest.py and copies files, but whose copy of
+    conftest.py the sweep cannot resolve, is refused by name: the sweep may
+    not go blind to a copier without a red."""
+    sites, missing, blind = [], [], []
     for filename, source in sources.items():
         tree = ast.parse(source, filename=filename)
         for function in ast.walk(tree):
@@ -362,9 +400,16 @@ def _conftest_copy_sites(sources):
                 elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name):
                     bindings[node.target.id] = node.iter
 
+            unresolved = []
+
             def paths(node, seen=frozenset()):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     return {node.value}
+                if isinstance(node, ast.Call):
+                    if _call_name(node.func) in _RESOLVED_CALLS and node.args:
+                        return paths(node.args[0], seen)
+                    unresolved.append(_call_name(node.func) or type(node.func).__name__)
+                    return set()
                 if isinstance(node, ast.Name):
                     if node.id in bindings and node.id not in seen:
                         return paths(bindings[node.id], seen | {node.id})
@@ -377,32 +422,38 @@ def _conftest_copy_sites(sources):
                 return set()
 
             copies = set()
+            copy_calls = 0
             for node in nodes:
                 if not isinstance(node, ast.Call) or len(node.args) < 2:
                     continue
-                name = (node.func.attr if isinstance(node.func, ast.Attribute)
-                        else node.func.id if isinstance(node.func, ast.Name) else "")
-                if name in ("copyfile", "copy", "copy2"):
+                if _call_name(node.func) in _COPY_CALLS:
+                    copy_calls += 1
                     copies.update((src, dst) for src in paths(node.args[0])
                                   for dst in paths(node.args[1]))
             conftests = [(src, dst) for src, dst in copies
                          if src.rsplit("/", 1)[-1] == "conftest.py"
                          and dst.rsplit("/", 1)[-1] == "conftest.py"]
-            if not conftests:
-                continue
             site = "%s:%d:%s" % (filename, function.lineno, function.name)
+            if not conftests:
+                if copy_calls and any(_names_conftest(node) for node in nodes):
+                    blind.append("%s (unresolved: %s)" % (
+                        site, ", ".join(sorted(set(unresolved))) or "none"))
+                continue
             sites.append(site)
             for src, dst in conftests:
                 sibling = tuple(p.rsplit("/", 2)[0] + "/tools/review_tripwire.py"
                                 for p in (src, dst))
                 if sibling not in copies:
                     missing.append(site)
+    if blind:
+        raise AssertionError("conftest-copy sweep cannot resolve the copy of "
+                             "conftest.py in: " + ", ".join(blind))
     if missing:
         raise AssertionError("conftest copier missing review_tripwire.py: " + ", ".join(missing))
     return sorted(sites)
 
 
-def test_every_conftest_copy_carries_the_review_tripwire():
+def test_every_conftest_copy_carries_the_review_tripwire(tmp_path):
     sources = {p.name: p.read_text(encoding="utf-8-sig")
                for p in sorted((BACKEND / "tests").glob("*.py"))}
     sites = _conftest_copy_sites(sources)
@@ -410,6 +461,76 @@ def test_every_conftest_copy_carries_the_review_tripwire():
     print("conftest-copy sweep: %d files, %d sibling functions" % (len(sources), len(sites)))
     for site in sites:
         print(site)
+    found = {"%s:%s" % (s.split(":")[0], s.split(":")[-1]) for s in sites}
+    assert found == _CONFTEST_COPIERS, (
+        "the sweep sees %s; the conftest copiers of backend/tests are %s"
+        % (sorted(found), sorted(_CONFTEST_COPIERS)))
+
+    # THE READING OF A RESOLVED CALL, CHECKED AGAINST THE REAL FUNCTION: every
+    # list a copier hands `local_test_imports` comes back first, in its order.
+    checked = 0
+    for filename in sorted({c.split(":")[0] for c in _CONFTEST_COPIERS}):
+        for node in ast.walk(ast.parse(sources[filename], filename=filename)):
+            if (isinstance(node, ast.Call) and _call_name(node.func) in _RESOLVED_CALLS
+                    and node.args and isinstance(node.args[0], (ast.Tuple, ast.List))):
+                names = tuple(e.value for e in node.args[0].elts
+                              if isinstance(e, ast.Constant) and isinstance(e.value, str))
+                assert "conftest.py" in names, (filename, names)
+                got = local_test_imports(names)
+                assert got[:len(names)] == list(names), (filename, names, got)
+                checked += 1
+    assert checked == len(_CONFTEST_COPIERS), checked
+    # And on a tree of its own, where the named files import each other and
+    # one is absent: the names still come first, in their order.
+    (tmp_path / "b_mod.py").write_text("import a_mod\nimport c_mod\n", encoding="utf-8")
+    (tmp_path / "a_mod.py").write_text("import b_mod\n", encoding="utf-8")
+    (tmp_path / "c_mod.py").write_text("", encoding="utf-8")
+    names = ("b_mod.py", "a_mod.py", "absent.py")
+    got = local_test_imports(names, tests_dir=str(tmp_path))
+    assert got == ["b_mod.py", "a_mod.py", "absent.py", "c_mod.py"], got
+    print("local_test_imports returns its argument first, in order: %d copier lists "
+          "and one planted tree checked" % checked)
+
+    # PLANTED, IN THE WRAPPED FORM: a copier taking its list from the call
+    # without the tripwire is refused by name; its twin with it is accepted; a
+    # copier whose list passes through a call the sweep does not resolve is
+    # refused as a blind spot, by name. The sweep reads each function on its
+    # own, so these read the planted source alone; the plain-form pair below
+    # reads it beside the whole tree.
+    wrapped = (
+        "def _planted_wrapped_copier(dst):\n"
+        "    tests = dst / 'tests'\n"
+        "    for name in local_test_imports(('conftest.py', 'test_control.py')):\n"
+        "        shutil.copyfile(BACKEND / 'tests' / name, tests / name)\n"
+    )
+    try:
+        _conftest_copy_sites({"planted_wrapped": wrapped})
+    except AssertionError as exc:
+        assert str(exc) == (
+            "conftest copier missing review_tripwire.py: "
+            "planted_wrapped:1:_planted_wrapped_copier"), str(exc)
+        print("planted wrapped negative refused: %s" % exc)
+    else:
+        raise AssertionError("the sweep admitted the planted wrapped conftest copier")
+    wrapped_twin = wrapped + (
+        "    tools = dst / 'tools'\n"
+        "    shutil.copyfile(BACKEND / 'tools' / 'review_tripwire.py', "
+        "tools / 'review_tripwire.py')\n"
+    )
+    assert _conftest_copy_sites({"planted_wrapped": wrapped_twin}) == [
+        "planted_wrapped:1:_planted_wrapped_copier"]
+    print("planted wrapped positive twin accepted")
+    unknown = wrapped_twin.replace("local_test_imports(", "sorted_copy_list(")
+    try:
+        _conftest_copy_sites({"planted_unknown": unknown})
+    except AssertionError as exc:
+        assert str(exc) == (
+            "conftest-copy sweep cannot resolve the copy of conftest.py in: "
+            "planted_unknown:1:_planted_wrapped_copier (unresolved: sorted_copy_list)"), str(exc)
+        print("planted unresolved copier refused: %s" % exc)
+    else:
+        raise AssertionError("the sweep went blind to a copier whose list passes "
+                             "through an unresolved call, with no red")
     planted = (
         "def _planted_conftest_copier(dst):\n"
         "    tests = dst / 'tests'\n"
