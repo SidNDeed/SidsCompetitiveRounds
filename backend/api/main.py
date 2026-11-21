@@ -21164,6 +21164,7 @@ async def booster_grant(
     # Bans part 2a (S6, F4): no gold is granted to an actively banned player.
     # The check and the grant hold one lock: the identity lock, shared, first.
     await _ban_lock_and_gate(db, [player.steam_id])
+    await _reread_player_or_404(db, player.id)  # MDPL-GATE-REREAD-1: read by discord_id before the gate
     await _assert_no_service_subject(db, affected_player_ids=[player.id])
     existing = (await db.execute(
         select(BoosterGrant).where(BoosterGrant.discord_id == discord_id,
@@ -23152,6 +23153,7 @@ async def report_casual_dc(
     _lv = (leaver_steam_id or "").strip()
     await _ban_lock_and_gate(db, [_lv], request, actor=reporter_steam_id,
                              exclusive=[_lv])
+    await _reread_player_or_404(db, reporter.id)  # MDPL-GATE-REREAD-1: the reporter, read before the gate
 
     # The leaver may have NO players row, and that is the headline case rather
     # than an edge one: a vanilla opponent whose FIRST ever contact with a mod
@@ -23381,6 +23383,7 @@ async def link_discord(
     # Under the shared identity lock (F4), before the unlink below writes a
     # players row.
     await _ban_lock_and_gate(db, [player.steam_id])
+    await _reread_player_or_404(db, player.id)  # MDPL-GATE-REREAD-1: the code's player, read before the gate
 
     # Check if discord_id is already linked to another player
     existing = await db.execute(
@@ -44812,6 +44815,7 @@ async def artist_gift(
     # ban is refused by the strict session above). The answer is "Banned:
     # participant"; it never carries the receiver's reason.
     await _ban_lock_and_gate(db, [target_steam_id], request, actor=steam_id)
+    await _reread_player_or_404(db, target.id)  # MDPL-GATE-REREAD-1: the target, read before the gate
     # Per-item client floor (migration 397), judged on the RECIPIENT's
     # last-seen version: a gift to a client that cannot equip the item is
     # refused, and so is one to a recipient with no recorded version.
@@ -50490,6 +50494,7 @@ async def user_comment_on_bug_report(
     # Bans part 2a (S5, S6, BAN-R3): an actively banned reporter adds nothing
     # to its bug report through the bot either.
     await _ban_lock_and_gate(db, [report.steam_id])
+    await _reread_player_or_404(db, owner.id)  # MDPL-GATE-REREAD-1: the owner, read before the gate
     actor_name = (report.display_name
                   or (owner.display_name if owner else None)
                   or "Reporter")
@@ -50881,6 +50886,39 @@ async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=No
         await _ban_gate_or_raise(db, ids[0], request)
     else:
         await _ban_gate_any_or_raise(db, actor, ids, request)
+
+
+# MDPL-GATE-REREAD-1: a players row read again BY ID. The deletion's tombstone
+# (delete_player_data) rewrites steam_id and clears discord_id, so a read by
+# either finds no row once it has committed; by id it finds the tombstone.
+_PLAYER_REREAD_SQL = "SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)"
+
+
+async def _reread_player_or_404(db: AsyncSession, player_id) -> None:
+    """MDPL-GATE-REREAD-1. For a route that read a player BEFORE a wait the
+    account deletion can end and writes from that read AFTER it: called
+    directly after the wait, it reads the player's row again by id and
+    answers 404 when the row is gone or its deleted_at is set, before the
+    route writes anything from its early read.
+
+    The wait holds the player's identity key until the commit
+    (_ban_lock_and_gate takes the key of every id and of `actor`, shared
+    unless `exclusive` names it; cancel_lobby_bet takes it exclusive), and the
+    deletion takes that key exclusive before it tombstones the row. So a
+    deletion that committed while the route waited is read here, and one that
+    begins later waits for the route's commit: the read takes no row lock.
+
+    It sends no pending ORM write: the statement is text(), and
+    Session.execute autoflushes only before an ORM statement (SQLAlchemy
+    2.0.35, Session._execute_internal), so a store pending in the caller's
+    session stays pending, to be flushed where it was before (lesson 1294).
+    At each of its callers nothing is pending here:
+    test_mdpl_gate_reread_pg.py records the session's new, dirty and deleted
+    sets at every call."""
+    found = (await db.execute(text(_PLAYER_REREAD_SQL),
+                              {"pid": str(player_id)})).mappings().first()
+    if found is None or found["deleted_at"] is not None:
+        raise HTTPException(status_code=404, detail="Player not found")
 
 
 # Bans part 2a (F1 b): the ONE place that says which records no writer may pay.
@@ -74279,6 +74317,7 @@ async def cancel_lobby_bet(
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
+    await _reread_player_or_404(db, bettor.id)  # MDPL-GATE-REREAD-1: the bettor, read before its key
     claimed = (await db.execute(text("""
         UPDATE lobby_bets
            SET status = 'refund_pending', resolved_at = NOW(),
