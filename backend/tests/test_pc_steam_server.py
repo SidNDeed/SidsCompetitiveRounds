@@ -1119,9 +1119,17 @@ class _RtWorld:
         c = list(cmd)
         self.calls.append(("run",) + tuple(c[:4]))
         out = None
-        if c[:2] == ["git", "rev-parse"]:
+        # CMDLINE-REST 2a: what phase 4 reads before it acts, answered as a world with no earlier attempt: main
+        # checked out, no merge in progress, main a commit with one parent (no merge of the tip)
+        if c[:5] == ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"]:
+            return ("", 1) if want_rc else ""
+        if c[:4] == ["git", "symbolic-ref", "-q", "HEAD"]:
+            return ("refs/heads/main", 0) if want_rc else "refs/heads/main"
+        if c[:5] == ["git", "rev-list", "--parents", "-n", "1"] and len(c) == 6:
+            out = "%s %s" % (c[5], "9" * 40)
+        elif c[:2] == ["git", "rev-parse"]:
             ref = c[2]
-            out = {self.rt.BRANCH: self.branch_tip, "HEAD": self.head,
+            out = {self.rt.BRANCH: self.branch_tip, "HEAD": self.head, "refs/heads/main": self.head,
                    "HEAD^2": self.second_parent}.get(ref, "b" * 40 if ":" in ref else None)
         elif c[:3] == ["git", "--no-optional-locks", "status"]:
             out = ""
@@ -1197,6 +1205,10 @@ def _rt_world(monkeypatch, rt):
     monkeypatch.setattr(rt, "derive_trailer_suffix", lambda branch: _TRAILER)
     monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
     monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    # CMDLINE-REST 2c: the git form pre-flight is checked on its own; here it is recorded and runs nothing
+    w.preflights = []
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda where=None: w.preflights.append(where) or [],
+                        raising=False)
     for name in ("assert_control", "assert_route_probes", "assert_health_keys"):
         monkeypatch.setattr(rt, name, lambda *a, **kw: None)
     monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
@@ -5419,4 +5431,258 @@ def test_cmdline_both_phases_commit_from_their_files_on_a_scratch_repository(mon
                    if p.name.startswith(state + "."))
     assert kinds == ["merge-message", "precursor-message"], kinds
     capsys.readouterr()
+
+
+# ── CMDLINE-REST: the release tool's remaining command-line gaps (item 36, part 2) ──
+# Red on a train without the part-2 patch (apply_rest.py), green with it: phase 4 resumes from the world it reads
+# (2a), `check` measures every entry (2b), a pre-flight runs each git form once (2c), and every other line built
+# from batch text has one builder and is measured before the token (2d).
+
+
+def _rest_scratch(monkeypatch, rt, tmp_path):
+    """The scratch repository of the commit phases with the lane NOT yet merged: main at its root commit, pushed;
+    the hook installed after the setup, so its marker counts the commits the train makes."""
+    ns = _cmdline_scratch(monkeypatch, rt, tmp_path)
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda where=None: [], raising=False)
+    return ns
+
+
+def test_rest_2a_a_staged_merge_of_the_lane_is_committed_from_the_file_and_pushed(monkeypatch, tmp_path, capsys):
+    """A restart that finds the lane's merge staged and not committed goes on to the commit, from its own message
+    file, then proves and pushes it: one merge, its parents main's root and the tip, its stored message git's
+    cleanup of the derived text, the hook run once, one push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    assert ns.merge_head() == ns.tip
+    st = _rt_fresh(rt, schema_done=True)
+    rt.phase_code(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    merge = st["code_sha"]
+    assert merge == ns.head("HEAD") == ns.origin_main() and ns.merge_head() is None
+    assert ns.parents(merge) == [ns.root, ns.tip]
+    assert ns.stored(merge) == ns.cleanup(_rt_committed_text(rt.MERGE_MESSAGE))
+    assert ns.marker_lines() == ["ran"] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "a merge of the reviewed tip is staged on main and not committed" in planned, planned[-600:]
+
+
+def test_rest_2a_a_staged_set_that_is_not_the_lanes_is_refused_with_nothing_committed(monkeypatch, tmp_path):
+    """A staged merge that carries a file the lane does not change is refused: nothing committed, nothing pushed,
+    the merge still staged for the operator, no sha recorded."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    (ns.repo / "not-the-lanes.txt").write_text("x\n")
+    ns.git("add", "not-the-lanes.txt")
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "the staged merge carries" in str(exc.value), str(exc.value)[:300]
+    assert ns.merge_head() == ns.tip and ns.head("HEAD") == ns.root == ns.origin_main()
+    assert ns.pushes == [] and ns.marker_lines() == [] and "code_sha" not in st
+
+
+def test_rest_2a_a_committed_merge_is_proved_and_pushed_never_merged_twice(monkeypatch, tmp_path, capsys):
+    """A restart that finds the lane's merge committed and not pushed proves it (parents by identity, tree) and
+    pushes THAT commit: no second merge, no commit, one push; the plan says so first. The hand route, `run --go
+    --from code`, reaches the same end through main()."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "-m", "the merge an earlier attempt committed", rt.BRANCH)
+    merge = ns.head("HEAD")
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    rt.phase_code(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    rt.save_state(st)
+    monkeypatch.setitem(rt.BATCHES[rt.BATCH_NAME], "reviewed_tip", ns.tip)   # main() selects the entry again
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
+    monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", rt.BATCH_NAME,
+                                         "--from", "code"])
+    with pytest.raises(ns.Deployed):
+        rt.main()
+    assert rt.load_state()["code_sha"] == merge == ns.head("HEAD") == ns.origin_main()
+    assert ns.parents(merge) == [ns.root, ns.tip]
+    assert ns.marker_lines() == [] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "committed and not pushed; a run would prove the merge %s" % merge in planned, planned[-600:]
+
+
+def test_rest_2a_a_committed_merge_whose_tree_is_not_the_lanes_is_not_pushed(monkeypatch, tmp_path):
+    """A committed merge of the tip whose tree carries more than the lane is refused before the push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    (ns.repo / "not-the-lanes.txt").write_text("x\n")
+    ns.git("add", "not-the-lanes.txt")
+    ns.git("commit", "-q", "-m", "a merge with one file more")
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "does not read as the lane's merge" in str(exc.value) and "NOT pushed" in str(exc.value)
+    assert ns.origin_main() == ns.root and ns.pushes == [] and "code_sha" not in st
+
+
+def test_rest_2a_a_pushed_merge_is_proved_and_recorded_with_nothing_run(monkeypatch, tmp_path):
+    """A restart that finds the lane's merge already on origin's main records its sha and goes on: no commit, no
+    push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "-m", "the merge an earlier attempt pushed", rt.BRANCH)
+    ns.git("push", "-q", "origin", "main")
+    merge = ns.head("HEAD")
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    assert st["code_sha"] == merge == ns.head("HEAD") == ns.origin_main()
+    assert ns.marker_lines() == [] and ns.pushes == []
+
+
+def test_rest_2b_check_measures_every_batch_entry_with_the_phases_builders(monkeypatch, tmp_path, capsys):
+    """measure_every_batch measures every entry with precursor_cmds, code_cmds (the plan's file names) and
+    batch_cmdlines, finds an entry whose line is over the bound (a long sql list, a long column list) and not one
+    whose merge message alone is long (it travels in a file), and selects the chosen batch again; `check` refuses
+    on such an entry before any probe of the world, and goes on to its probes without it."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    misses, unread = rt.measure_every_batch()
+    assert misses == [] and len(unread) < len(rt.BATCHES), (misses, unread)
+    assert rt.BATCH_NAME == name
+    sql_long, cols_long, msg_long = (copy.deepcopy(rt.BATCHES[name]) for _ in range(3))
+    sql_long["schema_sql"] = ["%04d_a_migration_with_a_long_name_for_this_check.sql" % i for i in range(700)]
+    cols_long["expect_columns"] = [["a_table_%04d" % i, "a_column_with_a_long_name_%04d" % i] for i in range(700)]
+    msg_long["merge_message"] = "m" * 60000
+    for key, entry in (("zz-cmdline-sql", sql_long), ("zz-cmdline-columns", cols_long),
+                       ("zz-cmdline-message", msg_long)):
+        monkeypatch.setitem(rt.BATCHES, key, entry)
+    misses, _unread = rt.measure_every_batch()
+    assert sorted(m[0] for m in misses) == ["zz-cmdline-columns", "zz-cmdline-sql"], misses
+    said = dict(misses)
+    assert said["zz-cmdline-sql"].startswith("phase 1 of batch zz-cmdline-sql: the command `git checkout ")
+    assert said["zz-cmdline-columns"].startswith("the schema probe on "), said["zz-cmdline-columns"][:200]
+    assert rt.BATCH_NAME == name
+    w = _rt_world(monkeypatch, rt)
+    checked = []
+    monkeypatch.setattr(rt, "phase_check", lambda args, st: checked.append(args.batch))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "check", "--batch", name])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "zz-cmdline-columns: the schema probe on " in out and checked == [] and w.calls == [], out[-800:]
+    monkeypatch.delitem(rt.BATCHES, "zz-cmdline-sql")
+    monkeypatch.delitem(rt.BATCHES, "zz-cmdline-columns")
+    assert rt.main() == 0 and checked == [name]
+
+
+def _rest_form(c):
+    return " ".join(c[:3]) + (" ..." if len(c) > 3 else "")
+
+
+def test_rest_2c_the_preflight_runs_each_git_form_once_on_a_scratch_repository_of_its_own(monkeypatch, tmp_path):
+    """git_forms_preflight runs phase 1's and phase 4's lists, as their builders give them, once each with real git
+    in a folder it makes, its merge message past the bound; it removes that folder and nothing else; a form git
+    refuses is a Fail naming the form, with the folder removed too."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    where = tmp_path / "preflight"
+    where.mkdir()
+    (where / "standing.txt").write_text("not the pre-flight's\n")
+    forms = rt.git_forms_preflight(str(where))
+    assert forms == (["phase 1: " + _rest_form(c) for c in rt.precursor_cmds(rt.precursor_files(), "F")]
+                     + ["phase 4: " + _rest_form(c) for c in rt.code_cmds("F")]), forms
+    assert sorted(p.name for p in where.iterdir()) == ["standing.txt"]
+    real = rt.code_cmds
+    monkeypatch.setattr(rt, "code_cmds", lambda p: [c if c[:2] != ["git", "commit"]
+                                                    else ["git", "commit", "--no-such-option", "-F", p]
+                                                    for c in real(p)])
+    with pytest.raises(rt.Fail) as exc:
+        rt.git_forms_preflight(str(where))
+    assert "phase 4: git commit --no-such-option ..." in str(exc.value), str(exc.value)[:300]
+    assert sorted(p.name for p in where.iterdir()) == ["standing.txt"]
+
+
+def test_rest_2c_main_runs_the_preflight_after_the_measure_and_before_the_token(monkeypatch, tmp_path, capsys):
+    """In main() the pre-flight's one call stands after assert_run_cmdlines_fit and before the first
+    train_token_write; a pre-flight that refuses stops the run with no token; one that passes lets it write it."""
+    import ast
+    rt, src = _release_train()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def calls(name):
+        return sorted(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name) and n.func.id == name)
+    pre, fit, token = calls("git_forms_preflight"), calls("assert_run_cmdlines_fit"), calls("train_token_write")
+    assert len(pre) == 1 and fit[0] < pre[0] < token[0], (fit, pre, token)
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    _rt_world(monkeypatch, rt)
+    events = []
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+
+    def refuse(where=None):
+        raise rt.Fail("the git form pre-flight: `phase 4: git commit -F ...` was refused (rc=129): planted")
+    monkeypatch.setattr(rt, "git_forms_preflight", refuse)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", name, "--from", "code"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "planted" in out and "before a train token was written" in out and events == [], out[-600:]
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda where=None: ["phase 4: git checkout main"])
+    assert rt.main() == 1      # the code phase then refuses for its own reason (no schema_done)
+    assert events[:1] == [("token", "start")], events
+
+
+def test_rest_2d_every_line_built_from_batch_text_has_one_builder_and_is_measured_before_the_token(monkeypatch,
+                                                                                                tmp_path, capsys):
+    """batch_cmdlines holds each migration's ssh line, each sql file's two reads, the schema probes on both boxes
+    and each batch path as http_code_argv builds it; schema_state and index_state send the builders' queries and
+    http_code runs http_code_argv's line; and a run whose column probe is over the bound stops before its token,
+    the refusal naming the probe."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    lines = rt.batch_cmdlines()
+    for f in rt.SCHEMA_SQL + rt.POST_CODE_SQL + rt.I18N_SQL + rt.BACKFILL_SQL:
+        assert ("the migration %s" % f, rt.ssh_argv(rt.PRIMARY, "migrate:" + f)) in lines, f
+    for f in rt.precursor_files():
+        assert ["git", "cat-file", "-e", "%s:backend/sql/%s" % (rt.BRANCH, f)] in [c for _w, c in lines]
+    for path in [rt.SMOKE_ROUTE] + list(rt.NEW_ROUTES):
+        for host in (rt.PRIMARY, rt.STANDBY, rt.EDGE_HOST):
+            assert rt.http_code_argv(host, path) in [c for _w, c in lines], (host, path)
+    monkeypatch.setattr(rt, "EXPECT_TABLES", ["t_one"])
+    monkeypatch.setattr(rt, "EXPECT_COLUMNS", [("t_one", "c_one")])
+    monkeypatch.setattr(rt, "EXPECT_INDEXES", ["i_one"])
+    queries = [rt.schema_table_query(), rt.schema_column_query(), rt.index_query()]
+    assert all(queries) and "'t_one'" in queries[0] and "('t_one','c_one')" in queries[1] and "'i_one'" in queries[2]
+    for host in (rt.PRIMARY, rt.STANDBY):
+        for q in queries:
+            assert ("the schema probe on %s" % host, rt.ssh_argv(host, "sql-readonly:" + q)) in rt.batch_cmdlines()
+    sent = []
+    monkeypatch.setattr(rt, "sql", lambda host, query: sent.append(query) or "")
+    rt.schema_state(rt.PRIMARY)
+    rt.index_state(rt.PRIMARY)
+    assert sent == queries, sent
+    ran = []
+    monkeypatch.setattr(rt.subprocess, "run", lambda cmd, *a, **kw: ran.append(list(cmd)) or SimpleNamespace(
+        returncode=0, stdout=b"200", stderr=b""))
+    assert rt.http_code(rt.STANDBY, "/api/v1/a-path", method="POST") == "200"
+    assert ran == [rt.http_code_argv(rt.STANDBY, "/api/v1/a-path", method="POST")], ran
+    monkeypatch.undo()
+
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["expect_columns"] = [["a_table_%04d" % i, "a_column_with_a_long_name_%04d" % i] for i in range(700)]
+    monkeypatch.setitem(rt.BATCHES, "zz-cmdline-columns", entry)
+    w = _rt_world(monkeypatch, rt)
+    events = []
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "zz-cmdline-columns",
+                                         "--only", "verify"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "the schema probe on %s, asked before the run" % rt.PRIMARY in out, out[-600:]
+    assert "Stopped before any phase ran and before a train token was written." in out
+    assert events == [] and w.calls == []
 
