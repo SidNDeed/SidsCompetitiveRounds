@@ -1049,6 +1049,101 @@ def test_c5_each_action_word_signs_its_own_action_only(monkeypatch):
     run_env(monkeypatch, body)
 
 
+# ── C6: a seat that did not play ───────────────────────────────────────────
+
+C6_ARMS = {
+    # seat 3 left before the field scored grace_half half points, a zero tally the bounds accept
+    "grace": lambda lob: {"left": {lob.sids[3]}, "gp_leave": {lob.sids[3]: 1}},
+    # seat 3 reported absent with an all-zero tally: the decision's ghost arm
+    "ghost": lambda lob: {"left": {lob.sids[3]}, "absent": {lob.sids[3]}},
+}
+
+
+@pytest.mark.parametrize("mode", ["arm", "control"])
+@pytest.mark.parametrize("arm", sorted(C6_ARMS))
+def test_c6_credit_pays_no_seat_that_did_not_play(arm, mode, monkeypatch):
+    """A held report whose seat 3 did not play the game (graced: it left
+    below the grace threshold; ghost: it was reported absent with an empty
+    tally). After Credit answers, that seat's XP and Gold are unchanged, no
+    ledger row of this quarantine id names it, and neither the answer's nor
+    the moderator log entry's `players` holds it; the three other seats are
+    paid, each by _ffa_game_awards asked for three live seats with the beaten
+    count over those three, and the answer, the players rows and the ledger
+    carry exactly what the product's function returned. The control runs the
+    same scene with _ffa_leave_decision wrapped to take seat 3 out of the set
+    the arm names: seat 3 is then paid, so each arm's assertion can fail."""
+    async def body(env):
+        c = env.conn
+        lob = await played(env)
+        await close(env, lob)
+        results = dict(res(lob))
+        results[lob.sids[3]] = (0, 0)
+        a = await env.report(lob, 2, results, **C6_ARMS[arm](lob))
+        assert a.status != 200, ("C6 fixture: game 2 held", arm, a)
+        qid = str(await c.fetchval(
+            "SELECT id FROM match_report_quarantine WHERE group_id = $1 AND photon_room_id LIKE '%_r2'"
+            "   AND status = 'pending'", lob.lid))
+        await later_for(env, lob)
+        leaver, lpid = lob.sids[3], lob.pids[3]
+        seen = []
+        real_awards = main._ffa_game_awards
+
+        def awards(**kw):
+            out = real_awards(**kw)
+            seen.append((kw, out))
+            return out
+        monkeypatch.setattr(main, "_ffa_game_awards", awards)
+        named = []
+        if mode == "control":
+            real_decision = main._ffa_leave_decision
+
+            def decision(*args, **kw):
+                ghosts, graced, log = real_decision(*args, **kw)
+                named.append(leaver in (graced if arm == "grace" else ghosts))
+                return ((ghosts - {leaver}, graced, log) if arm == "ghost"
+                        else (ghosts, graced - {leaver}, log))
+            monkeypatch.setattr(main, "_ffa_leave_decision", decision)
+        before = {r["id"]: (r["total_xp"], r["gold_earned"]) for r in await c.fetch(
+            "SELECT id, total_xp, gold_earned FROM players WHERE id = ANY($1::uuid[])", lob.pids)}
+        ans = await credit(env, qid)
+        assert ans.status == 200, ("C6 credit", arm, mode, ans)
+        got = {p["steam_id"]: p for p in ans.body["players"]}
+        ledger = [tuple(r) for r in await c.fetch(
+            "SELECT player_id, reason, amount FROM gold_transactions WHERE reference_id = $1", qid)]
+        log = await c.fetchrow("SELECT details FROM admin_actions WHERE action = 'quarantine_credit'")
+        details = json.loads(log["details"]) if isinstance(log["details"], str) else log["details"]
+        after = {r["id"]: (r["total_xp"], r["gold_earned"]) for r in await c.fetch(
+            "SELECT id, total_xp, gold_earned FROM players WHERE id = ANY($1::uuid[])", lob.pids)}
+        if mode == "control":
+            assert any(named), ("C6 control: the real decision named seat 3", arm, named)
+            assert leaver in got and leaver in details["players"], ("C6 control: seat 3 paid", arm, got)
+            assert after[lpid] != before[lpid] and any(p == lpid for p, _k, _v in ledger), (
+                "C6 control: seat 3's XP, Gold and ledger moved", arm, before[lpid], after[lpid])
+            return
+        assert leaver not in got and leaver not in details["players"], ("C6 seat 3 in players", arm, got)
+        assert after[lpid] == before[lpid], ("C6 seat 3's XP and Gold", arm, before[lpid], after[lpid])
+        assert not [r for r in ledger if r[0] == lpid], ("C6 seat 3's ledger rows", arm, ledger)
+        live = [s for s in lob.sids if s != leaver]
+        assert sorted(got) == sorted(live), ("C6 the other seats paid", arm, sorted(got))
+        place = {s: 1 + sorted(live, key=lambda x: (-results[x][0], -results[x][1])).index(s) for s in live}
+        asks = [kw for kw, _out in seen]
+        assert asks and all(kw["n_live"] == len(live) for kw in asks), ("C6 one live seat fewer", asks)
+        assert sorted((kw["place"], kw["beaten"]) for kw in asks) == sorted(
+            (place[s], sum(1 for x in live if place[x] > place[s])) for s in live for _ in range(2)), (
+            "C6 the beaten counts over the live seats", asks)
+        by_place = {}
+        for kw, out in seen:
+            by_place.setdefault(kw["place"], []).append(out)
+        for s in live:
+            first, second = by_place[place[s]]
+            pid = lob.pids[lob.sids.index(s)]
+            assert (got[s]["xp"], got[s]["gold"]) == (first["xp"], second["gold"]), ("C6 the product's sum", s)
+            assert after[pid][0] - before[pid][0] == first["xp"], ("C6 XP delta", s)
+            assert after[pid][1] - before[pid][1] == second["gold"] == sum(
+                v for p, _k, v in ledger if p == pid), ("C6 gold delta = ledger", s)
+    run_env(monkeypatch, body)
+
+
 # ── G1, G2: the list ───────────────────────────────────────────────────────
 
 def test_g1_the_lists_verdict_takes_no_row_lock(monkeypatch):
