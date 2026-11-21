@@ -19,7 +19,8 @@ the route answers 404 (admin_grant_achievement with its own "Target player not
 found"); the statement it waited at was the shared key; the read by id ran as
 the route's path says (toggle_ranked: once, on the [Deleted User] row
 get_or_create_player stored for the purged id, that row's GlickoRating
-pending; the three others: not at all, their own read found no row); P's row
+pending; the three others: not at all here, their own read found no row;
+their read by id has scenes of its own, below); P's row
 equals, in every column, the row H left; and no row of the case schema that
 names P (player_achievements, gold_transactions, link_codes, the title item
 among them) was added, changed or removed.
@@ -42,6 +43,25 @@ route answers as before, having waited at its key, with the read by id run
 once on P's id and nothing pending; and toggle_ranked, for a Steam id never
 seen, still creates the player under the key, the new row's GlickoRating
 pending at the read by id and stored after it.
+
+The read by id in unlock_achievement, admin_grant_achievement and
+generate_link_code runs in scenes of its own, with no holder: a purged id's
+[Deleted User] row (get_or_create_player stores it under the raw id with
+deleted_at set; an earlier request committed it) stands under P's raw id
+before the request (_purged makes P's row that row). The route's own read
+finds it; then, in this order: the route answers 404 "Player not found"
+(admin_grant_achievement too); the read by id ran once, on that row's id,
+with nothing pending; the row equals, in every column, the row seeded; and no
+row naming it was added, changed or removed (unlock_achievement: the
+achievement, the gold on the row and its ledger row; admin_grant_achievement:
+those, the title item and the moderator record; generate_link_code: the link
+code seeded for the row stays and no code is added). Each of their mutants
+takes the route's own call of the read by id out (_cut: the call answers
+without reading when the route's body makes it, and reads for any other
+caller) and must fail at its first assertion, the answer: a 200. The cut must
+have taken out exactly one call, the route's; that premise is checked first
+(lesson 1300 rule 4: a mutant that cut nothing is red on its premise, not on
+the product).
 
 Every route takes one identity key (the admin's is not taken), so no scene
 has a second key whose order could change its outcome.
@@ -268,6 +288,109 @@ def test_mutant_admin_grant_achievement_without_the_key_pays_the_tombstone(monke
 
 def test_mutant_generate_link_code_without_the_key_stores_a_code(monkeypatch, tmp_path):
     _mutant(monkeypatch, tmp_path, "generate_link_code")
+
+
+# -- the read by id, on a purged id's [Deleted User] row -------------------------------------------
+
+async def _purged(env, s):
+    """P's row made the [Deleted User] row get_or_create_player stores for a
+    purged id, committed as an earlier request left it: under P's raw id
+    still, display_name '[Deleted User]', deleted_at set. The scene's other
+    seeds (the admin, the title's shop row, P's link code) stand as its
+    builder left them."""
+    await env.conn.execute(
+        "UPDATE players SET display_name = '[Deleted User]', deleted_at = NOW() WHERE id = $1", s.p.id)
+
+
+def _cut(env, route, taken):
+    """The read-by-id mutant: main._reread_player_or_404, called from
+    `route`'s own body, answers without reading; called from anywhere else,
+    it runs as before. A plain function, so frame 1 is the caller's body.
+    `taken` receives the name of each caller it cut."""
+    before = main._reread_player_or_404
+
+    async def nothing():
+        return None
+
+    def reread(db, player_id):
+        caller = sys._getframe(1).f_code.co_name
+        if caller == route:
+            taken.append(caller)
+            return nothing()
+        return before(db, player_id)
+    env.mp.setattr(main, "_reread_player_or_404", reread)
+
+
+def _seeded_case(monkeypatch, tmp_path, route, *, taken=None):
+    """The route called for a purged id's [Deleted User] row that stands
+    before the request (no holder), and the four assertions of the module
+    docstring's read-by-id paragraph, in its order. taken: the mutant, the
+    route's own call of the read by id taken out (_cut)."""
+    async def body(env):
+        _seams(env, tmp_path)
+        seen = _spy(env)
+        if taken is not None:
+            _cut(env, route, taken)
+        s = await SCENES[route](env)
+        await _purged(env, s)
+        left = await _row(env.conn, s.p)
+        named = await _naming(env.conn, s)
+        ans = await asyncio.wait_for(env.call(s.call), BOUND)
+        assert (ans.status, ans.body) == NOT_FOUND, ("answer", route, ans)
+        assert seen == [(str(s.p.id), 0, 0, 0)], ("the read by id", route, seen)
+        row = await _row(env.conn, s.p)
+        assert row == left, ("P's row", route, _changed(left, row))
+        now = await _naming(env.conn, s)
+        assert now == named, ("rows naming P", route, sorted(set(now) ^ set(named))[:4])
+    case(monkeypatch, body, prefix="mdplrb")
+
+
+def _seeded_mutant(monkeypatch, tmp_path, route):
+    """The route's seeded test with its own call of the read by id taken
+    out: the cut took out one call, the route's (checked first); then red at
+    the test's first assertion, the answer, which is a 200 for the purged
+    id's row."""
+    taken, first = [], None
+    try:
+        _seeded_case(monkeypatch, tmp_path, route, taken=taken)
+    except AssertionError as e:
+        first = str(e).splitlines()[0]
+    assert taken == [route], ("the cut", route, taken)
+    assert first is not None and first.startswith("('answer', %r, Answer(200, " % route), first
+    print("MUTANT-RED %s (read by id): %s" % (route, first[:200]))
+
+
+def test_unlock_achievement_refuses_a_purged_ids_deleted_user_row(monkeypatch, tmp_path):
+    """Its own read finds the row; the read by id refuses it. Without the
+    read by id, the achievement, the gold on the row and its ledger row are
+    stored for it."""
+    _seeded_case(monkeypatch, tmp_path, "unlock_achievement")
+
+
+def test_admin_grant_achievement_refuses_a_purged_ids_deleted_user_row(monkeypatch, tmp_path):
+    """Its own read finds the row; the read by id refuses it ("Player not
+    found"). Without the read by id, the achievement, the gold on the row,
+    its ledger row, the title item and the moderator record are stored."""
+    _seeded_case(monkeypatch, tmp_path, "admin_grant_achievement")
+
+
+def test_generate_link_code_refuses_a_purged_ids_deleted_user_row(monkeypatch, tmp_path):
+    """Its own read finds the row; the read by id refuses it, and the row's
+    link code stays. Without the read by id, that code is removed and a new
+    code naming the row is stored."""
+    _seeded_case(monkeypatch, tmp_path, "generate_link_code")
+
+
+def test_mutant_unlock_achievement_without_the_read_by_id_pays_the_deleted_user_row(monkeypatch, tmp_path):
+    _seeded_mutant(monkeypatch, tmp_path, "unlock_achievement")
+
+
+def test_mutant_admin_grant_achievement_without_the_read_by_id_pays_the_deleted_user_row(monkeypatch, tmp_path):
+    _seeded_mutant(monkeypatch, tmp_path, "admin_grant_achievement")
+
+
+def test_mutant_generate_link_code_without_the_read_by_id_stores_a_code(monkeypatch, tmp_path):
+    _seeded_mutant(monkeypatch, tmp_path, "generate_link_code")
 
 
 # -- the control -----------------------------------------------------------------------------------
