@@ -15837,7 +15837,7 @@ def _ping_warning_text(kind, configured, roles, role_word, deliverable, delivere
             if count > len(roles):
                 lines.append(f"**Cause: {count} roles have the same name.** Each is named **{shown}**, and the "
                              f"post mentioned the {len(roles)} oldest of them (one ping mentions at most "
-                             f"{PING_ROLES_MAX}).")
+                             f"{PING_ROLES_MAX} per kind).")
             else:
                 lines.append(f"**Cause: {count} roles have the same name.** Each is named **{shown}**, and the "
                              "post mentioned every one of them.")
@@ -15941,7 +15941,7 @@ def _ping_warning_owed(role_word, deliverable, delivered) -> bool:
 
 async def _ping_after_send(kind, ping_id, configured, roles, role_word, deliverable, channel, message):
     """After Discord accepted a role ping: R3's reading of its answer, the
-    post's one [PING] line, and, when a warning is owed, its task started.
+    post's [PING] line for this kind, and, when a warning is owed, its task started.
     It awaits nothing, so no admin I/O stands between the post and its ack or
     before the next post; it stays a coroutine so that both sites call it as
     before. Never raises: the post is already counted as posted, and nothing
@@ -15957,6 +15957,22 @@ async def _ping_after_send(kind, ping_id, configured, roles, role_word, delivera
 
 _PING_HINT_WORDS = ("look", "casual", "lfp")   # what a role name the NO line lists contains, normalised
 PING_HINTS_MAX = 5                             # the most role names the NO line lists
+
+
+def _ping_shared_role_line(ranked_roles, casual_roles):
+    """LFP-CASUAL-1 (review round 2): when the ranked and the casual role
+    names resolve to the same role (configured so, or one normalised alias),
+    a casual-only ping mentions that role, as a ranked ping does. Returns the
+    one startup [PING-CHECK] line that says so, naming both env keys, or None
+    when the two kinds share no role. The ping still posts either way."""
+    ranked_ids = {getattr(r, "id", None) for r in (ranked_roles or ())} - {None}
+    shared = [r for r in (casual_roles or ()) if getattr(r, "id", None) in ranked_ids]
+    if not shared:
+        return None
+    names = ", ".join(repr(str(getattr(r, "name", "")))[:60] for r in shared[:PING_ROLES_MAX])
+    return (f"[PING-CHECK] kind=casual startup: the casual and the ranked role names resolve to the same role "
+            f"({names}): a casual-only ping mentions that role, as a ranked ping does "
+            f"(env {_PING_ROLE_ENV['casual']} and env {_PING_ROLE_ENV['lfp']})")
 
 
 def _ping_resolved_line(kind, configured, role_word, mentioned, roles=()) -> str:
@@ -15992,6 +16008,7 @@ async def _ping_startup_lines():
     if _ping_startup_done:
         return
     _ping_startup_done = True
+    resolved = {}
     for kind, channel_id, configured in (("lfp", QUEUE_BEACON_CHANNEL_ID, LFP_ROLE_NAME),
                                          ("casual", QUEUE_BEACON_CHANNEL_ID, LFP_CASUAL_ROLE_NAME),
                                          ("gambler", LIVE_BETS_CHANNEL_ID, GAMBLER_ROLE_NAME)):
@@ -16009,6 +16026,7 @@ async def _ping_startup_lines():
                                   f"unavailable: {type(ex).__name__}")
             guild = getattr(channel, "guild", None)
             ping_roles, role_word = _ping_role_resolve(guild.roles if guild is not None else (), configured)
+            resolved[kind] = ping_roles
             _ping_log(_ping_line(kind, _PING_STARTUP, role_word, len(ping_roles),
                                  _ping_deliverable(ping_roles, channel), 0, "unsent"))
             _ping_log(_ping_resolved_line(kind, configured, role_word, len(ping_roles),
@@ -16017,6 +16035,13 @@ async def _ping_startup_lines():
             _ping_log(f"[PING-CHECK] kind={kind} startup check failed: {type(ex).__name__}")
         finally:
             _ping_startup_settled.add(kind)
+    # After both LFP kinds' checks: one line when they resolve to one role.
+    try:
+        shared_line = _ping_shared_role_line(resolved.get("lfp"), resolved.get("casual"))
+        if shared_line:
+            _ping_log(shared_line)
+    except Exception as ex:
+        _ping_log(f"[PING-CHECK] kind=casual startup shared-role check failed: {type(ex).__name__}")
 
 
 async def _ping_startup_wait(*kinds) -> None:

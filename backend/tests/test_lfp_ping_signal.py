@@ -11,13 +11,13 @@ the Gambler ping, poll_gambler_pings) now:
   R1 resolve the role through ONE helper: the exact name, else the one role
      whose normalised name matches; two or more normalised matches with no
      exact name are ambiguous (no role); when several roles carry the exact
-     name each is mentioned (duplicate), at most five, the oldest first;
+     name each is mentioned (duplicate), at most five per kind, the oldest first;
   R2 read before the send whether the ping can notify (deliverable): every
      mentioned role mentionable, or the bot holds the permission;
   R3 read after the send how many of the mentioned roles Discord's answer
      lists (listed) and whether it lists every one (delivered), from that
      answer and never from the bot's own text;
-  R4 print one [PING] line per post in a closed grammar, and post one admin
+  R4 print one [PING] line per kind a post names, in a closed grammar, and post one admin
      warning per kind per 24 hours (counted from the time Discord accepted
      the last one) when one is owed: the role absent, ambiguous or
      duplicate, deliverable no, or delivered not yes;
@@ -58,7 +58,7 @@ FUNCS = ("_ping_log", "_ping_role_norm", "_ping_role_matches", "_ping_role_resol
          "_ping_delivered", "_ping_line", "_ping_warning_text", "_ping_warn", "_ping_warn_start", "_ping_warn_done",
          "_ping_warning_owed", "_ping_after_send", "_ping_startup_lines", "_ping_startup_wait", "poll_lfp_pings",
          "poll_gambler_pings", "_escape_md", "_escape_text", "_md_name", "_lfp_render_message",
-         "_ping_resolved_line")
+         "_ping_resolved_line", "_ping_shared_role_line")
 ASSIGNS = ("PING_WARN_EVERY_S", "PING_ROLES_MAX", "PING_STARTUP_WAIT_S", "PING_STARTUP_STEP_S", "_PING_STARTUP",
            "_PING_ID_RE", "_PING_WORDS", "_PING_MENTIONS", "_PING_KIND_SHOWN", "_PING_ROLE_ENV", "_PING_PERMISSION",
            "_ping_warned_at",
@@ -556,7 +556,7 @@ def check_r1(tree):
     assert resolve([Role(3, "LookingForPlayer"), Role(8, GAMBLER_NAME)], LFP_NAME) == ([], "absent")
     assert resolve([], LFP_NAME) == ([], "absent") and resolve(None, LFP_NAME) == ([], "absent")
     assert resolve([loose, Role(9, "ranked looking for player")], LFP_NAME) == ([], "ambiguous")
-    # several roles carry the exact name: each is mentioned, the oldest (lowest id) first, at most five
+    # several roles carry the exact name: each is mentioned, the oldest (lowest id) first, at most five per kind
     twin, first = Role(11, GAMBLER_NAME), Role(10, GAMBLER_NAME)
     assert resolve([twin, Role(13, "gambler"), first], GAMBLER_NAME) == ([first, twin], "duplicate")
     seven = {rid: Role(rid, LFP_NAME) for rid in (27, 21, 25, 23, 22, 26, 24)}
@@ -731,7 +731,7 @@ def check_r4(tree):
                 ("lfp", 1, "found", True, "yes", 1, "yes"),         # counts are whole numbers
                 ("lfp", 1, "found", 1, "yes", "1", "yes")):
         assert _raises_value_error(line, *bad), bad
-    # one line per post; all in order: no warning
+    # one line per post of one kind; all in order: no warning
     w = World(tree, roles=open_roles())
     w.lfp(PING, dict(PING, ping_id=42))
     assert w.lines() == ["[PING] kind=lfp id=41 role=found mentioned=1 deliverable=yes listed=1 delivered=yes",
@@ -840,7 +840,7 @@ def check_r4(tree):
     assert one(w.lines(), "seven").endswith(" role=duplicate mentioned=5 deliverable=yes listed=0 delivered=no")
     warn = one(w.warnings(), "seven")
     assert "**Cause: 7 roles have the same name.**" in warn
-    assert "the post mentioned the 5 oldest of them (one ping mentions at most 5)." in warn
+    assert "the post mentioned the 5 oldest of them (one ping mentions at most 5 per kind)." in warn
     assert "**Cause: Discord did not mention every role.**" in warn
     # a twin that is not mentionable, and the bot lacks the permission: both findings
     w = World(tree, roles=[Role(1, LFP_NAME, True), Role(11, LFP_NAME)])
