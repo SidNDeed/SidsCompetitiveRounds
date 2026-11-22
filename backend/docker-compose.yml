@@ -221,6 +221,14 @@ services:
       LEADERBOARD_ACTIVE_DAYS: ${LEADERBOARD_ACTIVE_DAYS:-90}
       SERIES_LOG_CHANNEL: ${SERIES_LOG_CHANNEL}
       QUEUE_BEACON_CHANNEL: ${QUEUE_BEACON_CHANNEL}
+      # The casual looking-for-players role the in-game ping mentions when a
+      # player picks Casual (LFP-CASUAL-1), by its exact name in the guild.
+      # The default is REPEATED here for the reason LEADERBOARD_BOARDS gives
+      # above: an empty value is present-and-empty, and the bot would resolve
+      # no role. Keep it equal to the default in discord_bot.py; a test fails
+      # if they drift. The bot's startup line [PING-CHECK] kind=casual says
+      # whether the name resolved.
+      LFP_CASUAL_ROLE: ${LFP_CASUAL_ROLE:-LookingForPlayer}
       CHAT_CHANNEL: ${CHAT_CHANNEL:-1492022404829020230}
       RELEASES_CHANNEL: ${RELEASES_CHANNEL:-1498731888813277294}
       # Player Cards notable pulls; empty = the bot's default (gambler chat,
