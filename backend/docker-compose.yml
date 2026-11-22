@@ -175,6 +175,19 @@ services:
       - "${API_PORT:-8443}:8000"
     security_opt:
       - apparmor:unconfined
+    # Log size limit. The Docker daemons under this stack set no log default
+    # (read 22 Nov 2026), so without this key the container's json-file log
+    # grows without bound. json-file rotates at max-size and keeps max-file
+    # files, so this container's log holds about 5 x 50 MB. Written out per service on
+    # purpose, with no anchor and no top-level key: the db service must not
+    # read anything this block adds, or a deploy would recreate the database
+    # container. The db service gets the same options as a separate,
+    # planned change. Applied when the container is recreated.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   # ── Discord Bot ─────────────────────────────────────────────
   bot:
@@ -254,6 +267,13 @@ services:
       # in-memory ledger zeroed by a same-day `up -d --build` could
       # double-spend the day and starve the broadcast lifecycle calls.
       - ./bot-state:/opt/bot-state
+    # Log size limit: the same options as the api service's, for the same
+    # reason, written out here rather than shared (see the api's comment).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   pgdata:
