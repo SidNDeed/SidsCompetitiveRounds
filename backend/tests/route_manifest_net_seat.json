@@ -2128,7 +2128,7 @@
           ],
           "main",
           "internal_lfp_pings",
-          "250732ad403025ccac57de90867b09f173fc1a89"
+          "3b070b8a8cb67358297e36f2a90113e2a117bec9"
         ],
         [
           "/api/v1/internal/lfp-pings/ack",
@@ -2236,7 +2236,7 @@
           ],
           "main",
           "lfp_ping",
-          "c431a3c8b67abfd859e521edb0af68e779b8bd53"
+          "bab68b29ff33ae03174e39cad2bf02cf3741b49e"
         ],
         [
           "/api/v1/lobby-bets",

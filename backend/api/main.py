@@ -46435,13 +46435,6 @@ async def internal_pending_dm_cancelled(
 
 LFP_COOLDOWN_SECONDS = 3600
 LFP_VALID_EXPIRY_MINUTES = (15, 30, 60, 180)
-# The closed list of mode words a ping may name, in the stored order: the three
-# ranked modes, then "casual" (LFP-CASUAL-1). The longest canonical value,
-# "1v1,2v2,ffa,casual", is 18 characters: it fits lfp_pings.modes VARCHAR(20)
-# (migration 202), and a client sends it within the request's 32-character
-# bound on modes.
-LFP_RANKED_MODES = ("1v1", "2v2", "ffa")
-LFP_MODE_ORDER = LFP_RANKED_MODES + ("casual",)
 
 
 class LfpPingRequest(BaseModel):
@@ -46466,24 +46459,12 @@ async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Dep
     )).scalar_one_or_none()
     if player is None or player.deleted_at is not None or not player.discord_id:
         return {"status": "not_linked"}
-    # Aug 7 item 11: mode multi-select. Canonicalize against a closed allowlist
-    # (split, lowercase, dedupe, FIXED order) — never interpolated into SQL and
-    # never echoed raw (#188 mindset). Empty/garbage falls back to 1v1, which
-    # is also what pre-modes clients get via the Pydantic default.
-    # LFP-CASUAL-1: the list gains exactly one word, "casual" (the bot pings
-    # the casual role for it). A clock-free, data-free computation, so reading
-    # it before the gates below changes no answer an older client gets.
-    picked = {m.strip().lower() for m in (req.modes or "").split(",")}
-    modes = ",".join(m for m in LFP_MODE_ORDER if m in picked) or "1v1"
-    # The ranked gate applies whenever a ranked mode is named; a request whose
-    # only mode is casual passes it. The fallback above is a ranked mode, so a
-    # request that names nothing valid keeps the gate.
-    if not player.ranked_enabled and modes != "casual":
+    if (modes := _lfp_modes(req.modes)) != "casual" and not player.ranked_enabled:
         return {"status": "ranked_disabled"}
-    elapsed = (await db.execute(text(
-        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
-        "  FROM lfp_pings WHERE steam_id = :sid"
-    ), {"sid": req.steam_id})).scalar()
+    elapsed = await _lfp_admit(db, req.steam_id)
+    # LFP-CASUAL-1: a request whose only mode is casual passes the ranked gate;
+    # _lfp_admit (end of this file) takes the player's admission lock, then reads
+    # the cooldown over the player's rows of every kind.
     if elapsed is not None and int(elapsed) < LFP_COOLDOWN_SECONDS:
         return {"status": "cooldown", "seconds_left": LFP_COOLDOWN_SECONDS - int(elapsed)}
     # Sanitize the message (defense-in-depth on top of the bot's
@@ -46499,6 +46480,13 @@ async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Dep
     msg = _re.sub(r"(?i)\b(?:https?://|www\.|discord(?:app)?\.(?:gg|com/invite)/)\S+",
                   "(link removed)", msg)
     msg = _re.sub(r"[\r\n]+", " ", msg).strip()[:200]
+    # Aug 7 item 11: modes was canonicalized by _lfp_modes in the gate above (end
+    # of this file): a closed allowlist (split, lowercase, dedupe, FIXED order),
+    # never interpolated into SQL, never echoed raw (#188 mindset). Empty/garbage
+    # falls back to 1v1, also what pre-modes clients get via the Pydantic default.
+    # LFP-CASUAL-1 adds "casual", stored after the ranked modes. The admission
+    # lock _lfp_admit took is released by this commit, or by the session's
+    # rollback on any other exit.
     await db.execute(text(
         "INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at, modes) "
         "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m), :modes)"
@@ -46510,12 +46498,12 @@ async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Dep
 @app.get("/api/v1/internal/lfp-pings", tags=["Internal"])
 async def internal_lfp_pings(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), kinds: str = Query("", max_length=64),
 ):
-    """Bot-poll endpoint: pending LFP role pings. Serializes the pk as
-    "ping_id" and precomputes "expires_unix" server-side — the bot reads the
-    exact same keys (learning #152). The expires_at > NOW() filter self-heals
-    stale rows (they still count for the cooldown, which reads created_at)."""
+    """Bot-poll endpoint: pending LFP role pings ("ping_id", "expires_unix"
+    precomputed; the bot reads the exact same keys, learning #152). Stale rows
+    self-heal (expires_at > NOW(); they still count for the cooldown). A row
+    naming casual goes only to a poller declaring it: _lfp_declares_casual."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
@@ -46526,8 +46514,8 @@ async def internal_lfp_pings(
           FROM lfp_pings l
           LEFT JOIN players p ON p.steam_id = l.steam_id
          WHERE l.posted_at IS NULL AND NOT l.undeliverable AND l.expires_at > NOW()
-      ORDER BY l.created_at ASC
-         LIMIT 20"""))).mappings().all()
+           AND (CAST(:casual_ok AS boolean) OR NOT ('casual' = ANY(string_to_array(l.modes, ','))))
+      ORDER BY l.created_at ASC LIMIT 20"""), {"casual_ok": _lfp_declares_casual(kinds)})).mappings().all()
     return {
         "pings": [
             {
@@ -87183,3 +87171,60 @@ async def read_gate_probe(request: Request):
         {"node": "standby" if IS_REPLICA else "primary", "boot_id": read_gate.BOOT_ID,
          "mode": read_gate.mode_word(), "credential_class": cred[0], "key_id": cred[1]},
         headers={"Cache-Control": read_gate.NO_STORE})
+
+# ── LFP-CASUAL-1: helpers of the looking-for-players routes ──────────────────
+# Appended at the end so main.py stays line-neutral above (its lines are cited
+# by number across the tree). lfp_ping and internal_lfp_pings read these
+# module globals at call time.
+
+# The closed list of mode words a ping may name, in the stored order: the
+# three ranked modes, then "casual". The longest canonical value,
+# "1v1,2v2,ffa,casual", is 18 characters: it fits lfp_pings.modes VARCHAR(20)
+# (migration 202), and a client sends it within the request's 32-character
+# bound on modes.
+LFP_RANKED_MODES = ("1v1", "2v2", "ffa")
+LFP_MODE_ORDER = LFP_RANKED_MODES + ("casual",)
+# Advisory-lock class for "one looking-for-players admission of a player at a
+# time" (review round 1). The two-key form is a key space of its own, so it
+# never meets the single-key identity locks elsewhere in this module and adds
+# no row lock. Keyed by hashtext(steam_id): requests of one player, of either
+# kind, wait on each other; two players whose hashes collide cost a short wait
+# and nothing else.
+LFP_ADMISSION_LOCK_CLASS = 461122
+
+
+def _lfp_modes(raw) -> str:
+    """The canonical modes of a request: its comma-separated words, stripped
+    and lowercased, kept when in LFP_MODE_ORDER, deduplicated, in that order;
+    "1v1" when none is. A clock-free, data-free computation."""
+    picked = {m.strip().lower() for m in (raw or "").split(",")}
+    return ",".join(m for m in LFP_MODE_ORDER if m in picked) or "1v1"
+
+
+async def _lfp_admit(db, steam_id):
+    """One admission at a time per player, across both kinds: takes the
+    player's transaction-scoped admission lock, then reads the whole seconds
+    since the player's newest lfp_pings row of any modes (None with no row).
+    A second request of the player waits at the lock until the first one's
+    transaction ends (lfp_ping's commit, or the session's rollback on any
+    other exit), then reads that row and answers cooldown. The caller takes
+    no other waiting lock after it."""
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:who AS text)))"
+    ), {"cls": LFP_ADMISSION_LOCK_CLASS, "who": steam_id})
+    return (await db.execute(text(
+        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
+        "  FROM lfp_pings WHERE steam_id = :sid"
+    ), {"sid": steam_id})).scalar()
+
+
+def _lfp_declares_casual(kinds) -> bool:
+    """Whether a poll of internal_lfp_pings declares the casual kind
+    (kinds=casual; the bot of LFP-CASUAL-1 always sends it). A row whose modes
+    name casual is returned only to a poller that does: a bot that does not
+    declare the casual kind never receives such a row, so it cannot post one
+    as a ranked ping. The filter is in the SQL, so a withheld row takes no
+    place in the LIMIT and holds back no later row; it stays pending until a
+    declaring poller reads it or it expires."""
+    return "casual" in {k.strip().lower() for k in (kinds or "").split(",")}
+# ── end of LFP-CASUAL-1 helpers ──────────────────────────────────────────────

@@ -24,12 +24,24 @@ holds, one check per requirement:
   B3 the [PING] line names the kind, one per kind the row names, each saying
      whether its own role was pinged;
   B4 the startup check covers kind=casual: its [PING] startup line, and a
-     [PING-CHECK] line saying in plain words whether the role resolved and
-     which env key sets it; the first casual ping waits for it;
-  B5 a row without casual is posted exactly as before.
+     [PING-CHECK] line saying in plain words what the check saw and which
+     env key sets the name, with the guild's near role names when none was
+     found; the first casual ping waits for it, and a row of two kinds waits
+     once, the bound in all;
+  B5 a row without casual is posted exactly as before;
+  B6 the bot declares the casual kind on every poll of pending pings.
+
+After review round 1: C5 (the admission lock, once, before the cooldown
+read, then the insert and the commit) and a fake session that knows its
+statements by exact text, applies the cooldown read's predicates and keeps
+rows pending until the commit. The lock's effect on two sessions, the
+cross-kind cooldown and the pending-pings filter run on the real database
+in test_lfp_casual_pg.py.
 
 The route runs lifted out of main.py by text (the span from
-LFP_COOLDOWN_SECONDS to the next route's decorator) against a fake session:
+LFP_COOLDOWN_SECONDS to the next route's decorator, plus the lane's helpers
+appended at the end of main.py, which stays line-neutral above them)
+against a fake session:
 no database, no network, and main is never imported. The bot code runs in
 test_lfp_ping_signal's World, lifted out of discord_bot.py's AST. MUTANTS
 holds source edits that must each turn their check red; the controls (a
@@ -65,8 +77,24 @@ def _segment(text):
     return text[start:text.index(END, start)]
 
 
+TAIL_START = "# ── LFP-CASUAL-1: helpers of the looking-for-players routes "
+TAIL_END = "# ── end of LFP-CASUAL-1 helpers "
+
+
+def _tail(text):
+    text = text.replace("\r\n", "\n")
+    assert text.count(TAIL_START) == 1 and text.count(TAIL_END) == 1, "the helpers' span is not found once"
+    start = text.index(TAIL_START)
+    return text[start:text.index(TAIL_END, start)]
+
+
+def route_source(text):
+    """The route as the module runs it: its span, then the helpers it reads at call time."""
+    return _segment(text) + "\n" + _tail(text)
+
+
 with open(MAIN, encoding="utf-8") as _fh:
-    ROUTE_SRC = _segment(_fh.read())
+    ROUTE_SRC = route_source(_fh.read())
 
 
 @functools.lru_cache(maxsize=1)
@@ -124,33 +152,72 @@ class _Result:
         return self.value
 
 
+# The statements the fake session knows, by their exact text and exact parameter names (review round 1,
+# findings 5 and 6). A statement whose text differs by one character is refused, never matched on a fragment.
+LOCK_SQL = "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:who AS text)))"
+COOLDOWN_SQL = "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int   FROM lfp_pings WHERE steam_id = :sid"
+INSERT_SQL = ("INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at, modes) "
+              "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m), :modes)")
+KNOWN = {LOCK_SQL: {"cls", "who"}, COOLDOWN_SQL: {"sid"}, INSERT_SQL: {"sid", "msg", "m", "modes"}}
+
+
+def _pg_int(seconds):
+    """numeric::int in PostgreSQL rounds half away from zero."""
+    return int(seconds + 0.5) if seconds >= 0 else -int(-seconds + 0.5)
+
+
 class FakeDb:
-    """The session as the route reads it. The cooldown read answers whole
-    seconds since the player's newest row, None with no row; an insert
-    stores a row stamped with the fake clock. Any other statement fails."""
+    """The session as the route reads it, one transaction of it.
+
+    It knows three statements by exact text (KNOWN) and refuses any other.
+    The cooldown read applies its own predicates: the rows of steam_id = :sid
+    that this session can see (every committed row, and its own rows not yet
+    committed), of any modes, and answers MAX(created_at) as whole seconds
+    before now, rounded as ::int rounds, or None with no row. An insert
+    stores its row as PENDING; commit() makes the pending rows durable; close()
+    is the session's end and drops what is still pending, as a rollback does.
+    `trace` is ONE ordered record of statements and commits."""
 
     def __init__(self, players, rows=(), now=1000000.0):
         self.players, self.rows, self.now = players, [dict(r) for r in rows], now
-        self.log, self.commits = [], 0
+        self.pending, self.trace = [], []
+
+    @property
+    def commits(self):
+        return self.trace.count(("COMMIT",))
 
     async def execute(self, stmt, params=None):
         if isinstance(stmt, _Select):
             _key, sid = stmt.cond
-            self.log.append(("select players", sid))
+            self.trace.append(("select players", sid))
             return _Result(self.players.get(sid))
-        sql = str(stmt)
-        self.log.append((sql, dict(params or {})))
-        if "MAX(created_at)" in sql:
-            mine = [r["created"] for r in self.rows if r["steam_id"] == params["sid"]]
-            return _Result(int(self.now - max(mine)) if mine else None)
-        if sql.startswith("INSERT INTO lfp_pings"):
-            self.rows.append({"steam_id": params["sid"], "message": params["msg"], "expires_minutes": params["m"],
-                              "modes": params["modes"], "created": self.now})
+        sql, params = str(stmt), dict(params or {})
+        if sql not in KNOWN:
+            raise AssertionError("a statement the fake does not know: %r" % sql)
+        assert set(params) == KNOWN[sql], ("the parameters of a known statement changed", sql, sorted(params))
+        self.trace.append((sql, params))
+        if sql == LOCK_SQL:
+            assert isinstance(params["cls"], int) and params["who"] == SID, params
             return _Result(None)
-        raise AssertionError("a statement the fake does not know: %r" % sql)
+        if sql == COOLDOWN_SQL:
+            mine = [r["created"] for r in self.rows + self.pending if r["steam_id"] == params["sid"]]
+            return _Result(_pg_int(self.now - max(mine)) if mine else None)
+        self.pending.append({"steam_id": params["sid"], "message": params["msg"], "expires_minutes": params["m"],
+                             "modes": params["modes"], "created": self.now})
+        return _Result(None)
 
     async def commit(self):
-        self.commits += 1
+        self.trace.append(("COMMIT",))
+        self.rows.extend(self.pending)
+        self.pending = []
+
+    def close(self):
+        self.pending = []
+
+    @property
+    def log(self):
+        """The trace without the admission lock: what the route at BASE_COMMIT, which took no lock, also does."""
+        return [t for t in self.trace if t[0] != LOCK_SQL]
 
 
 async def _session_ok(request, steam_id, db):
@@ -175,8 +242,12 @@ def player(**over):
 
 
 def call(ns, body, db):
+    """One request: the route, then the session's end (get_db closes it, dropping what is uncommitted)."""
     req = ns["LfpPingRequest"](**body)
-    return asyncio.run(ns["lfp_ping"](req, None, db))
+    try:
+        return asyncio.run(ns["lfp_ping"](req, None, db))
+    finally:
+        db.close()
 
 
 def ping(ns, modes=None, ranked=True, rows=(), now=1000000.0):
@@ -291,6 +362,11 @@ def check_c4(src, base=None):
             assert a_new == a_old and repr(a_new) == repr(a_old), (name, body, a_old, a_new)
             assert d_new.rows == d_old.rows, (name, body, d_old.rows, d_new.rows)
             assert d_new.log == d_old.log and d_new.commits == d_old.commits, (name, body)
+            # the one statement the route adds is the admission lock, just before the cooldown read, and only there
+            assert all(t[0] != LOCK_SQL for t in d_old.trace), (name, body)
+            reads = [i for i, t in enumerate(d_new.trace) if t[0] == COOLDOWN_SQL]
+            locks = [i for i, t in enumerate(d_new.trace) if t[0] == LOCK_SQL]
+            assert locks == [i - 1 for i in reads], (name, body, d_new.trace)
             compared += 1
     assert compared == 8 * 14 * 3 * 5
     # the comparison is not of two empty runs: today's answers, written out
@@ -301,7 +377,28 @@ def check_c4(src, base=None):
     assert ping(new, "ffa", ranked=False)[0] == {"status": "ranked_disabled"}
 
 
-ROUTE_CHECKS = {"C1": check_c1, "C2": check_c2, "C3": check_c3, "C4": check_c4}
+# -- C5: one admission, in order -------------------------------------------------------------------
+
+def check_c5(src):
+    """The order the route works in, from the fake's one trace: the player read, the admission lock, the
+    cooldown read, the insert, then the commit, and the row durable after the session ends. The lock's
+    effect (a second request waits, then answers cooldown) is proven on the real database in
+    test_lfp_casual_pg.py; here, that it is taken, once, with the class constant, before the read."""
+    ns = route(src)
+    for modes, ranked in (("1v1", True), ("casual", False), ("ffa,casual", True)):
+        answer, db = ping(ns, modes, ranked=ranked)
+        assert answer == QUEUED, (modes, answer)
+        assert [t[0] for t in db.trace] == ["select players", LOCK_SQL, COOLDOWN_SQL, INSERT_SQL, "COMMIT"], \
+            (modes, db.trace)
+        assert db.trace[1][1] == {"cls": ns["LFP_ADMISSION_LOCK_CLASS"], "who": SID}, db.trace[1]
+        assert [r["modes"] for r in db.rows] == [modes] and db.pending == [], (modes, db.rows)
+    # a refused request takes the lock only when it reaches the cooldown read, and stores nothing
+    answer, db = ping(ns, "casual", rows=({"steam_id": SID, "created": 1000000.0 - 5, "modes": "1v1"},))
+    assert answer == {"status": "cooldown", "seconds_left": 3595}
+    assert [t[0] for t in db.trace] == ["select players", LOCK_SQL, COOLDOWN_SQL] and len(db.rows) == 1
+
+
+ROUTE_CHECKS = {"C1": check_c1, "C2": check_c2, "C3": check_c3, "C4": check_c4, "C5": check_c5}
 
 
 # -- the bot ---------------------------------------------------------------------------------------
@@ -414,21 +511,58 @@ def check_b4(tree):
     said = [ln for ln in w.log if ln.startswith("[PING-CHECK] kind=casual startup: role resolved")]
     assert said == ["[PING-CHECK] kind=casual startup: role resolved: yes (found, 1 role(s) for the name "
                     "'LookingForPlayer'; env LFP_CASUAL_ROLE)"], w.log
-    w = S.World(tree, roles=S.open_roles())
+    # what the check saw, and no claim that an env change is needed (finding 10): the guild's role names near
+    # the configured one, at most five, by repr cut at 60 characters, oldest role first
+    no_line = ("[PING-CHECK] kind=casual startup: role resolved: NO (absent): the startup check found no role to "
+               "mention for the name 'LookingForPlayer' (env LFP_CASUAL_ROLE); role names containing look, casual "
+               "or lfp: ")
+    w = S.World(tree, roles=[S.Role(12, S.GAMBLER_NAME, True)])
     w.startup()
-    assert ("[PING-CHECK] kind=casual startup: role resolved: NO (absent): no role is mentioned for the name "
-            "'LookingForPlayer', so these pings notify nobody until env LFP_CASUAL_ROLE gives the role's exact name"
-            ) in w.log, w.log
+    assert no_line + "none" in w.log, w.log
     assert "[PING] kind=casual id=startup role=absent mentioned=0 deliverable=no listed=0 delivered=unsent" \
         in w.lines()
     assert w.queue.sent == [] and w.admin.sent == []
+    long_name = "Casual " + "x" * 70
+    planted = [S.Role(40, "LFP crew"), S.Role(9, "Moderators"), S.Role(30, "casual gamers"),
+               S.Role(1, S.LFP_NAME, True), S.Role(50, long_name), S.Role(20, "Look-Out"),
+               S.Role(60, "Casual Too Many"), S.Role(12, S.GAMBLER_NAME, True)]
+    w = S.World(tree, roles=planted)
+    w.startup()
+    said = [ln for ln in w.log if ln.startswith("[PING-CHECK] kind=casual startup: role resolved")]
+    assert said == [no_line + "'Ranked Looking For Player', 'Look-Out', 'casual gamers', 'LFP crew', "
+                    + repr(long_name)[:60]], said
+    assert all("env LFP_CASUAL_ROLE gives" not in ln and "until" not in ln for ln in said), said
     # the first casual ping waits for the casual startup line, at most the bound, and posts all the same
     w = S.World(tree, roles=S.open_roles() + [role], startup_printed=False)
     w.ns["_ping_startup_settled"].update(("lfp", "gambler"))
     w.lfp(dict(S.PING, modes="casual"))
     bound = w.ns["PING_STARTUP_WAIT_S"]
-    late = "[PING-CHECK] kind=casual startup line not printed within %d s: the ping posts without it" % bound
-    assert w.log.count(late) == 1 and len(w.queue.sent) == 1, w.log
+    late = "[PING-CHECK] kind=%s startup line not printed within %d s: the ping posts without it"
+    assert w.log.count(late % ("casual", bound)) == 1 and len(w.queue.sent) == 1, w.log
+    # a row of both kinds with neither startup line printed waits ONCE: one deadline, the bound in all
+    # (finding 4), measured on the bot's fake monotonic clock
+    w = S.World(tree, roles=S.open_roles() + [role], startup_printed=False)
+    w.ns["_ping_startup_settled"].update(("gambler",))
+    began = w.clock[0]
+    w.lfp(dict(S.PING, modes="1v1,casual"))
+    assert w.log.count(late % ("lfp", bound)) == 1 and w.log.count(late % ("casual", bound)) == 1, w.log
+    # both late lines print when the one deadline passes; the post follows them
+    waited = [w.stamps[w.log.index(late % (k, bound))] - began for k in ("lfp", "casual")]
+    assert waited == [bound, bound], ("the first ping of two kinds waited %r s, the bound is %r s" % (waited, bound))
+    assert len(w.queue.sent) == 1, w.queue.sent
+
+
+# -- B6: the bot declares the casual kind ----------------------------------------------------------
+
+def check_b6(tree):
+    """The api gives a row naming casual only to a poller that declares the casual kind (F3). This bot
+    declares it on every poll; the World's api_get answers as the api does, with and without it."""
+    role = casual_role()
+    w = S.World(tree, roles=S.open_roles() + [role])
+    w.lfp(dict(S.PING, modes="1v1,casual"))
+    assert w.paths and set(w.paths) == {"/internal/lfp-pings?kinds=casual"}, w.paths
+    content, kw = S.one(w.queue.sent, "a declaring poll")
+    assert content == post_text("<@&1> <@&3>", "ranked 1v1 and casual"), content
 
 
 def check_b5(tree):
@@ -447,7 +581,7 @@ def check_b5(tree):
         assert kw["allowed_mentions"].roles == [w.guild.roles[0]] and w.lines() == [found("lfp")]
 
 
-BOT_CHECKS = {"B1": check_b1, "B2": check_b2, "B3": check_b3, "B4": check_b4, "B5": check_b5}
+BOT_CHECKS = {"B1": check_b1, "B2": check_b2, "B3": check_b3, "B4": check_b4, "B5": check_b5, "B6": check_b6}
 
 
 @pytest.mark.parametrize("req", sorted(ROUTE_CHECKS))
@@ -460,6 +594,26 @@ def test_each_bot_requirement_holds(req):
     BOT_CHECKS[req](S.BASE_TREE)
 
 
+# Route edits shared with the real-database proof (test_lfp_casual_pg.py runs the same texts).
+COOLDOWN_MUTANT_OLD = '"  FROM lfp_pings WHERE steam_id = :sid"\n'
+COOLDOWN_MUTANT_NEW = '"  FROM lfp_pings WHERE steam_id = :sid AND position(\'casual\' in modes) = 0"\n'
+INSERT_STMT = ('    await db.execute(text(\n'
+               '        "INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at, modes) "\n'
+               '        "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m), :modes)"\n'
+               '    ), {"sid": req.steam_id, "msg": msg, "m": exp_min, "modes": modes})\n')
+COMMIT_MUTANT_OLD = INSERT_STMT + '    await db.commit()\n'
+COMMIT_MUTANT_NEW = '    await db.commit()\n' + INSERT_STMT
+LOCK_MUTANT_OLD = ('    await db.execute(text(\n'
+                   '        "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:who AS text)))"\n'
+                   '    ), {"cls": LFP_ADMISSION_LOCK_CLASS, "who": steam_id})\n')
+COOLDOWN_READ_OLD = ('    return (await db.execute(text(\n'
+                     '        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "\n'
+                     '        "  FROM lfp_pings WHERE steam_id = :sid"\n'
+                     '    ), {"sid": steam_id})).scalar()\n')
+LOCK_AFTER_READ = COOLDOWN_READ_OLD.replace("    return (await", "    elapsed = (await") + LOCK_MUTANT_OLD \
+    + "    return elapsed\n"
+GATE_OLD = '    if (modes := _lfp_modes(req.modes)) != "casual" and not player.ranked_enabled:\n'
+
 # (requirement, what the edit does, the text it replaces, the new text). Each must turn its check red.
 ROUTE_MUTANTS = [
     ("C1", "casual left off the closed list",
@@ -467,9 +621,9 @@ ROUTE_MUTANTS = [
     ("C1", "the casual word stored before the ranked modes",
      'LFP_MODE_ORDER = LFP_RANKED_MODES + ("casual",)', 'LFP_MODE_ORDER = ("casual",) + LFP_RANKED_MODES'),
     ("C2", "the ranked gate refuses casual too",
-     'if not player.ranked_enabled and modes != "casual":', "if not player.ranked_enabled:"),
+     GATE_OLD, '    if (modes := _lfp_modes(req.modes)) and not player.ranked_enabled:\n'),
     ("C2", "a ranked mode beside casual passes the gate",
-     'modes != "casual"', '"casual" not in modes'),
+     GATE_OLD, '    if "casual" not in (modes := _lfp_modes(req.modes)) and not player.ranked_enabled:\n'),
     ("C3", "casual skips the cooldown",
      "if elapsed is not None and int(elapsed) < LFP_COOLDOWN_SECONDS:",
      'if modes != "casual" and elapsed is not None and int(elapsed) < LFP_COOLDOWN_SECONDS:'),
@@ -478,9 +632,15 @@ ROUTE_MUTANTS = [
     ("C4", "mode words no longer folded to lower case",
      "picked = {m.strip().lower() for m in", "picked = {m.strip() for m in"),
     ("C4", "the ranked gate dropped",
-     '    if not player.ranked_enabled and modes != "casual":\n        return {"status": "ranked_disabled"}\n',
-     '    if not player.ranked_enabled and modes != "casual" and False:\n'
-     '        return {"status": "ranked_disabled"}\n'),
+     GATE_OLD, GATE_OLD.replace(" and not player.ranked_enabled:", " and not player.ranked_enabled and False:")),
+    # review round 1, finding 5: the cooldown read restricted to the request's own kind
+    ("C3", "the cooldown read restricted to one kind (finding 5)",
+     COOLDOWN_MUTANT_OLD, COOLDOWN_MUTANT_NEW),
+    # review round 1, finding 6: the commit before the insert leaves the row to the session's rollback
+    ("C1", "the commit moved before the insert (finding 6)", COMMIT_MUTANT_OLD, COMMIT_MUTANT_NEW),
+    ("C5", "the admission lock removed", LOCK_MUTANT_OLD, ""),
+    ("C5", "the admission lock taken after the cooldown read", LOCK_MUTANT_OLD + COOLDOWN_READ_OLD,
+     LOCK_AFTER_READ),
 ]
 
 BOT_MUTANTS = [
@@ -501,9 +661,24 @@ BOT_MUTANTS = [
     ("B4", "no casual startup line",
      '                                         ("casual", QUEUE_BEACON_CHANNEL_ID, LFP_CASUAL_ROLE_NAME),\n', ""),
     ("B4", "no plain resolved line at startup",
-     "            _ping_log(_ping_resolved_line(kind, configured, role_word, len(ping_roles)))\n", ""),
+     "            _ping_log(_ping_resolved_line(kind, configured, role_word, len(ping_roles),\n"
+     "                                          guild.roles if guild is not None else ()))\n", ""),
     ("B4", "the first casual ping does not wait for its startup line",
-     '            if casual:\n                await _ping_startup_wait("casual")\n', ""),
+     '(("lfp", ranked), ("casual", casual)) if wanted]', '(("lfp", ranked),) if wanted]'),
+    ("B4", "two sequential startup waits, one per kind (finding 4)",
+     '            await _ping_startup_wait(*[kind for kind, wanted in (("lfp", ranked), ("casual", casual)) '
+     'if wanted])\n',
+     '            for kind_w in [k for k, wanted in (("lfp", ranked), ("casual", casual)) if wanted]:\n'
+     '                await _ping_startup_wait(kind_w)\n'),
+    ("B4", "the NO line lists no role names (finding 10)",
+     '    seen = ", ".join(repr(r.name)[:60] for r in near) if near else "none"\n', '    seen = "none"\n'),
+    ("B4", "the NO line lists every near name, uncut",
+     ")][:PING_HINTS_MAX]\n    seen = \", \".join(repr(r.name)[:60] for r in near)",
+     ")]\n    seen = \", \".join(repr(r.name) for r in near)"),
+    ("B4", "the NO line's names in the guild's order, not a stable one",
+     "for r in sorted(named, key=lambda r: (getattr(r, \"id\", 0), r.name))", "for r in named"),
+    ("B6", "the bot's declaration of the casual kind dropped",
+     'api_get("/internal/lfp-pings?kinds=casual")', 'api_get("/internal/lfp-pings")'),
     ("B5", "a ranked row's headline changed",
      '                what_label = f"ranked {modes_label}"\n',
      '                what_label = f"ranked {modes_label} only"\n'),
@@ -571,8 +746,98 @@ def test_control_comment_only_edits_keep_every_requirement_green():
     assert src != ROUTE_SRC
     for req in sorted(ROUTE_CHECKS):
         ROUTE_CHECKS[req](src)
-    anchor = "def _ping_resolved_line(kind, configured, role_word, mentioned) -> str:\n"
+    anchor = "def _ping_resolved_line(kind, configured, role_word, mentioned, roles=()) -> str:\n"
     tree, shipped, edited = S.mutate(anchor, "# control: a comment only, no behaviour\n" + anchor)
     assert tree is not S.BASE_TREE
     for req in sorted(BOT_CHECKS):
         BOT_CHECKS[req](tree)
+
+
+# -- the client, by its text (no build on this machine) --------------------------------------------
+# K1 (finding 1): the LFP button is active whenever the player is not in a ranked match, ranked on or off;
+#    every place that sets it active says so, and its click opens the prompt on Casual alone with ranked off.
+# K2 (finding 7): the refusal of a ranked pick while ranked is off is drawn INSIDE the open prompt, by the
+#    prompt's own draw code, from the same predicate SubmitLfpPing refuses on.
+
+PLUGIN = os.path.join(REPO, "plugin")
+REFUSAL = ("Ranked is off - only the Casual ping can be sent. Untick the ranked modes, or press Enable on the "
+           "RANKED row first.")
+
+
+def _plugin_texts():
+    out = {}
+    for name in ("NativeUI.cs", "CompetitiveUI.cs"):
+        with open(os.path.join(PLUGIN, name), encoding="utf-8") as fh:
+            out[name] = fh.read().replace("\r\n", "\n")
+    return out
+
+
+def _body(src, head):
+    """The text of the method that starts at `head`, to its matching closing brace."""
+    assert src.count(head) == 1, head
+    i = src.index(head)
+    j = src.index("{", i)
+    depth = 0
+    for k in range(j, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[k], 0)
+        if depth == 0:
+            return src[i:k + 1]
+    raise AssertionError("no end of " + head)
+
+
+def check_k1(texts):
+    nat = texts["NativeUI.cs"]
+    sets = re.findall(r"lfpBtn\.SetActive\(([^;]*)\);", nat)
+    assert sets == ["!inRankedMatch"], sets
+    assert re.findall(r"lfpBtn\s*=", nat) == ["lfpBtn="], "the button is created once"
+    on = _body(nat, "private static void OnLfpButton()")
+    assert "LfpPromptOpen = true;" in on and "RankedEnabled" not in on.replace("LfpRankedOn()", ""), on
+    assert "bool rankedOn = LfpRankedOn();" in on and "LfpModeSel[LfpCasualIdx] = !rankedOn;" in on, on
+    assert "LfpModeSel[0] = rankedOn; LfpModeSel[1] = false; LfpModeSel[2] = false;" in on, on
+
+
+def check_k2(texts):
+    nat, ui = texts["NativeUI.cs"], texts["CompetitiveUI.cs"]
+    pred = _body(nat, "public static bool LfpRankedPickRefused()")
+    assert ("bool rankedPicked = LfpModeSel[0] || LfpModeSel[1] || LfpModeSel[2] || !LfpModeSel[LfpCasualIdx];"
+            in pred and "return rankedPicked && !LfpRankedOn();" in pred), pred
+    submit = _body(nat, "public static void SubmitLfpPing()")
+    assert "if (LfpRankedPickRefused())" in submit and REFUSAL in submit, submit
+    assert submit.index("if (LfpRankedPickRefused())") < submit.index("LfpPromptOpen = false;"), submit
+    draw = _body(ui, "private static void DrawLfpPrompt()")
+    guard = "if (NativeUI.LfpRankedPickRefused())\n                    GUI.Label("
+    assert draw.count(guard) == 1, "the prompt does not draw the standing refusal line"
+    line = draw[draw.index(guard):].split(";", 1)[0]
+    assert 'I18n.Tr("%s")' % REFUSAL in line, line
+    # the line sits between the mode row (y + 166, 26 high) and the buttons, inside the box
+    assert "new Rect(x + 16f, y + 198f, w - 32f, 32f)" in line and "float w = 520f, h = 288f;" in draw, line
+    assert draw.count("y + 236f, 180f, 32f)") == 2, "Send and Cancel moved under the line"
+
+
+CLIENT_CHECKS = {"K1": check_k1, "K2": check_k2}
+CLIENT_MUTANTS = [
+    ("K1", "the button hidden while ranked is off (finding 1)", "NativeUI.cs",
+     "lfpBtn.SetActive(!inRankedMatch);", "lfpBtn.SetActive(ranked&&!inRankedMatch);"),
+    ("K1", "the prompt opens on 1v1 with ranked off", "NativeUI.cs",
+     "LfpModeSel[LfpCasualIdx] = !rankedOn;", "LfpModeSel[LfpCasualIdx] = false;"),
+    ("K2", "no standing refusal line in the prompt (finding 7)", "CompetitiveUI.cs",
+     "                if (NativeUI.LfpRankedPickRefused())\n", "                if (false)\n"),
+    ("K2", "the predicate forgets the empty pick's 1v1 fallback", "NativeUI.cs",
+     " || !LfpModeSel[LfpCasualIdx];", ";"),
+    ("K2", "SubmitLfpPing refuses on its own test, not the shared predicate", "NativeUI.cs",
+     "            if (LfpRankedPickRefused())\n", "            if (!LfpRankedOn() && LfpModeSel[0])\n"),
+]
+
+
+@pytest.mark.parametrize("req", sorted(CLIENT_CHECKS))
+def test_each_client_requirement_holds(req):
+    CLIENT_CHECKS[req](_plugin_texts())
+
+
+@pytest.mark.parametrize("req,what,where,old,new", CLIENT_MUTANTS,
+                         ids=["%s: %s" % (m[0], m[1]) for m in CLIENT_MUTANTS])
+def test_each_client_mutant_turns_its_requirement_red(req, what, where, old, new):
+    texts = _plugin_texts()
+    assert texts[where].count(old) == 1, old
+    texts[where] = texts[where].replace(old, new, 1)
+    _expect_red(CLIENT_CHECKS[req], texts, what=what)

@@ -63,7 +63,7 @@ ASSIGNS = ("PING_WARN_EVERY_S", "PING_ROLES_MAX", "PING_STARTUP_WAIT_S", "PING_S
            "_PING_ID_RE", "_PING_WORDS", "_PING_MENTIONS", "_PING_KIND_SHOWN", "_PING_ROLE_ENV", "_PING_PERMISSION",
            "_ping_warned_at",
            "_ping_warn_tasks", "_ping_startup_done", "_ping_startup_settled", "_ping_startup_waited",
-           "_LFP_EMOJI_TOKEN") + HELPER_PARTS
+           "_LFP_EMOJI_TOKEN", "_PING_HINT_WORDS", "PING_HINTS_MAX") + HELPER_PARTS
 
 # The [PING] line, whole. id=startup goes with delivered=unsent and listed=0;
 # mentioned agrees with the role word, listed is at most mentioned, and
@@ -406,7 +406,7 @@ class World:
                  admin_fails=0, queue_id=QUEUE, lfp_name=LFP_NAME, gambler_name=GAMBLER_NAME, admin_blocks=False,
                  admin_delay=0.0, slow=(), startup_printed=True, print_fails=None, casual_name=CASUAL_NAME):
         self.log, self.stamps, self.events, self.acks, self.seen, self.clock = [], [], [], [], set(), [1000.0]
-        self.pings, self.series = [], []
+        self.pings, self.series, self.paths = [], [], []
         self.guild = Guild(roles, Member(not mention_everyone) if me else None)
         self.queue = Channel(QUEUE, self.guild, mention_everyone, answer, flip, self.events)
         self.bets = Channel(BETS, self.guild, mention_everyone, answer, flip, self.events)
@@ -415,8 +415,14 @@ class World:
         self.bot = Bot({QUEUE: self.queue, BETS: self.bets, ADMIN: self.admin}, slow)
 
         async def api_get(path, timeout=8.0):
-            if path == "/internal/lfp-pings":
+            # The api as LFP-CASUAL-1 left it: a row naming casual only for a
+            # poller that declares the casual kind.
+            self.paths.append(path)
+            if path == "/internal/lfp-pings?kinds=casual":
                 return {"pings": [dict(p) for p in self.pings]}
+            if path == "/internal/lfp-pings":
+                return {"pings": [dict(p) for p in self.pings
+                                  if "casual" not in str(p.get("modes") or "").split(",")]}
             if path == "/series/active":
                 return [dict(s) for s in self.series]
             return None
@@ -1146,11 +1152,13 @@ MUTANTS = [
     ("R5", "the startup lines printed on every ready",
      "    if _ping_startup_done:\n        return\n", ""),
     ("R5", "no wait for the startup line (M2)",
-     "    while kind not in _ping_startup_settled:\n", "    while False:\n"),
+     "    while any(kind not in _ping_startup_settled for kind in kinds):\n", "    while False:\n"),
     ("R5", "an unbounded wait for the startup line (M2)",
      "        left = deadline - time.monotonic()\n        if left <= 0:\n"
-     "            _ping_log(f\"[PING-CHECK] kind={kind} startup line not printed within {PING_STARTUP_WAIT_S} s: \"\n"
-     "                      \"the ping posts without it\")\n            return\n"
+     "            for kind in kinds:\n                if kind not in _ping_startup_settled:\n"
+     "                    _ping_log(f\"[PING-CHECK] kind={kind} startup line not printed within "
+     "{PING_STARTUP_WAIT_S} s: \"\n"
+     "                              \"the ping posts without it\")\n            return\n"
      "        await asyncio.sleep(min(PING_STARTUP_STEP_S, left))\n",
      "        await asyncio.sleep(PING_STARTUP_STEP_S)\n"),
     ("R5", "the Gambler ping dropped when its startup line had not printed (M2)",
