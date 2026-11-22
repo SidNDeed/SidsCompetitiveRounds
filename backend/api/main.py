@@ -2154,6 +2154,10 @@ _JANITOR_SELFTEST_ROOTS = (
     # failure is silent. It also names a column migration 356 adds, which makes
     # the boot banner the loud half of the migration-before-api deploy order.
     ("main", "team_dc_fallback_sweep_loop"),
+    # CHEAT-ALT-1 (R4): the retention pass of the alternate-account signal
+    # tables. Its DELETEs and its count of the due rows left run unattended
+    # every hour on the primary, and they name migration 427's tables.
+    ("main", "alt_signals_retention_loop"),
     ("tournaments", "tournament_tick"),
 )
 
@@ -4012,7 +4016,8 @@ async def lifespan(app: FastAPI):
             # work; the replica is a read surface and nothing more.
             print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
                   "(queue_cleanup, team_queue_cleanup, tournament_tick, "
-                  "min_version_autoraise, auto_log_retention, janitor self-test)")
+                  "min_version_autoraise, auto_log_retention, "
+                  "alt_signals_retention, janitor self-test)")
             # The review worker writes, so it is primary-only. This line is
             # the standby's POSITIVE signal that it took this branch and
             # started no worker (an absent pass line alone cannot tell a
@@ -4105,6 +4110,17 @@ async def lifespan(app: FastAPI):
             # is NOT this sweep's failure signal.
             tasks.append(asyncio.create_task(
                 _supervised("auto_log_retention", _auto_logs.auto_log_retention_loop)))
+            # CHEAT-ALT-1 (R4): the retention pass of the alternate-account
+            # signal tables, on its own task and called by no other loop.
+            # Primary only: every pass DELETEs, and the deletes reach the
+            # standby by replication. WHAT TO GREP FOR: `[ALT-RETENTION] pass
+            # armed` once at boot, one `[ALT-RETENTION] pass:` line per pass
+            # including the empty ones, `[ALT-RETENTION] due rows left` when a
+            # pass leaves due rows (rows held by another transaction, or the
+            # budget reached), and `[ALT-RETENTION] pass FAILED` with a count
+            # in a row when a pass dies.
+            tasks.append(asyncio.create_task(
+                _supervised("alt_signals_retention", alt_signals_retention_loop)))
         # Awaited, before anything can render: a face keyed off a colour
         # this box has not read yet is a promise about pixels it cannot make.
         if _pcf is not None:
@@ -16950,7 +16966,10 @@ def _steam_http_get_json(url: str, timeout: float) -> dict:
 # that row); the notice check reads it on every recording.
 _ALT_FAQ_CHANNEL = "1159243585309384805"
 # The time limits of the transaction it runs in (is_local true), the values
-# bound as text; the recording passes alt_signals' RECORD_* limits.
+# bound as text. _alt_limits runs it as the first statement of each
+# transaction it bounds: the recording's, with alt_signals' RECORD_* limits,
+# and each batch of the retention pass and the pass's count of the due rows
+# left, with the PASS_* limits.
 _ALT_LIMITS_SQL = ("SELECT set_config('lock_timeout', CAST(:lt AS text), true),"
                    " set_config('statement_timeout', CAST(:st AS text), true)")
 _ALT_NOTICE_LINE_EVERY_S = 3600.0
@@ -16996,9 +17015,7 @@ async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
     host = _rl_client_address(request) if request is not None else None
     facts = _alt_signals.steam_fields(params, steam_id, key)
     seen = _alt_signals.observe(host, key, _conn_ranges.classify_address, _conn_ranges.CR_LAN_NETS)
-    await db.execute(text(_ALT_LIMITS_SQL),
-                     {"lt": "%dms" % _alt_signals.RECORD_LOCK_TIMEOUT_MS,
-                      "st": "%dms" % _alt_signals.RECORD_STATEMENT_TIMEOUT_MS})
+    await _alt_limits(db, _alt_signals.RECORD_LOCK_TIMEOUT_MS, _alt_signals.RECORD_STATEMENT_TIMEOUT_MS)
     await _ban_lock_and_gate(db, [steam_id], exclusive=[steam_id])
     if MATCH_HMAC_SECRET:
         tombed = (await db.execute(text(
@@ -17164,6 +17181,136 @@ async def _alt_delete_one(db: AsyncSession, stmt, steam_id: str) -> None:
     except Exception as ex:
         if not _alt_table_missing(ex):
             raise
+
+
+# -- Alternate-account signals: the retention pass (CHEAT-ALT-1 R4, design 6) --
+# Every row of the three tables is gone no later than DEADLINE_DAYS after its
+# own last sight (last_at for a marker row, last_seen_at for a share row and
+# for the facts row). A row is due DUE_DAYS after it. One pass an hour takes
+# every due row: rounds of batches, one batch per table per round, each batch
+# its own short transaction under the pass's own limits; a table is finished
+# when a batch takes fewer than PASS_BATCH rows; the budget is checked after
+# each batch. A row another transaction holds is skipped (SKIP LOCKED) and
+# taken by a later pass. Primary only: deletes reach the standby by
+# replication.
+
+
+async def _alt_limits(db: AsyncSession, lock_ms: int, statement_ms: int) -> None:
+    """The time limits of the transaction `db` is in (_ALT_LIMITS_SQL)."""
+    await db.execute(text(_ALT_LIMITS_SQL), {"lt": "%dms" % lock_ms, "st": "%dms" % statement_ms})
+
+
+async def _alt_retention_batch(db: AsyncSession, table: str) -> int:
+    """One batch of the pass on one table ('markers', 'shares' or 'facts'),
+    as its own transaction: the pass's limits, then up to PASS_BATCH due rows
+    deleted, oldest first, rows another transaction holds skipped; commit.
+    Returns the number of rows deleted."""
+    await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
+    bind = {"days": _alt_signals.DUE_DAYS, "batch": _alt_signals.PASS_BATCH}
+    if table == "markers":
+        res = await db.execute(text(
+            "DELETE FROM conn_markers"
+            " WHERE (steam_id, day, key_id, addr_mark) IN ("
+            " SELECT x.steam_id, x.day, x.key_id, x.addr_mark FROM conn_markers x"
+            " WHERE x.last_at < now() - make_interval(days => CAST(:days AS integer))"
+            " ORDER BY x.last_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE SKIP LOCKED)"
+            " RETURNING 1"), bind)
+    elif table == "shares":
+        res = await db.execute(text(
+            "DELETE FROM steam_family_shares"
+            " WHERE (steam_id, key_id, owner_mark) IN ("
+            " SELECT x.steam_id, x.key_id, x.owner_mark FROM steam_family_shares x"
+            " WHERE x.last_seen_at < now() - make_interval(days => CAST(:days AS integer))"
+            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE SKIP LOCKED)"
+            " RETURNING 1"), bind)
+    elif table == "facts":
+        res = await db.execute(text(
+            "DELETE FROM steam_signin_facts"
+            " WHERE steam_id IN ("
+            " SELECT x.steam_id FROM steam_signin_facts x"
+            " WHERE x.last_seen_at < now() - make_interval(days => CAST(:days AS integer))"
+            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE SKIP LOCKED)"
+            " RETURNING 1"), bind)
+    else:
+        raise ValueError(table)
+    n = len(res.all())
+    await db.commit()
+    return n
+
+
+async def _alt_retention_left(db: AsyncSession) -> dict:
+    """The due rows left in each table, read under the pass's limits."""
+    await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
+    row = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM conn_markers"
+        " WHERE last_at < now() - make_interval(days => CAST(:days AS integer))),"
+        " (SELECT count(*) FROM steam_family_shares"
+        " WHERE last_seen_at < now() - make_interval(days => CAST(:days AS integer))),"
+        " (SELECT count(*) FROM steam_signin_facts"
+        " WHERE last_seen_at < now() - make_interval(days => CAST(:days AS integer)))"),
+        {"days": _alt_signals.DUE_DAYS})).one()
+    return {"markers": int(row[0]), "shares": int(row[1]), "facts": int(row[2])}
+
+
+async def _alt_retention_pass(session_factory=None) -> dict:
+    """One pass (design 6.3). Each batch runs in its own session from
+    `session_factory` (the app's sessions by default). A batch that fails
+    ends the pass with its exception. Says what it deleted on every pass,
+    and the due rows left when any are."""
+    if session_factory is None:
+        from database import async_session as session_factory
+    t0 = time.monotonic()
+    deleted = {"markers": 0, "shares": 0, "facts": 0}
+    todo = ["markers", "shares", "facts"]
+    batches = 0
+    while todo:
+        for table in tuple(todo):
+            async with session_factory() as db:
+                n = await _alt_retention_batch(db, table)
+            batches += 1
+            deleted[table] += n
+            if n < _alt_signals.PASS_BATCH:
+                todo.remove(table)
+            if time.monotonic() - t0 >= _alt_signals.PASS_BUDGET_S:
+                todo.clear()
+                break
+    async with session_factory() as db:
+        left = await _alt_retention_left(db)
+    _alt_print("[ALT-RETENTION] pass: deleted markers %d, shares %d, facts %d in %d batch(es)"
+               % (deleted["markers"], deleted["shares"], deleted["facts"], batches))
+    if any(left.values()):
+        _alt_print("[ALT-RETENTION] due rows left: markers %d, shares %d, facts %d"
+                   % (left["markers"], left["shares"], left["facts"]))
+    return {"deleted": deleted, "left": left, "batches": batches,
+            "seconds": round(time.monotonic() - t0, 3)}
+
+
+async def alt_signals_retention_loop() -> None:
+    """The pass's own loop, started from lifespan on the PRIMARY only (every
+    pass DELETEs). One `[ALT-RETENTION] pass armed` line at boot; the first
+    pass PASS_FIRST_DELAY_S after start, then one every PASS_PERIOD_S. A pass
+    that fails is caught here, counted and said (`pass FAILED (<n> in a
+    row)`), and the next runs on schedule; `pass recovered` says when one gets
+    through. _supervised is the backstop for what escapes the loop."""
+    _alt_print("[ALT-RETENTION] pass armed: every %ds, rows past %d days, first pass in %ds"
+               % (_alt_signals.PASS_PERIOD_S, _alt_signals.DUE_DAYS, _alt_signals.PASS_FIRST_DELAY_S))
+    await asyncio.sleep(_alt_signals.PASS_FIRST_DELAY_S)
+    failures = 0
+    while True:
+        try:
+            await _alt_retention_pass()
+            if failures:
+                _alt_print("[ALT-RETENTION] pass recovered after %d failed pass(es)" % failures)
+                failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            failures += 1
+            _alt_print("[ALT-RETENTION] pass FAILED (%d in a row): %s" % (failures, type(ex).__name__))
+        await asyncio.sleep(_alt_signals.PASS_PERIOD_S)
 
 
 def _alt_boot() -> None:

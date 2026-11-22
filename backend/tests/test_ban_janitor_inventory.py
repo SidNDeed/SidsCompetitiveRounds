@@ -74,6 +74,12 @@ reads 395 and 0: both lanes counted from the same 382 (QDIG-1), QAPPLY-1
 adds nine (382 -> 391) and the ban sweep four (382 -> 386), and no function
 is counted by both, so 382 + 9 + 4 = 395, as main._janitor_sql_from_sources
 measures the merged tree.
+
+CHEAT-ALT-1 reads 400 and 0: its retention pass (main.alt_signals_retention_loop,
+a janitor root) reaches five statements, its time limits (main._alt_limits,
+the one text of main._ALT_LIMITS_SQL), one DELETE per table in
+main._alt_retention_batch and the count of the due rows left in
+main._alt_retention_left, and no function is counted twice (395 + 5 = 400).
 """
 import asyncio
 import os
@@ -89,7 +95,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 395, 0   # 391 QAPPLY-1 alone, 386 the ban sweep alone, 382 before both, 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 400, 0   # 395 before CHEAT-ALT-1, 391 QAPPLY-1 alone, 386 the ban sweep alone, 382 before both, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names
