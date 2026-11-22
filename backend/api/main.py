@@ -87249,8 +87249,8 @@ def _lfp_declares_casual(kinds) -> bool:
 # reads, so without it the train could not tell a refreshed box from a stale
 # one (learnings 780, 794, 1186). A code constant, equal on both boxes by
 # construction, probed by the release train and read by nothing else (#306).
-# Absent on any build before it. Defined here, at the end of the module, so no
-# line-keyed catalog of main.py moves; the health route reads it at request time.
+# Absent on any build before it. Defined at the end of this lane's own block, so
+# nothing above it in main.py moves; the health route reads it at request time.
 _LFP_CASUAL_BUILD = 1
 # ── end of LFP-CASUAL-1 helpers ──────────────────────────────────────────────
 
