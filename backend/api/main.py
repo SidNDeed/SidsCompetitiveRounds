@@ -17161,12 +17161,12 @@ def _alt_table_missing(ex) -> bool:
         if e is None or id(e) in seen:
             continue
         seen.add(id(e))
-        for attr in ("sqlstate", "pgcode"):
-            code = getattr(e, attr, None)
+        for code in (getattr(e, "sqlstate", None), getattr(e, "pgcode", None)):
             if isinstance(code, str) and code:
                 states.add(code)
         todo.append(getattr(e, "orig", None))
-        todo.append(getattr(e, "__cause__", None))
+        if isinstance(e, BaseException):
+            todo.append(e.__cause__)
     return states == {"42P01"}
 
 

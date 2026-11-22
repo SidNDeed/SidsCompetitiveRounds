@@ -17,9 +17,6 @@ from sqlalchemy.orm import DeclarativeBase, deferred, relationship
 # route that reaches a model (learning #537), and only MailSendReceipt and
 # InviteReceipt use it.
 from sqlalchemy import LargeBinary
-# Its own statement for the same reason: only the three alt-signal classes
-# (migration 427) use it.
-from sqlalchemy.dialects.postgresql import BYTEA
 
 
 class Base(DeclarativeBase):
@@ -1955,7 +1952,7 @@ class SteamFamilyShare(Base):
 
     steam_id = Column(Text, primary_key=True)
     key_id = Column(Text, primary_key=True)
-    owner_mark = Column(BYTEA, primary_key=True)
+    owner_mark = Column(LargeBinary, primary_key=True)
     first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
@@ -1979,8 +1976,8 @@ class ConnMarker(Base):
     steam_id = Column(Text, primary_key=True)
     day = Column(Date, primary_key=True, server_default=text("CAST((now() AT TIME ZONE 'UTC') AS date)"))
     key_id = Column(Text, primary_key=True)
-    addr_mark = Column(BYTEA, primary_key=True)
-    block_mark = Column(BYTEA, nullable=False)
+    addr_mark = Column(LargeBinary, primary_key=True)
+    block_mark = Column(LargeBinary, nullable=False)
     family = Column(SmallInteger, nullable=False)
     conn_class = Column(String(8), nullable=False, server_default=text("'unknown'"))
     first_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
