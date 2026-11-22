@@ -23,8 +23,10 @@ name a throwaway PostgreSQL database for the sitting half, or those cases
 FAIL (a skipped live case reports success for coverage that did not run).
 
 SCOPE. This file covers the revision's GAME and SITTING rules only: the
-rules the old worker had, which a revision carries unchanged. Their map to
-the old kinds, their posting and their mutations are asserted here. A
+rules the old worker had, which a revision carries with the same firing
+(RULING-CARRIED-1 moved the CLASS of eleven of them, flag to note, and
+nothing else). Their map to the old kinds, their class, their posting and
+their mutations are asserted here. A
 revision may also hold card, identity and combat rules; this file does not
 judge them, and their holders are elsewhere: the revision's own private
 self-tests (every case's complete firing set, run by every build, validate
@@ -35,7 +37,10 @@ counting tool that evaluates them over recorded evidence.
 What is asserted, for every game and sitting rule of the revision:
   * games: the same rules fire on the same games with the same stored
     details (exact JSON equality, after each side's own bounding) and the same
-    rendered text as the bound oracle;
+    rendered text as the bound oracle, every rule read as a flag (a note of
+    game scope stores no finding of its own; `_flag_view`);
+  * class: each old rule's class is the demotion table's (the private
+    suite's `demoted` entry are notes, every other old rule is a flag);
   * every rule has a positive and a boundary-negative fixture case, and the
     evaluator agrees with both labels;
   * posting: a rule is armed exactly when its old kind was, as the old
@@ -313,12 +318,29 @@ def _roundtrip(obj):
     return json.loads(json.dumps(obj, separators=(",", ":")))
 
 
+def _flag_view(rs):
+    """The revision with every rule's class read as flag, for comparing games
+    only. A note of game scope stores no finding of its own (its line rides on
+    the flags that fired beside it), so the games are compared on WHEN each
+    rule fires and WHAT it shows, as flags; the class itself is asserted apart
+    (test_a16_each_old_rule_has_the_class_of_the_demotion_table)."""
+    view = copy.copy(rs)
+    view.rules = []
+    for r in rs.rules:
+        c = copy.copy(r)
+        c.effect = "flag"
+        view.rules.append(c)
+    return view
+
+
 def _game_result(rs, g):
-    """The new worker's result for one game. The frozen games carry the
+    """The new worker's result for one game, every rule read as a flag
+    (_flag_view). The frozen games carry the
     nine-element hit_sent of the old worker; the current code reads ten
     (amended B7), so each entry is lifted by the old coupling (none or keyed,
     never unkeyed; an entry that coupling refused raises), while the old
     oracle keeps reading the frozen records as they are."""
+    rs = _flag_view(rs)
     registry = {tuple(t) for t in g["registry"]}
     findings, _fired, errors = rs.evaluate_game(fx.lift_hit_sent(g["records"]), g["match"], registry)
     assert errors == 0, g["name"]
@@ -338,6 +360,18 @@ def test_a16_the_rule_map_is_one_to_one_and_covers_the_game_and_sitting_rules():
     kindmap = _json("kindmap")
     assert len(set(kindmap.values())) == len(kindmap)
     assert set(kindmap.values()) == _old_kind_ids(rs)
+
+
+def test_a16_each_old_rule_has_the_class_of_the_demotion_table():
+    """The demotion table is the private suite's (its `demoted` entry: the
+    old rules whose finding is a NOTE in the revision; their firing is
+    unchanged). Every other old rule is a flag."""
+    rs = _ruleset()
+    old = _old_kind_ids(rs)
+    demoted = frozenset(_json("demoted"))
+    assert demoted and demoted <= old
+    assert {r.id: r.effect for r in rs.rules if r.id in old} == \
+        {i: "note" if i in demoted else "flag" for i in old}
 
 
 def test_a16_games_reproduce_the_reference_items_and_text():
