@@ -174,7 +174,7 @@ def test_every_column_of_the_three_tables_is_disclosed_or_bookkeeping():
         "steam_signin_facts": 14, "steam_family_shares": 5, "conn_markers": 9}, tables
 
 
-def test_the_disclosure_check_refuses_a_column_made_outside_a_create_table_body():
+def test_the_disclosure_check_refuses_a_written_statement_that_makes_a_column_outside_a_create_table_body():
     """Holder H3 (M2): the real 427 holds no such statement; each plant,
     on the line after `-- DDL END`, is refused with its line named. (A
     plain `CREATE TABLE <name> (` line is of the reader's own form: it is

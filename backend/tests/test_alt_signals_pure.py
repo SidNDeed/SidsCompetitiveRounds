@@ -435,7 +435,7 @@ def _literals(name, src):
     return out
 
 
-def test_every_address_literal_of_the_lane_is_special_purpose_or_a_published_resolver():
+def test_every_address_literal_of_the_lane_is_special_purpose_multicast_or_a_published_resolver():
     found = []
     for f in _lane_files():
         found += _literals(f.name, f.read_text(encoding="utf-8"))

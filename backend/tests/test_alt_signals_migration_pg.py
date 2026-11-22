@@ -280,7 +280,7 @@ def _plant_outside(text, plant):
     return text.replace(end, end + "    " + plant + "\n", 1), line
 
 
-def test_the_ddl_reader_refuses_a_column_made_outside_a_create_table_body():
+def test_the_ddl_reader_refuses_a_written_statement_that_makes_a_column_outside_a_create_table_body():
     """Holder H3 (M2): the real 427 holds no such statement; each plant is
     refused with its line named, and a CREATE TABLE line of the reader's
     own form is refused when it stands outside the DDL block."""
