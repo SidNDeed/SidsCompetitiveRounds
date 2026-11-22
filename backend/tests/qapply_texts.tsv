@@ -3,6 +3,8 @@ account	A player of this report no longer has an account, so it cannot be applie
 admin	This action needs an admin account and a valid admin signature; nothing was changed.
 ahead	This report is game {tail}; the lobby is on game {next}. Apply game {next} of this lobby first.
 bad_id	This held report's id is not valid, so nothing was changed.
+ban_ended	A ban ended this report's lobby, so its game cannot be applied or credited; discard this report.
+banned	A player of this report is under an active ban, so it cannot be applied or credited; it stays held.
 behind	This report is game {tail}, a number the lobby has passed, so it cannot be applied. Credit can pay its XP and gold.
 body	The stored report cannot be read, so it cannot be applied or credited.
 busy	Another request is using this game's players or lobby, so the action stopped at its time limit; nothing was changed. Try again in a moment.

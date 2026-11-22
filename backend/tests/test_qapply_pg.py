@@ -27,6 +27,7 @@ import hmac
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -1430,11 +1431,43 @@ async def _timed(act, env, qid):
     return ans, loop.time() - t0
 
 
-async def _pair_rows(env, lob, one, two, *, release=True):
+def _backend_pid(dbapi_conn):
+    """The server process id of a pooled asyncpg connection (SQLAlchemy's adapter)."""
+    raw = getattr(dbapi_conn, "driver_connection", None) or dbapi_conn._connection
+    return int(raw.get_server_pid())
+
+
+@contextlib.contextmanager
+def _sessions_of_this_call(env):
+    """F4a: the set of backend pids of every connection this case's engine hands out while the
+    block runs (the holder's session and the actions' own sessions, which env.sm opens), noted
+    when each is checked out. Only these are this call's: another case, another engine or a raw
+    connection of the same database never enters the set."""
+    from sqlalchemy import event
+    eng = env.sm.kw["bind"].sync_engine
+    mine = set()
+
+    def took(dbapi_conn, _rec, _proxy):
+        mine.add(_backend_pid(dbapi_conn))
+    event.listen(eng, "checkout", took)
+    try:
+        yield mine
+    finally:
+        event.remove(eng, "checkout", took)
+
+
+async def _pair_rows(env, lob, one, two, *, release=True, wait=None):
     """Hold the lobby's row in a third session; start one=(action, qid) and
     go on once the database shows it queued on that row; the same for two;
     then release (release=False: hold until both have answered). Both
-    (answer, elapsed) pairs, waited for at most the unit's deadline plus 2 s."""
+    (answer, elapsed) pairs, waited for at most the unit's deadline plus 2 s
+    (`wait` replaces that bound; F4b forces a timeout with it)."""
+    wait = main._QAPPLY_DEADLINE_S + 2.0 if wait is None else wait
+    with _sessions_of_this_call(env) as mine:
+        return await _pair_rows_in(env, lob, one, two, release, wait, mine)
+
+
+async def _pair_rows_in(env, lob, one, two, release, wait, mine):
     async with env.sm() as s:
         await s.execute(text("SELECT 1 FROM ffa_lobbies WHERE id = CAST(:l AS uuid) FOR UPDATE"),
                         {"l": str(lob.lid)})
@@ -1446,7 +1479,19 @@ async def _pair_rows(env, lob, one, two, *, release=True):
             await _lock_waiters(env, 2)
             if release:
                 await s.rollback()
-            got = await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            try:
+                got = await asyncio.wait_for(asyncio.gather(t1, t2), wait)
+            except TimeoutError:
+                # QAPPLY-PAIRROWS-STOP-1: an answer outlasted this wait. The
+                # case's teardown would wait without a bound on the sessions
+                # the cancelled actions left open, so they are ended here,
+                # within a bound, and the test fails at this line (the
+                # holder's own session first lets the lobby's row go). F4a:
+                # only this call's sessions are ended.
+                await s.rollback()
+                ended = await _end_open_sessions(env, mine)
+                pytest.fail("M2 an action outlasted the helper's wait of %.1f s (%d open session(s) ended)"
+                            % (wait, ended))
             await _f5_invariant(env)
             return got
         finally:
@@ -1454,6 +1499,19 @@ async def _pair_rows(env, lob, one, two, *, release=True):
             for t in (t1, t2):
                 if t is not None and not t.done():
                     t.cancel()
+
+
+async def _end_open_sessions(env, pids):
+    """QAPPLY-PAIRROWS-STOP-1: the bound on what the case's teardown waits
+    for. Ends the sessions of `pids` alone (F4a: the connections the calling
+    helper's own engine handed out, _sessions_of_this_call) that are in a
+    transaction or running a statement, never the test connection itself and
+    never a session of another case of this database; the read is bounded at
+    10 s. Returns how many it ended."""
+    return int(await asyncio.wait_for(env.conn.fetchval(
+        "SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity"
+        " WHERE pid = ANY($1::int[]) AND pid <> pg_backend_pid()"
+        "   AND (xact_start IS NOT NULL OR state = 'active')", sorted(pids)), 10.0) or 0)
 
 
 async def _m2_state(env, lob, rows):
@@ -3067,4 +3125,986 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
         for row in bad:
             print("F6 BAD", row)
         assert bad == [], bad
+    run_env(monkeypatch, body)
+
+# ── STACK-SEAM-1: where the held-report actions meet the ban sweep ─────────
+# Each check's id leads its test's name (test_seam_rN covers the lane's requirement N, test_seam_fN its
+# review fix N). Each check was run against a mutant: a copy of main.py with the one line the check guards
+# removed or changed (the ban read, the lobby test, the busy line, a verdict's check), red at the check's own
+# assertion; the control is the same check on the tree as it stands.
+
+async def seam_ban(env, sid, reason="seam-test"):
+    """An active ban of `sid`, written directly: the row the gates read."""
+    await env.conn.execute(
+        "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+        " VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour')", sid, reason, ADMIN)
+
+
+async def seam_lift(env, sid):
+    """Every active ban of `sid` lifted, as the unban route marks it."""
+    await env.conn.execute("UPDATE player_bans SET unbanned_at = NOW()"
+                           " WHERE steam_id = $1 AND unbanned_at IS NULL", sid)
+
+
+async def seam_ban_core(env, sid):
+    """The ban route's own core and its commit: the ban and its void."""
+    async with env.sm() as db:
+        await main._apply_ban_core(db, admin_steam_id=ADMIN, target_steam_id=sid,
+                                   reason="seam-test", duration_minutes=60)
+        await db.commit()
+
+
+async def seam_held_row(env, lob, g):
+    return str(await env.conn.fetchval(
+        "SELECT id FROM match_report_quarantine WHERE group_id = $1"
+        "   AND COALESCE(photon_room_id, payload->>'photon_room_id') LIKE $2 AND status = 'pending'",
+        lob.lid, "%%_r%d" % g))
+
+
+def test_seam_r1_credit_reads_every_named_accounts_ban_before_it_writes(monkeypatch):
+    """R1 and R3. Credit makes the report route's own ban read over the
+    reporter and every listed player, a seat it would not pay (a ghost)
+    included: an actively banned one refuses 409 with the "banned" sentence,
+    writes nothing (every table both actions can write, compared whole) and
+    leaves the row pending; the [BAN-GATE] line is written. Accept answers
+    the same sentence for the same ban, from its body's read. The list says
+    the same in its read form. The control in each arm: the ban lifted, the
+    list allows the Credit and the same Credit pays (200)."""
+    async def body(env):
+        for arm in ("reporter", "player", "ghost"):
+            lob = await played(env)
+            await close(env, lob)
+            results, kw = dict(res(lob)), {}
+            if arm == "ghost":
+                results[lob.sids[3]] = (0, 0)
+                kw = C6_ARMS["ghost"](lob)
+            a = await env.report(lob, 2, results, **kw)
+            assert a.status != 200, ("R1 fixture: game 2 held", arm, a)
+            qid = await seam_held_row(env, lob, 2)
+            rep = await env.conn.fetchval(
+                "SELECT payload->>'reported_by_steam_id' FROM match_report_quarantine WHERE id = $1",
+                uuid.UUID(qid))
+            who = {"reporter": rep, "player": next(s for s in lob.sids[:3] if s != rep),
+                   "ghost": lob.sids[3]}[arm]
+            await seam_ban(env, who)
+            # Accept, while its gate is open: the body's read, the same sentence.
+            before = await tables(env)
+            ans = await accept(env, qid)
+            assert (ans.status, ans.body) == (409, T["banned"]), ("R1 accept answers the ban sentence", arm, ans)
+            assert await tables(env) == before, ("R1 accept wrote nothing", arm)
+            # Credit's case: a later game of a participant blocks Accept.
+            await later_for(env, lob)
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["banned"], False), ("R3 the list reads the ban", arm, v)
+            before = await tables(env)
+            n_lines = len(env.lines)
+            ans = await credit(env, qid)
+            assert (ans.status, ans.body) == (409, T["banned"]), ("R1 credit refuses a banned account", arm, ans)
+            assert await tables(env) == before, ("R1 credit wrote nothing", arm)
+            assert await status_of(env, qid) == "pending", ("R1 the row stays pending", arm)
+            assert [x for x in env.lines[n_lines:] if x.startswith("[BAN-GATE] refused")], (
+                "R1 the gate's line", arm, env.lines[n_lines:])
+            # The control: the ban lifted, the list allows it and Credit pays.
+            await seam_lift(env, who)
+            v = (await listing(env))[qid]
+            assert v["can_credit"] is True, ("R3 control: lifted, the list allows the credit", arm, v)
+            ans = await credit(env, qid)
+            assert ans.status == 200, ("R1 control: lifted, the credit pays", arm, ans)
+    run_env(monkeypatch, body)
+
+
+async def _seam_key_waiters(env):
+    """Sessions of this database waiting on an advisory (identity) lock."""
+    return await env.conn.fetchval(
+        "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database"
+        " WHERE d.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted")
+
+
+async def _seam_lobby_free(env, lob):
+    """Whether the lobby's row can be locked at once (NOWAIT) by the test
+    connection; the lock is let go at once."""
+    try:
+        async with env.conn.transaction():
+            await env.conn.fetchval("SELECT 1 FROM ffa_lobbies WHERE id = $1 FOR NO KEY UPDATE NOWAIT", lob.lid)
+        return True
+    except Exception as ex:
+        if type(ex).__name__ == "LockNotAvailableError":
+            return False
+        raise
+
+
+async def _seam_hold_key(env, lob, key, act, qid, *, release):
+    """Hold `key`'s identity lock EXCLUSIVE in a session of its own (the ban
+    core's mode); start the action; go on once the database shows a session
+    waiting on an advisory lock; note whether the lobby's row is free then;
+    release the key at once (release=True) or hold it until the action
+    answers. Returns (answer, elapsed, lobby_free_while_waiting)."""
+    async with env.sm() as s:
+        await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:s AS text)))"), {"s": key})
+        task = asyncio.create_task(_timed(act, env, qid))
+        try:
+            loop = asyncio.get_running_loop()
+            end = loop.time() + 5.0
+            while not await _seam_key_waiters(env):
+                assert loop.time() < end, ("R1 the action waits on the identity key", act.__name__)
+                await asyncio.sleep(0.02)
+            free = await _seam_lobby_free(env, lob)
+            if release:
+                await s.rollback()
+            ans, took = await asyncio.wait_for(task, main._QAPPLY_DEADLINE_S + 4.0)
+            return ans, took, free
+        finally:
+            await s.rollback()
+            if not task.done():
+                task.cancel()
+
+
+def test_seam_r4_an_identity_key_held_past_the_bound_ends_each_action_busy(monkeypatch):
+    """R1's order (the identity keys before the lobby's row lock; the held row's
+    own lock comes first, test_seam_f1's census), R4 and R7's busy line. With a
+    listed player's identity key held EXCLUSIVE in another session (as the ban
+    core holds it), each action waits on that key before it takes the lobby's
+    row (the row stays free to
+    a NOWAIT lock while it waits), and the lock bound, well inside the
+    deadline, ends the wait: 503 with the busy sentence, nothing written (every
+    table compared whole), the row pending, and exactly one [QAPPLY] busy
+    line, naming the route's template. The control: the key released while
+    Credit waits, Credit goes on and pays."""
+    async def body(env):
+        lob, qid = await closed_held(env)
+        await later_for(env, lob)
+        key = lob.sids[1]
+        bound = main._QAPPLY_LOCK_TIMEOUT_MS / 1000.0
+        for act, route in ((credit, "/api/v1/admin/quarantine/{qid}/credit"),
+                           (accept, "/api/v1/admin/quarantine/{qid}/accept")):
+            before = await tables(env)
+            n_lines = len(env.lines)
+            ans, took, free = await _seam_hold_key(env, lob, key, act, qid, release=False)
+            print("SEAM R4", act.__name__, ans.status, "%.3f s" % took, "lobby free", free)
+            assert free, ("R1 the identity keys come before the lobby's row lock", act.__name__)
+            assert (ans.status, ans.body) == (503, T["busy"]), ("R4 busy at the bound", act.__name__, ans)
+            assert bound - 0.2 <= took < bound + 2.0, ("R4 the lock bound ends the wait", act.__name__, took)
+            assert await tables(env) == before, ("R4 nothing written", act.__name__)
+            assert await status_of(env, qid) == "pending"
+            busy = [x for x in env.lines[n_lines:] if x.startswith("[QAPPLY] busy")]
+            assert busy == ["[QAPPLY] busy route=" + route], ("R7 one busy line with the template", busy)
+        ans, took, free = await _seam_hold_key(env, lob, key, credit, qid, release=True)
+        assert free and ans.status == 200, ("R4 control: the key released, Credit pays", ans, free)
+    run_env(monkeypatch, body)
+
+
+def test_seam_r2_both_actions_refuse_a_lobby_the_ban_void_ended(monkeypatch):
+    """R2 and R3, and the proof the comment above BAN_VOID_REASONS names (R6).
+    The ban route's core voids a lobby one member sits in: a played one is
+    completed with its close record member_banned_played and no invalidation
+    reason, an unstarted one canceled with invalidation reason member_banned.
+    The ban is then lifted and a report of the lobby's next game is held. The
+    list, Accept and Credit each answer the "ban_ended" sentence (409), nothing
+    is written and the row stays pending. The control: a lobby closed by no
+    ban is served (Accept applies its held game)."""
+    async def body(env):
+        for arm in ("played", "unstarted"):
+            if arm == "played":
+                lob, g = await played(env), 2
+            else:
+                lob, g = await env.lobby(4, gated=False), 1
+                await env.conn.execute("UPDATE ffa_lobbies SET start_granted_at = NULL WHERE id = $1", lob.lid)
+            await seam_ban_core(env, lob.sids[3])
+            row = dict(await env.conn.fetchrow(
+                "SELECT status, invalidation_reason, dissolve_path FROM ffa_lobbies WHERE id = $1", lob.lid))
+            if arm == "played":
+                assert (row["status"], row["invalidation_reason"], row["dissolve_path"]) == (
+                    "completed", None, "member_banned_played"), ("R2 fixture: the void completed it", row)
+            else:
+                assert (row["status"], row["invalidation_reason"]) == ("canceled", "member_banned"), (
+                    "R2 fixture: the void canceled it", row)
+            await seam_lift(env, lob.sids[3])
+            qid = await held(env, lob, g)
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["ban_ended"], False), ("R3 the list names the ban's end", arm, v)
+            before = await tables(env)
+            for act in (accept, credit):
+                ans = await act(env, qid)
+                assert (ans.status, ans.body) == (409, T["ban_ended"]), ("R2 refused", arm, act.__name__, ans)
+            assert await tables(env) == before, ("R2 nothing written", arm)
+            assert await status_of(env, qid) == "pending", ("R2 the row stays pending", arm)
+        lob, qid = await closed_held(env)
+        ans = await accept(env, qid)
+        assert ans.status == 200, ("R2 control: a lobby closed by no ban is served", ans)
+    run_env(monkeypatch, body)
+
+
+def _seam_route_fn(name):
+    (fn,) = [n for n in ast.walk(_tree()) if isinstance(n, ast.AsyncFunctionDef) and n.name == name]
+    return fn
+
+
+def test_seam_r6_the_ban_void_comment_names_its_proof_and_says_what_the_void_writes():
+    """R6: the comment above BAN_VOID_REASONS names the held-report actions'
+    read and its test, which exists in this file; what it says of a played
+    FFA lobby is what the void writes (its completing statement sets the
+    close record member_banned_played and no invalidation reason)."""
+    import inspect
+    src = open(MAIN_SRC, encoding="utf-8").read()
+    i = src.index("BAN_VOID_REASONS = frozenset(")
+    block = src[src.rindex("# Bans part 2a (F1 b)", 0, i):i]
+    assert "_ffa_lobby_ended_by_ban" in block and "test_seam_r2" in block, block
+    assert "test_seam_r2_both_actions_refuse_a_lobby_the_ban_void_ended" in globals()
+    void = inspect.getsource(main._ban_void_apply)
+    completing = void[void.index("status='completed'"):]
+    completing = completing[:completing.index("RETURNING")]
+    assert "invalidation_reason" not in completing, completing
+    assert '"rec_path": "member_banned_played"' in void
+    assert "member_banned_played" in main.BAN_VOID_REASONS
+    for name in ("submit_ffa_match", "_qapply_credit", "_qapply_verdict"):
+        assert "_ffa_lobby_ended_by_ban" in {n.func.id for n in ast.walk(_seam_route_fn(name))
+                                             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}, name
+
+
+def test_seam_r7_the_bounds_comments_and_the_busy_line_say_what_the_code_does():
+    """R7 (QAPPLY-COMMENT-FIRST-STATEMENT-1, QAPPLY-BUSY-LOG-1). In both
+    routes the service check runs before the unit, the unit's first statement
+    is _qapply_bound and its second the admin check, and that check reads the
+    roster, then the ban; the two comments say so and no longer call the
+    bounds the transaction's first statement or the admin read its second.
+    Each route's busy answer is _qapply_busy with the route's own template."""
+    import inspect
+    src = open(MAIN_SRC, encoding="utf-8").read()
+    i = src.index("_QAPPLY_LOCK_TIMEOUT_MS = 2000")
+    comment = src[src.rindex("# The bounds of Accept's and Credit's one transaction", 0, i):i]
+    assert "transaction's first statement" not in comment, comment
+    assert "unit's first statement (_qapply_bound)" in comment and "_qapply_service_ready" in comment, comment
+    doc = main._qapply_admin.__doc__
+    assert "second statement" not in doc and "the roster, then a roster member's ban" in doc, doc
+    calls = [n.func.id for n in sorted((n for n in ast.walk(_seam_route_fn("_is_admin"))
+                                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)),
+                                       key=lambda n: (n.lineno, n.col_offset))]
+    assert calls[:2] == ["_is_admin_roster", "_is_banned"], calls
+    for name, kind in (("admin_accept_quarantine", "accept"), ("admin_credit_quarantine", "credit")):
+        fn = _seam_route_fn(name)
+        (tr,) = [n for n in fn.body if isinstance(n, ast.Try) and any(isinstance(s, ast.AsyncWith) for s in n.body)]
+        assert ast.unparse(tr.body[0]) == "await _qapply_service_ready(db)", name
+        unit = tr.body[1]
+        assert isinstance(unit, ast.AsyncWith) and "_qapply_unit(%r)" % kind in ast.unparse(unit.items[1].context_expr), name
+        assert ast.unparse(unit.body[0]) == "await _qapply_bound(db)", name
+        assert ast.unparse(unit.body[1]).startswith("await _qapply_admin(db, req"), name
+        (path,) = [r.path for r in main.app.routes if getattr(r, "endpoint", None) is getattr(main, name)]
+        busy = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_qapply_busy"]
+        assert [b.args[0].value for b in busy] == [path], (name, path)
+    assert "[QAPPLY] busy route={route}" in inspect.getsource(main._qapply_busy)
+
+
+# ── STACK-SEAM-1 R10 and R1-FIX F2: the list's verdict and the routes' answers, both directions ──
+# FORWARD (F2a). EVERY key of the admin sentences' table (_QAPPLY_TEXTS) is read by _qapply_verdict -- a key
+# inside a _QAPPLY_TEXTS[...] there, an argument of its no(), a key one of its text helpers returns, or a value
+# of _QAPPLY_CHECK_TEXT when it reads that map -- or stands in R10_EXCEPTIONS, the one list, with its reason.
+_R10_LOCK = "decided only under the held row's lock: "
+R10_EXCEPTIONS = {
+    "admin": "a property of the request: the list route makes the same admin check itself, before any verdict",
+    "not_found": _R10_LOCK + "the list reads rows that exist; a row deleted after the read",
+    "held_applied": _R10_LOCK + "the list reads pending rows only; a row applied after the read",
+    "held_credited": _R10_LOCK + "the list reads pending rows only; a row credited after the read",
+    "reviewed": _R10_LOCK + "the list reads pending rows only; a row reviewed after the read",
+    "claimed": "a timing outcome: the claim insert's own conflict, a sibling action between the read and the write",
+    "insert_race": "a timing outcome: the game insert's own conflict, a report recorded between the read and the write",
+    "insert_failed": "a timing outcome: the game insert's own failure, which no read can foresee",
+    "wagers": "a timing outcome: the settle step's own failure to settle the game's wagers (a 5xx to retry)",
+    "busy": "a timing outcome: the unit's bounds end a wait on a lock another request holds",
+    "bad_id": "a property of the request: the id in its path; every row the list reads carries its own id",
+    "note": "a property of the request: the admin's note",
+    "refused": "the catch-all of _qapply_answer for a body refusal that no table entry maps; no stored state names it",
+    "game_paid": "the claim the verdict reads as game_credited: Credit's sentence for it, the list shows Accept's",
+    "game_applied": "the claim the verdict reads as recorded: Credit's sentence for it, the list shows Accept's",
+    "other_lobby": ("the stored state the verdict reads as recorded (_QAPPLY_SQL_RECORDED finds the room under "
+                    "any lobby), Credit's sentence for it; Accept's body names the other lobby"),
+    "can_accept": "the verdict's shape: can_credit is False wherever can_accept is True (its last return)",
+}
+# The verdict's helpers whose returns are keys or sentences of the table.
+R10_TEXT_HELPERS = ("_qapply_held_check", "_qapply_gate_text", "_qapply_number_text")
+
+# REVERSE (F2a, with the ruling on F5). Every way the routes (Accept, Credit, Discard, the list) answer resolves to
+# a key of the table: a refusal (_QapplyRefused) carries a table sentence; _qapply_answer maps every other refusal
+# to a key; the routes' own raises carry table sentences; busy is _qapply_busy's. The ONE listed pass-through is
+# the service wait, and it may answer only the words of its closed list.
+R10_PASS_THROUGH = {
+    "_QapplyServiceWait": (
+        frozenset({"service_policy_unavailable"}),
+        "a machine word that the client's text rules map to its sentence (plugin/ServerTextRules.cs, the "
+        "503|service_policy_unavailable rule); answered as raised, with its Retry-After"),
+}
+R10_ROUTES = ("admin_accept_quarantine", "admin_credit_quarantine", "admin_discard_quarantine",
+              "admin_list_quarantine")
+R10_ANSWERERS = R10_ROUTES + ("_qapply_answer", "_qapply_busy", "_qapply_admin")
+R10_TEXT_FUNCS = ("_qapply_refusal_text", "_qapply_gate_text", "_qapply_number_text")
+R10_MAPS = ("_QAPPLY_CHECK_TEXT", "_QAPPLY_WORD_TEXT", "_QAPPLY_BODY_TEXT")
+# A bare `raise` in a route re-raises an error that is no refusal (the framework's 500, no admin sentence); it
+# stands only in the routes' `except BaseException` handler, after the bounds' test, once per action route.
+R10_BARE_RERAISES = {"admin_accept_quarantine": 1, "admin_credit_quarantine": 1}
+
+
+def _r10_parse(src=None):
+    if src is None:
+        with open(MAIN_SRC, encoding="utf-8") as fh:
+            src = fh.read()
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    dicts = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Dict):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    dicts[t.id] = n.value
+    keys = {k.value for k in dicts["_QAPPLY_TEXTS"].keys}
+    return tree, funcs, dicts, keys
+
+
+def _r10_strs(node, keys=None):
+    got = {c.value for c in ast.walk(node) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    return got if keys is None else got & keys
+
+
+def _r10_choice(node):
+    """The keys an expression can yield: a string constant, or either branch of a conditional (never its test)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        return _r10_choice(node.body) | _r10_choice(node.orelse)
+    return set()
+
+
+def _r10_is_texts(node):
+    return isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "_QAPPLY_TEXTS"
+
+
+def _r10_returns(fn):
+    return [n.value for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value is not None]
+
+
+def _r10_read(src=None):
+    """(table keys, keys the verdict reads)."""
+    _tree_, funcs, dicts, keys = _r10_parse(src)
+    v = funcs["_qapply_verdict"]
+    read = set()
+    for n in ast.walk(v):
+        if _r10_is_texts(n):
+            read |= _r10_choice(n.slice) & keys
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "no":
+            read |= set().union(*[_r10_choice(a) & keys for a in n.args])
+        if isinstance(n, ast.Name) and n.id == "_QAPPLY_CHECK_TEXT":
+            read |= {x.value for x in dicts["_QAPPLY_CHECK_TEXT"].values} & keys
+    called = {n.func.id for n in ast.walk(v) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    for h in R10_TEXT_HELPERS:
+        if h in called:
+            for r in _r10_returns(funcs[h]):
+                read |= (_r10_choice(r) | set().union(*[_r10_choice(s.slice) for s in ast.walk(r) if _r10_is_texts(s)])) & keys
+    return keys, read
+
+
+def _r10_forward_failures(keys, read, listed=None):
+    listed = R10_EXCEPTIONS if listed is None else listed
+    out = ["%s: a sentence of the table the verdict never reads and no exception lists" % k
+           for k in sorted(keys - read - set(listed))]
+    out += ["%s: listed as an exception, but the verdict reads it" % k for k in sorted(set(listed) & read)]
+    out += ["%s: listed as an exception, but not a key of the table" % k for k in sorted(set(listed) - keys)]
+    return out
+
+
+def _r10_parents(fn):
+    up = {}
+    for n in ast.walk(fn):
+        for c in ast.iter_child_nodes(n):
+            up[c] = n
+    return up
+
+
+def _r10_isinstance_class(node, up):
+    """The class X of the nearest enclosing `if isinstance(ex, X):` whose body holds `node`, or None."""
+    child, n = node, up.get(node)
+    while n is not None:
+        if isinstance(n, ast.If) and child in n.body and isinstance(n.test, ast.Call) \
+                and isinstance(n.test.func, ast.Name) and n.test.func.id == "isinstance" \
+                and len(n.test.args) == 2 and isinstance(n.test.args[1], ast.Name):
+            return n.test.args[1].id
+        child, n = n, up.get(n)
+    return None
+
+
+def _r10_table_form(node):
+    """A table sentence: _QAPPLY_TEXTS[...], its .format(...), or a call of a text function."""
+    if _r10_is_texts(node):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format" \
+            and _r10_is_texts(node.func.value):
+        return True
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in R10_TEXT_FUNCS
+
+
+def _r10_detail(call):
+    for kw in call.keywords:
+        if kw.arg == "detail":
+            return kw.value
+    return call.args[1] if len(call.args) > 1 else None
+
+
+def _r10_reverse_failures(src=None, passes=None):
+    passes = R10_PASS_THROUGH if passes is None else passes
+    tree, funcs, dicts, keys = _r10_parse(src)
+    out = []
+    # (1) Every refusal raised under either action carries a table sentence.
+    for name, fn in funcs.items():
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_QapplyRefused":
+                if not _r10_table_form(_r10_detail(n)):
+                    out.append("%s:%d: a held-report refusal whose sentence is not the table's" % (name, n.lineno))
+    # (2) The text functions return table sentences only.
+    for name in R10_TEXT_FUNCS:
+        for r in _r10_returns(funcs[name]):
+            if not _r10_table_form(r):
+                out.append("%s:%d: a text function returns something other than a table sentence" % (name, r.lineno))
+    # (3) Every key named for the table exists: the subscripts, the three maps, the held check's returns and the
+    # answer's own keys.
+    named = set()
+    for n in ast.walk(tree):
+        if _r10_is_texts(n):
+            named |= {(c, n.lineno) for c in _r10_choice(n.slice)}
+    for m in R10_MAPS:
+        named |= {(x.value, x.lineno) for x in dicts[m].values}
+    named |= {(c, r.lineno) for r in _r10_returns(funcs["_qapply_held_check"]) for c in _r10_choice(r)}
+    for n in ast.walk(funcs["_qapply_answer"]):
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "key" for t in n.targets):
+            named |= {(c, n.lineno) for c in _r10_choice(n.value)}
+    out += ["line %d: %r is named as a key of the table and is none" % (ln, k) for k, ln in sorted(named)
+            if k not in keys]
+    # (4) Every HTTPException the answerers build carries a table sentence, except the refusal's own sentence
+    # passed on inside `if isinstance(ex, _QapplyRefused)` (a table sentence by (1)).
+    for name in R10_ANSWERERS:
+        fn = funcs[name]
+        up = _r10_parents(fn)
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "HTTPException":
+                d = _r10_detail(n)
+                if _r10_table_form(d):
+                    continue
+                if _r10_isinstance_class(n, up) == "_QapplyRefused" and ast.unparse(d) == "str(ex.detail)":
+                    continue
+                out.append("%s:%d: an answer outside the table (%s)" % (name, n.lineno, ast.unparse(d) if d else None))
+    # (5) _qapply_answer passes an exception on as raised only for a listed pass-through.
+    ans = funcs["_qapply_answer"]
+    up = _r10_parents(ans)
+    seen = set()
+    for r in _r10_returns(ans):
+        if isinstance(r, ast.Call) and isinstance(r.func, ast.Name) and r.func.id == "HTTPException":
+            continue
+        cls = _r10_isinstance_class(r, up)
+        if isinstance(r, ast.Name) and cls in passes:
+            seen.add(cls)
+            continue
+        out.append("_qapply_answer:%d: a pass-through not listed (%s, under %s)" % (r.lineno, ast.unparse(r), cls))
+    out += ["%s: a listed pass-through _qapply_answer never passes" % c for c in sorted(set(passes) - seen)]
+    # (6) The pass-through's closed word list: every construction of it answers one of its words, and every
+    # word is answered somewhere.
+    for cls, (words, _why) in passes.items():
+        used = set()
+        for name, fn in funcs.items():
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == cls:
+                    d = _r10_detail(n)
+                    w = d.value if isinstance(d, ast.Constant) else ast.unparse(d) if d is not None else None
+                    used.add(w)
+                    if w not in words:
+                        out.append("%s:%d: %s answers %r, outside its closed list" % (name, n.lineno, cls, w))
+        out += ["%s: %r is listed and never answered" % (cls, w) for w in sorted(words - used)]
+    # (7) Each route raises only table answers: an HTTPException (checked in (4)), _qapply_answer's or
+    # _qapply_busy's answer, or the listed bare re-raise.
+    for name in R10_ROUTES:
+        fn = funcs[name]
+        up = _r10_parents(fn)
+        bare = 0
+        for n in ast.walk(fn):
+            if not isinstance(n, ast.Raise):
+                continue
+            e = n.exc
+            if e is None:
+                h = up.get(n)
+                while h is not None and not isinstance(h, ast.ExceptHandler):
+                    h = up.get(h)
+                if h is not None and isinstance(h.type, ast.Name) and h.type.id == "BaseException":
+                    bare += 1
+                    continue
+                out.append("%s:%d: a bare re-raise outside the routes' BaseException handler" % (name, n.lineno))
+                continue
+            if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in (
+                    "HTTPException", "_qapply_answer", "_qapply_busy"):
+                continue
+            out.append("%s:%d: an answer path outside the table (%s)" % (name, n.lineno, ast.unparse(e)))
+        if bare != R10_BARE_RERAISES.get(name, 0):
+            out.append("%s: %d bare re-raise(s), %d listed" % (name, bare, R10_BARE_RERAISES.get(name, 0)))
+    return out
+
+
+def _r10_sql_order(fn):
+    return [n.id for n in sorted((n for n in ast.walk(fn) if isinstance(n, ast.Name)
+                                  and n.id in ("_QAPPLY_SQL_RECEIPT", "_QAPPLY_SQL_LOBBY_BEFORE_168")),
+                                 key=lambda n: (n.lineno, n.col_offset))]
+
+
+def test_seam_r10_census_every_refusal_of_the_routes_has_its_verdict_or_its_reason():
+    """F2a, forward: the whole table, every key read by the verdict or listed with its reason (both ways)."""
+    keys, read = _r10_read()
+    bad = _r10_forward_failures(keys, read)
+    assert bad == [], ("F2a a key of the table neither read nor listed", bad)
+    _t, funcs, _d, _k = _r10_parse()
+    v = funcs["_qapply_verdict"]
+    assert {"game_credited", "recorded", "reporter", "banned", "ban_ended"} <= read, sorted(read)
+    last = ast.unparse(v.body[-1])
+    assert last.startswith("return") and "'can_accept': True" in last and "'can_credit': False" in last, last
+    # _qapply_held's two checks run in the verdict with the same SQL, in _qapply_held's order.
+    order, held_ = _r10_sql_order(v), _r10_sql_order(funcs["_qapply_held"])
+    assert order == held_ == ["_QAPPLY_SQL_RECEIPT", "_QAPPLY_SQL_LOBBY_BEFORE_168"], (order, held_)
+
+
+def test_seam_f2a_every_answer_of_the_routes_is_a_sentence_of_the_table():
+    """F2a, reverse, and the ruling on F5: every answer path resolves to a key of the table; the service wait is
+    the ONE listed pass-through, pinned to its closed list of one word."""
+    bad = _r10_reverse_failures()
+    assert bad == [], ("F2a an answer of the routes outside the table", bad)
+    assert set(R10_PASS_THROUGH) == {"_QapplyServiceWait"} and \
+        R10_PASS_THROUGH["_QapplyServiceWait"][0] == {"service_policy_unavailable"}
+
+
+def _r10_plant(src, old, new):
+    assert src.count(old) == 1, ("plant site", old)
+    return src.replace(old, new)
+
+
+def test_seam_r10_census_names_a_planted_refusal_and_a_dropped_verdict():
+    """F2a's plants, each refused by name, and the control (the tree as it stands)."""
+    with open(MAIN_SRC, encoding="utf-8") as fh:
+        src = fh.read()
+    # A planted key of the table that the verdict never reads and no exception lists.
+    p = _r10_plant(src, '_QAPPLY_TEXTS = {\n', '_QAPPLY_TEXTS = {\n    "planted_key": "A planted sentence.",\n')
+    keys, read = _r10_read(p)
+    assert "planted_key: a sentence of the table the verdict never reads and no exception lists" in \
+        _r10_forward_failures(keys, read)
+    # The verdict's receipt check dropped: the census names the key.
+    p = _r10_plant(src, 'return no("credited_before")', 'pass')
+    keys, read = _r10_read(p)
+    assert "credited_before: a sentence of the table the verdict never reads and no exception lists" in \
+        _r10_forward_failures(keys, read)
+    # A planted answer path outside the table, in _qapply_answer and in a route.
+    p = _r10_plant(src, "    d = str(ex.detail)\n", '    d = str(ex.detail)\n    if d == "x":\n'
+                   '        return HTTPException(409, d)\n')
+    assert any(b.startswith("_qapply_answer:") and "an answer outside the table (d)" in b
+               for b in _r10_reverse_failures(p)), _r10_reverse_failures(p)
+    p = _r10_plant(src, '        raise HTTPException(422, _QAPPLY_TEXTS["note"])\n    try:\n        await _qapply_service_ready(db)\n'
+                   '        async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("credit"):',
+                   '        raise HTTPException(422, "planted answer")\n    try:\n        await _qapply_service_ready(db)\n'
+                   '        async with asyncio.timeout(_QAPPLY_DEADLINE_S), _qapply_unit("credit"):')
+    assert any(b.startswith("admin_credit_quarantine:") and "'planted answer'" in b
+               for b in _r10_reverse_failures(p)), _r10_reverse_failures(p)
+    # F5's pin: a changed word, and a second pass-through, are each refused by name.
+    p = _r10_plant(src, 'status_code=503, detail="service_policy_unavailable",',
+                   'status_code=503, detail="service_policy_changed",')
+    got = _r10_reverse_failures(p)
+    assert any("_QapplyServiceWait answers 'service_policy_changed', outside its closed list" in b for b in got), got
+    assert "_QapplyServiceWait: 'service_policy_unavailable' is listed and never answered" in got, got
+    p = _r10_plant(src, "    if isinstance(ex, _QapplyServiceWait):\n        return ex\n",
+                   "    if isinstance(ex, _QapplyServiceWait):\n        return ex\n"
+                   "    if isinstance(ex, _QapplyOtherWait):\n        return ex\n")
+    assert any("a pass-through not listed (ex, under _QapplyOtherWait)" in b for b in _r10_reverse_failures(p))
+    # The control: the tree as it stands.
+    keys, read = _r10_read(src)
+    assert _r10_forward_failures(keys, read) == [] and _r10_reverse_failures(src) == []
+
+
+# ── STACK-SEAM-1 R1-FIX F1: no transaction waits on an EXISTING held row while it holds an identity key or a
+# lock on a row the ban core locks (the invariant THE LOCK ORDER comment states above _QAPPLY_SERVABLE_REASONS) ──
+# Every statement of main.py that names match_report_quarantine and locks rows or writes them, by its enclosing
+# function (a module constant counts in each function that names it), against ONE table. For every listed site
+# that locks or changes EXISTING rows, nothing on its path before it may take an identity key or such a row lock:
+# the calls before it in its function (all of its loop body when it sits in a loop), the SQL before it there, and
+# the same up every caller in main.py (a function that opens its own session, async_session, is a transaction
+# root: the climb stops there); a call counts when the function it names reaches, through main.py, an
+# identity helper, a raw identity advisory lock or a lock on a row the ban core locks. A new row (INSERT) waits on
+# no existing row; the two finishing UPDATEs are the listed exception.
+_F1_NEW = ("a NEW held row: no existing row is waited on (the plain inserts set photon_room_id NULL, which no "
+           "unique key covers; the keyed one is ON CONFLICT DO NOTHING); under the group's advisory lock, and "
+           "inside a journal window with the settle writer's identity keys held")
+_F1_FINISH = "the action's own finishing UPDATE of the held row it locked first (_qapply_held)"
+F1_HELD_ROW_SITES = {
+    ("_quarantine_report", "insert", "inline1"): _F1_NEW,
+    ("_quarantine_report", "insert", "inline2"): _F1_NEW,
+    ("_quarantine_report", "insert", "inline3"): _F1_NEW,
+    ("_qapply_held", "lock", "_QAPPLY_SQL_HELD"): "each action's first lock: the held row, before its identity keys",
+    ("_qapply_finish", "update", "_QAPPLY_SQL_ACCEPTED"): "Accept: " + _F1_FINISH,
+    ("_qapply_credit", "update", "_QAPPLY_SQL_CREDITED"): "Credit: " + _F1_FINISH,
+    ("admin_discard_quarantine", "update", "inline1"): "the discard route's one statement on the held row",
+    ("_qdig_janitor_pass", "lock", "_QDIG_SQL_JANITOR_LOCK"): "the janitor's row lock, SKIP LOCKED",
+    ("_qdig_janitor_pass", "update", "_QDIG_SQL_JANITOR_FILE"): "the janitor's filing, under its own row lock",
+    ("internal_quarantine_digest_posted", "update", "_QDIG_SQL_POSTED_NEW"): "the bot's digest acknowledgement",
+    ("internal_quarantine_digest_posted", "update", "_QDIG_SQL_POSTED_REMINDER"): "the bot's reminder acknowledgement",
+}
+F1_FINISHING = frozenset({("_qapply_finish", "update", "_QAPPLY_SQL_ACCEPTED"),
+                          ("_qapply_credit", "update", "_QAPPLY_SQL_CREDITED")})
+# Sites whose "before it on the path" syntax cannot decide, each with its reason: none today.
+F1_UNDECIDED = {}
+_F1_TABLE = "match_report_quarantine"
+_F1_ROW_LOCK = re.compile(r"\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b", re.I)
+_F1_WRITES = (("update", re.compile(r"\bUPDATE\s+match_report_quarantine\b", re.I)),
+              ("insert", re.compile(r"\bINSERT\s+INTO\s+match_report_quarantine\b", re.I)),
+              ("delete", re.compile(r"\bDELETE\s+FROM\s+match_report_quarantine\b", re.I)))
+_F1_FROM = re.compile(r"\bFROM\s+match_report_quarantine\b", re.I)
+# The rows the ban core locks (_ban_lock_and_gate's LOCK ORDER text): a lock on any of these tables taints.
+_F1_BAN_CORE_ROW_LOCK = re.compile(
+    r"\bFROM\s+(ffa_lobbies|series|team_lobbies|ovt_lobbies|ffa_queue|queue|team_queue|queue_leases)\b[^;]*?"
+    r"\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b", re.I | re.S)
+# A raw identity advisory lock: the bare hashtext of one parameter (a family key carries a literal prefix).
+_F1_RAW_IDENTITY = re.compile(
+    r"pg_advisory_(xact_)?lock(_shared)?\(\s*hashtext\(\s*(:\w+|CAST\(\s*:\w+\s+AS\s+text\s*\))\s*\)\s*\)", re.I)
+
+
+def _f1_identity_calls():
+    import ban_sweep_census as bsc
+    return (frozenset({"_ban_lock_and_gate", "_identity_lock_many", "_guard_identities", "_guard_player_ids",
+                       "_settle_writer_ban_check", "_mail_lock_identities"})
+            | frozenset(bsc.IDENTITY_LOCKERS) | frozenset(bsc.EXCLUSIVE_TAKERS_BY_NAME) | frozenset(bsc.LOCK_CALLERS))
+
+
+def _f1_model(src):
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    consts = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    consts[t.id] = n.value.value
+    return funcs, consts
+
+
+def _f1_docstring(fn):
+    b = fn.body[0] if fn.body else None
+    return b.value if isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant) else None
+
+
+def _f1_sql(fn, consts):
+    """(node, text, constant name or None) for every SQL-bearing node of fn, docstring out."""
+    doc = _f1_docstring(fn)
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n is not doc:
+            yield n, n.value, None
+        elif isinstance(n, ast.Name) and n.id in consts:
+            yield n, consts[n.id], n.id
+
+
+def _f1_calls(fn, funcs):
+    return [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+
+
+def _f1_tainted(funcs, consts, ident):
+    """Every main.py function that reaches an identity helper, a raw identity lock or a ban-core row lock."""
+    direct, edges = set(), {}
+    for name, fn in funcs.items():
+        names = {c.func.id for c in _f1_calls(fn, funcs)}
+        edges[name] = names & set(funcs)
+        if names & ident or any(_F1_RAW_IDENTITY.search(t) or _F1_BAN_CORE_ROW_LOCK.search(t)
+                                for _n, t, _c in _f1_sql(fn, consts)):
+            direct.add(name)
+    tainted = set(direct) | (ident & set(funcs))
+    grew = True
+    while grew:
+        grew = False
+        for name, out in edges.items():
+            if name not in tainted and out & tainted:
+                tainted.add(name)
+                grew = True
+    return tainted
+
+
+def _f1_sites(funcs, consts):
+    """{(function, kind, label): [node, ...]} of every lock or write statement on the held-report table."""
+    found = {}
+    for name, fn in funcs.items():
+        inline = {}
+        for n, t, cname in sorted(_f1_sql(fn, consts), key=lambda x: (x[0].lineno, x[0].col_offset)):
+            if _F1_TABLE not in t:
+                continue
+            kinds = [k for k, rx in _F1_WRITES if rx.search(t)]
+            if not kinds and _F1_FROM.search(t) and _F1_ROW_LOCK.search(t):
+                kinds = ["lock"]
+            for k in kinds:
+                if cname is None:
+                    inline[k] = inline.get(k, 0) + 1
+                    label = "inline%d" % inline[k]
+                else:
+                    label = cname
+                found.setdefault((name, k, label), []).append(n)
+    return found
+
+
+def _f1_pos(n):
+    return (n.lineno, n.col_offset)
+
+
+def _f1_before(fn, node, funcs, consts, ident, tainted):
+    """The takers before `node` on fn's own path: calls and SQL before it, and all of its loop body."""
+    up = _r10_parents(fn)
+    loops, n = [], up.get(node)
+    while n is not None:
+        if isinstance(n, (ast.For, ast.AsyncFor, ast.While)):
+            loops.append(n)
+        n = up.get(n)
+    span = set()
+    for lp in loops:
+        span |= set(ast.walk(lp))
+    bad = []
+    for c in _f1_calls(fn, funcs):
+        if (_f1_pos(c) < _f1_pos(node) or c in span) and (c.func.id in ident or c.func.id in tainted):
+            bad.append("%s (line %d)" % (c.func.id, c.lineno))
+    for n2, t, cname in _f1_sql(fn, consts):
+        if (_f1_pos(n2) < _f1_pos(node) or n2 in span) and (
+                _F1_RAW_IDENTITY.search(t) or _F1_BAN_CORE_ROW_LOCK.search(t)):
+            bad.append("%s (line %d)" % (cname or "an inline statement", n2.lineno))
+    return bad
+
+
+def _f1_path_failures(name, node, funcs, consts, ident, tainted, seen=None):
+    seen = set() if seen is None else seen
+    if name in seen:
+        return []
+    seen.add(name)
+    out = ["%s: %s" % (name, b) for b in _f1_before(funcs[name], node, funcs, consts, ident, tainted)]
+    if any(c.func.id == "async_session" and _f1_pos(c) < _f1_pos(node) for c in _f1_calls(funcs[name], funcs)):
+        return out   # a transaction root: it opened its own session, so its callers' locks are other sessions'
+    for caller, fn in funcs.items():
+        for c in _f1_calls(fn, funcs):
+            if c.func.id == name:
+                out += _f1_path_failures(caller, c, funcs, consts, ident, tainted, seen)
+    return out
+
+
+def _f1_failures(src=None, listed=None, finishing=None, undecided=None):
+    if src is None:
+        with open(MAIN_SRC, encoding="utf-8") as fh:
+            src = fh.read()
+    listed = F1_HELD_ROW_SITES if listed is None else listed
+    finishing = F1_FINISHING if finishing is None else finishing
+    undecided = F1_UNDECIDED if undecided is None else undecided
+    funcs, consts = _f1_model(src)
+    ident = _f1_identity_calls()
+    tainted = _f1_tainted(funcs, consts, ident)
+    found = _f1_sites(funcs, consts)
+    out = ["%s %s %s: a statement on the held-report table that the census does not list" % k
+           for k in sorted(set(found) - set(listed))]
+    out += ["%s %s %s: listed, but no such statement stands there" % k for k in sorted(set(listed) - set(found))]
+    out += ["%s %s %s: %d statements under one listed site" % (k + (len(v),)) for k, v in sorted(found.items())
+            if len(v) != 1]
+    for key, nodes in sorted(found.items()):
+        if key[1] == "insert" or key in finishing or key in undecided or key not in listed:
+            continue
+        for node in nodes:
+            for b in _f1_path_failures(key[0], node, funcs, consts, ident, tainted):
+                out.append("%s %s %s: an identity key or a ban-core row lock before it on its path: %s"
+                           % (key + (b,)))
+    return out
+
+
+def test_seam_f1_no_held_row_lock_after_an_identity_key_or_a_ban_core_row_lock():
+    """F1b: the census of every lock and write on the held-report table, against its one table, and the
+    invariant for every site that locks or changes existing rows."""
+    bad = _f1_failures()
+    assert bad == [], ("F1b the held-row census", bad)
+    # The census sees what it judges: the identity helpers taint, and the routes' own entry does not.
+    with open(MAIN_SRC, encoding="utf-8") as fh:
+        funcs, consts = _f1_model(fh.read())
+    tainted = _f1_tainted(funcs, consts, _f1_identity_calls())
+    assert {"_ban_lock_and_gate", "_qapply_credit", "submit_ffa_match", "_apply_ban_core"} <= tainted
+    assert not ({"_qapply_admin", "_qapply_bound", "_qapply_service_ready"} & tainted), \
+        sorted({"_qapply_admin", "_qapply_bound", "_qapply_service_ready"} & tainted)
+
+
+def test_seam_f1_census_refuses_a_planted_update_and_a_planted_statement_by_name():
+    """F1c: an UPDATE of the held-report table placed after an identity call is refused by name; a new
+    statement on the table that the list does not name is refused by name; the tree as it stands passes."""
+    with open(MAIN_SRC, encoding="utf-8") as fh:
+        src = fh.read()
+    # The discard route's UPDATE, with the identity keys taken before it.
+    p = _r10_plant(src, '        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])\n    done = (await db.execute(text("""\n'
+                   '        UPDATE match_report_quarantine\n',
+                   '        raise HTTPException(ex.status_code, _QAPPLY_TEXTS["admin"])\n'
+                   '    await _ban_lock_and_gate(db, [req.admin_steam_id], None)\n'
+                   '    done = (await db.execute(text("""\n        UPDATE match_report_quarantine\n')
+    got = _f1_failures(p)
+    assert any(b.startswith("admin_discard_quarantine update inline1: an identity key or a ban-core row lock "
+                            "before it on its path: admin_discard_quarantine: _ban_lock_and_gate") for b in got), got
+    # A new function that writes the table, in no list.
+    p = src + ('\n\nasync def planted_held_writer(db):\n    await db.execute(text('
+               '"DELETE FROM match_report_quarantine WHERE id = :q"), {"q": None})\n')
+    got = _f1_failures(p)
+    assert "planted_held_writer delete inline1: a statement on the held-report table that the census does not list" \
+        in got, got
+    # The control: the tree as it stands.
+    assert _f1_failures(src) == []
+
+
+def test_seam_r10_the_list_answers_the_receipt_and_the_168_bound_as_the_routes_do(monkeypatch):
+    bound = main._QAPPLY_LOBBY_SETTLED_BEFORE
+
+    async def body(env):
+        # The receipt: credited, then set back to pending by hand (the C3 case); both routes answer
+        # credited_before, and so does the list.
+        lob, qid = await closed_held(env)
+        await later_for(env, lob)
+        assert (await credit(env, qid)).status == 200
+        await env.conn.execute("UPDATE match_report_quarantine SET status = 'pending', reviewed_at = NULL"
+                               " WHERE id = $1", uuid.UUID(qid))
+        v = (await listing(env))[qid]
+        assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+            False, T["credited_before"], False), ("R10 the list reads the receipt", v)
+        before = await tables(env)
+        for act in (accept, credit):   # F3a: both routes' refusals, status and sentence
+            ans = await act(env, qid)
+            assert (ans.status, ans.body) == (409, T["credited_before"]), ("R10 the route agrees", act.__name__, ans)
+        assert await tables(env) == before, "R10 the receipt's refusals wrote nothing"
+        # The 168 bound: a lobby made a second before it; both routes answer 410, the list says no.
+        for arm in ("accept", "credit"):
+            lob, qid = await closed_held(env)
+            if arm == "credit":
+                await later_for(env, lob)
+            await env.conn.execute("UPDATE ffa_lobbies SET created_at = $2 WHERE id = $1",
+                                   lob.lid, bound - _dt.timedelta(seconds=1))
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["settled_by_hand"], False), ("R10 the list reads the 168 bound", arm, v)
+            # F3a: both routes refuse the lobby before the bound, BEFORE any restore of its date.
+            before = await tables(env)
+            for act in (accept, credit):
+                ans = await act(env, qid)
+                assert (ans.status, ans.body) == (410, T["settled_by_hand"]), (
+                    "F3a the route refuses a lobby before the 168 bound", arm, act.__name__, ans)
+            assert await tables(env) == before and await status_of(env, qid) == "pending", ("F3a nothing written", arm)
+            # The control: the same lobby made AT the bound; the list allows what the route does.
+            await env.conn.execute("UPDATE ffa_lobbies SET created_at = $2 WHERE id = $1", lob.lid, bound)
+            v = (await listing(env))[qid]
+            assert v["can_accept" if arm == "accept" else "can_credit"] is True, ("R10 control", arm, v)
+            assert (await (accept if arm == "accept" else credit)(env, qid)).status == 200, ("R10 control route", arm)
+    run_env(monkeypatch, body)
+
+
+# ── STACK-SEAM-1 R1-FIX: the database checks of F1d, F2b and F4b ──────────
+
+async def _seam_hold_shared(env, key, act, qid):
+    """F1d: hold `key`'s identity lock SHARED in a session of its own (the mode the report route's ban
+    read and the other action take) while the action runs; (answer, elapsed)."""
+    async with env.sm() as s:
+        await s.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:s AS text)))"), {"s": key})
+        try:
+            return await asyncio.wait_for(_timed(act, env, qid), main._QAPPLY_DEADLINE_S + 4.0)
+        finally:
+            await s.rollback()
+
+
+def test_seam_f1d_a_shared_holder_of_the_same_key_stops_neither_action(monkeypatch):
+    """F1d (the second half of B8). Another session holds a listed player's identity key SHARED while each
+    action runs. Each action takes the same key shared in its ordered pass, so it completes inside its
+    bounds: 200, in less than the lock bound. (test_seam_r4 holds the key EXCLUSIVE, the ban core's mode,
+    and each action waits and answers busy; this check tells the two modes apart.)"""
+    async def body(env):
+        bound = main._QAPPLY_LOCK_TIMEOUT_MS / 1000.0
+        lob, qid = await closed_held(env)
+        await later_for(env, lob)
+        ans, took = await _seam_hold_shared(env, lob.sids[1], credit, qid)
+        print("SEAM F1d credit", ans.status, "%.3f s" % took)
+        assert ans.status == 200 and took < bound, ("F1d credit completes beside a shared holder", ans, took)
+        lob, qid = await closed_held(env)
+        ans, took = await _seam_hold_shared(env, lob.sids[1], accept, qid)
+        print("SEAM F1d accept", ans.status, "%.3f s" % took)
+        assert ans.status == 200 and took < bound, ("F1d accept completes beside a shared holder", ans, took)
+    run_env(monkeypatch, body)
+
+
+def test_seam_f2b_the_seat_rules_statement_is_the_routes_own():
+    """F2b: the verdict's seat read runs _asm_report_rules' own first statement, character for character."""
+    fn = _tree_fn("_asm_report_rules")
+    first = min((n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "text"), key=lambda n: (n.lineno, n.col_offset))
+    assert first.args[0].value == main._QAPPLY_SQL_ASM_SEATS, (first.args[0].value, main._QAPPLY_SQL_ASM_SEATS)
+    calls = {n.func.id for n in ast.walk(_tree_fn("_qapply_verdict")) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)}
+    assert "_qapply_reporter_refused" in calls
+
+
+def test_seam_f2b_the_list_reads_the_seat_rules_reporter_refusal(monkeypatch):
+    """F2b. A closed assembly lobby's held report whose reporter was admitted late: in the accept arm
+    (Accept's gate open) and the credit arm (a later game: Accept blocked, Credit's case) the list says
+    can_accept and can_credit false with the routes' sentence, and the route of the arm refuses the same
+    sentence, writing nothing. The control: the same reporter admitted at the start reads true and the
+    route of the arm answers 200."""
+    async def body(env):
+        for arm in ("accept", "credit"):
+            lob = await played(env)
+            await close(env, lob)
+            qid = await held(env, lob, 2)
+            if arm == "credit":
+                await later_for(env, lob)
+            rep = await env.conn.fetchval(
+                "SELECT payload->>'reported_by_steam_id' FROM match_report_quarantine WHERE id = $1", uuid.UUID(qid))
+            rpid = lob.pids[lob.sids.index(rep)]
+            await env.conn.execute("UPDATE ffa_lobbies SET assembly_v1 = true WHERE id = $1", lob.lid)
+            await env.conn.execute("UPDATE ffa_assembly_seats SET late_admitted_at = clock_timestamp()"
+                                   " WHERE lobby_id = $1 AND player_id = $2", lob.lid, rpid)
+            act, other = (accept, credit) if arm == "accept" else (credit, accept)
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["reporter"], False), ("F2b the list reads the seat rules", arm, v)
+            before = await tables(env)
+            ans = await act(env, qid)
+            assert ans.status >= 400 and ans.body == T["reporter"], ("F2b the route refuses the reporter", arm, ans)
+            assert (await other(env, qid)).status >= 400, ("F2b the other action refuses too", arm)
+            assert await tables(env) == before and await status_of(env, qid) == "pending", ("F2b nothing written", arm)
+            # The control: the reporter admitted at the start.
+            await env.conn.execute("UPDATE ffa_assembly_seats SET late_admitted_at = NULL"
+                                   " WHERE lobby_id = $1 AND player_id = $2", lob.lid, rpid)
+            v = (await listing(env))[qid]
+            assert v["can_accept" if arm == "accept" else "can_credit"] is True, ("F2b control: the list", arm, v)
+            ans = await act(env, qid)
+            assert ans.status == 200, ("F2b control: the route", arm, ans)
+    run_env(monkeypatch, body)
+
+
+def test_seam_f4_a_forced_timeout_of_pair_rows_ends_only_its_own_sessions(monkeypatch):
+    """F4b. A bystander connection of the same database holds an open transaction (as a session of another
+    case would, in its own schema). _pair_rows is forced past its wait (0.5 s, the lobby's row held so both
+    actions stay queued): it fails by name, having ended only those of its own sessions still open (the
+    cancelled actions usually close theirs first, so its count may be 0); the bystander's session and its
+    open transaction survive."""
+    import re as _re
+
+    async def body(env):
+        lob, qa, qb = await siblings(env, 2)
+        await later_for(env, lob)
+        by = await cf_pg._asyncpg.connect(cf_pg.DSN or _DSN)
+        try:
+            assert await by.fetchval("SELECT current_database()") == await env.conn.fetchval(
+                "SELECT current_database()"), "F4b fixture: one database"
+            tr = by.transaction()
+            await tr.start()
+            bpid = await by.fetchval("SELECT pg_backend_pid()")
+            await by.fetchval("SELECT txid_current()")
+            with pytest.raises(pytest.fail.Exception) as got:
+                await _pair_rows(env, lob, (credit, qa), (credit, qb), release=False, wait=0.5)
+            m = _re.search(r"outlasted the helper's wait of 0\.5 s \((\d+) open session\(s\) ended\)", str(got.value))
+            assert m, ("F4b the helper fails by name at its forced wait", str(got.value))
+            try:
+                alive = (await asyncio.wait_for(by.fetchval("SELECT pg_backend_pid()"), 5.0) == bpid
+                         and by.is_in_transaction())
+            except Exception as ex:
+                alive = type(ex).__name__
+            assert alive is True, ("F4b the bystander's session and its open transaction survive", alive)
+            await tr.rollback()
+        finally:
+            by.terminate()
     run_env(monkeypatch, body)
