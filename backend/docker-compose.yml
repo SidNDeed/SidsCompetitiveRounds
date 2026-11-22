@@ -134,6 +134,13 @@ services:
       # health word reads paused:env); unset or anything else runs it. Named
       # here so a value in .env reaches the process at all (#438/#443).
       PC_STEAM_SWEEP: ${PC_STEAM_SWEEP:-}
+      # SCR_ALT_SIGNAL_KEY: the key (64 hex digits) of the one-way codes the
+      # api may record at a verified sign-in (api/alt_signals.py). Unset,
+      # empty or malformed, nothing is recorded and /health's alt_signals_key
+      # says "absent" or "refused". The api alone gets it; the bot never
+      # reads it (#438/#443: nothing reaches the process unless it is named
+      # here).
+      SCR_ALT_SIGNAL_KEY: ${SCR_ALT_SIGNAL_KEY:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`

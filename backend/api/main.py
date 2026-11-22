@@ -8109,6 +8109,17 @@ _QAPPLY_BUILD = 1
 # constant, equal on both boxes by construction, probed by the release train
 # and read by nothing else (#306). Absent on any build before it.
 _BOT_TEXT_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of CHEAT-ALT-1, in which a verified sign-in may record the
+# alternate-account signals while a signal key is loaded, account deletion
+# deletes them, and the retention pass deletes each row no later than its
+# deadline on the primary. Reported on /health as `alt_signals_build`, beside
+# `alt_signals_key` (alt_signals.key_word(): 'absent', 'refused' or the key
+# id, never the key). It names build identity only; the lane adds no route
+# (learnings 780, 794). A code constant, equal on both boxes by construction,
+# probed by the release train and read by nothing else (#306). Absent on any
+# build before it.
+_ALT_SIGNALS_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8202,6 +8213,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
+                              alt_signals_build=_ALT_SIGNALS_BUILD,
+                              alt_signals_key=_alt_signals.key_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -8280,6 +8293,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
+                              alt_signals_build=_ALT_SIGNALS_BUILD,
+                              alt_signals_key=_alt_signals.key_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),

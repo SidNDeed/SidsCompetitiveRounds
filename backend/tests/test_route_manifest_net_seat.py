@@ -1864,7 +1864,17 @@ def test_the_helper_closure_stays_affordable():
     # route reads in both arms; no other code binding of that closure is new.
     # The bound moves to 600, the measured value, for that reason and no
     # other.
-    assert code_worst <= 600, f"worst code closure {code_worst} of {total}"
+    # CHEAT-ALT-1 (2026-11-22), the sign-in records' health keys, on the base
+    # edfbc7f5: 603 measured at GET /api/v1/health (600 at edfbc7f5, the
+    # same walk over that tree): +3 by name, main._ALT_SIGNALS_BUILD, the
+    # lane's build marker, and alt_signals.key_word with the _INSTALLED state
+    # it reads, the key word; both arms read them. No other code binding of
+    # that closure is new, and no route reaches the lane's module by name:
+    # alt_signals.py binds no name another api module spells, which
+    # test_alt_signals_pure.py holds. The bound moves to 603, the measured
+    # value, for that reason and no other. The other five bounds hold (code
+    # 86 / 228, whole 242 / 423 / 868 over 438 routes).
+    assert code_worst <= 603, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
