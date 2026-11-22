@@ -2400,6 +2400,15 @@ def _sink_patch(monkeypatch):
     monkeypatch.setattr(main, "_check_steam_session", _no_session)
     monkeypatch.setattr(main, "_ovt_podium_ids", _no_podium)
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SINK_HMAC)
+    # The sink reads the podium through _ovt_podium_ids_for_award, which stays
+    # real: it calls the stand-in above and then answers from the cache's own
+    # `refresh_failed` and `ids`, which the stand-in never sets. So the cache
+    # is put in the state the stand-in describes -- a completed read that
+    # found nobody -- instead of whatever an earlier test in the process left
+    # there, and monkeypatch puts every key back afterwards.
+    for key, value in (("ids", []), ("ok", True), ("at", time.monotonic()),
+                       ("refresh_failed", False)):
+        monkeypatch.setitem(main._ovt_podium_cache, key, value)
 
 
 async def _submit(factory, report):

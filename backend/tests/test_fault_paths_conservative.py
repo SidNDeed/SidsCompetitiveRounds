@@ -19,7 +19,9 @@ Each closure here has a mutation control recorded in the round's notes: the
 closure was reverted with a one-line edit, the test named in the comment was
 re-run and observed RED, and the closure was restored.
 """
+import ast
 import asyncio
+import copy
 import re
 from pathlib import Path
 
@@ -35,6 +37,102 @@ SRC = (API / "main.py").read_text(encoding="utf-8")
 
 def run(coro):
     return asyncio.run(coro)
+
+
+# ── main's process caches: every test puts back what it changed ──────────
+
+# Every value of the main module that a test here assigns, directly or through
+# a helper such as _warm_podium, or that main itself assigns when a test here
+# faults a refresh. They are process-wide caches, so a value left behind is
+# read by whatever test runs next in the same process: a faulted 1v2 podium
+# refresh leaves `refresh_failed` True, and a later test that drives the 1v2
+# report sink is then refused with 503 podium_unavailable.
+# test_every_main_value_this_file_writes_is_restored keeps this list whole.
+_MAIN_STATE = (
+    "_podium_cache",
+    "_ovt_podium_cache",
+    "_rank_colors_cache",
+    "_service_player_uuid_cache",
+    "_service_uuid_cache_monotonic",
+    "_service_uuid_cache_filled_monotonic",
+)
+
+
+@pytest.fixture(autouse=True)
+def _main_state_restored():
+    """Save each value whole before the test and put it back after it. A
+    dict is restored in place, so the object main's functions name stays the
+    one they read; any other value is rebound."""
+    objects = {name: getattr(main, name) for name in _MAIN_STATE}
+    saved = {name: copy.deepcopy(value) for name, value in objects.items()}
+    try:
+        yield
+    finally:
+        for name in _MAIN_STATE:
+            obj, before = objects[name], saved[name]
+            if isinstance(obj, dict):
+                obj.clear()
+                obj.update(before)
+                setattr(main, name, obj)
+            else:
+                setattr(main, name, before)
+
+
+_MUTATING_METHODS = {"clear", "update", "pop", "popitem", "setdefault",
+                     "append", "extend", "add", "discard", "remove"}
+
+
+def _main_attr_root(node):
+    """`main.X`, `main.X[...]` or `main.X[...][...]` -> "X"; else None."""
+    while isinstance(node, ast.Subscript):
+        node = node.value
+    if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id == "main"):
+        return node.attr
+    return None
+
+
+def _main_values_written(source):
+    """Every main attribute this source assigns, deletes, mutates in place by
+    a method call, or hands to a helper defined in the same source."""
+    tree = ast.parse(source)
+    helpers = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    written = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        elif isinstance(node, ast.Delete):
+            targets = node.targets
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in helpers:
+            targets = node.args
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in _MUTATING_METHODS:
+            targets = [node.func.value]
+        else:
+            continue
+        for target in targets:
+            name = _main_attr_root(target)
+            if name is not None:
+                written.add(name)
+    return written
+
+
+def test_every_main_value_this_file_writes_is_restored():
+    """A test added here that writes another main value must add it to
+    _MAIN_STATE, or this fails. Negative control: the scanner finds a write
+    in a sample that has one, and none in a sample that only reads."""
+    assert _main_values_written(
+        "def h(c):\n    c['k'] = 1\n"
+        "def t():\n    main._a = 1\n    main._b['k'] = 2\n"
+        "    main._c.clear()\n    h(main._d)\n    x = main._e['k']\n"
+    ) == {"_a", "_b", "_c", "_d"}
+    written = _main_values_written(Path(__file__).read_text(encoding="utf-8"))
+    assert written == set(_MAIN_STATE), (
+        "main values written here but not restored, or listed but no longer "
+        "written: %r" % (written ^ set(_MAIN_STATE)))
 
 
 # ── the emulated session ─────────────────────────────────────────────────
