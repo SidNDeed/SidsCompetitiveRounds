@@ -1137,7 +1137,11 @@ def test_the_outer_bound_leaves_room_for_the_tools_own_slack():
     for name in ("VERB_SLACK_S", "VERB_KILL_AFTER_S", "REPORT_SLACK_S", "timeout -s TERM -k",
                  "THE ABSOLUTE BOUND of a run is the server verb's outer time limit",
                  "can therefore run for one statement timeout more",
-                 "A kill before the one write leaves nothing"):
+                 "A kill before the one write leaves nothing",
+                 # [3] ACCEPTED SMALL RISK, the order's sentence word for word
+                 "Only a process that can write the rules directory can replace the named "
+                 "directory during a run; the tool then lists the other directory and the load "
+                 "refuses, so no count of another revision is printed."):
         assert name in doc, name
 
 
