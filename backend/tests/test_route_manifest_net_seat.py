@@ -1894,6 +1894,13 @@ def test_the_helper_closure_stays_affordable():
     # reason and no other. The median (87 against 87) and p90 (230 against
     # 239) bounds stay, and so do the three bounds of the whole closure (244
     # against 245, 425 against 425, 867 against 897 at the health route).
+    # LFP-CASUAL-1 (2026-11-22), its build marker on top of a755b6a4: 601
+    # measured at GET /api/v1/health (600 at a755b6a4, the same walk over that
+    # tree): +1 by name, main._LFP_CASUAL_BUILD, which the health route reads
+    # in both arms; the two trees' reached sets are otherwise equal by name.
+    # The bound moves to 601, the measured value, for that reason and no
+    # other.
+    # The merged tree's value is measured and set in the lane's closing commit.
     assert code_worst <= 603, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.

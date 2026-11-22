@@ -303,6 +303,11 @@ ROW_SERIALIZED = {
     ("main", "_moderation_case_act"): (
         1, "the actor's read, under the EXCLUSIVE identity key _mail_lock_identities took just "
            "before (actor and subject in one ordered pass), before its first write"),
+    # STACK-SEAM-1 (R3): the held-report list's read form.
+    ("main", "_qapply_verdict"): (
+        1, "the held-report list's and digest's advisory read form (log=False): it takes no key and "
+           "writes nothing; Accept and Credit read the same bans again under the shared identity keys "
+           "(_ban_lock_and_gate, the body's call and Credit's) before their first write"),
 }
 # A row lock written before a locking-helper call in the same function, on a
 # table the ban core never locks.
