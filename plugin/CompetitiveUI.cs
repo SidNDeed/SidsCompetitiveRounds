@@ -1981,7 +1981,7 @@ namespace CompetitiveRounds
         // Message box + expiry picker. The LfpPromptOpen flag is in BOTH the
         // anyModal set (uGUI + ClickHandler blocking, learning #141) and the
         // DrawChatInput guard (typing 't' must not open chat).
-        private static GUIStyle lfpFieldStyle, lfpTitleStyle;
+        private static GUIStyle lfpFieldStyle, lfpTitleStyle, lfpWarnStyle;
         private const string LFP_MSG_CTRL = "LfpMsgField";
         private static void DrawLfpPrompt()
         {
@@ -2002,7 +2002,11 @@ namespace CompetitiveRounds
                     lfpTitleStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, alignment = TextAnchor.MiddleCenter, richText = true, fontStyle = FontStyle.Bold, clipping = TextClipping.Overflow };
                 // Aug 7 item 11: +48px for the mode row; Send/Cancel shift down
                 // with it (absolute-offset IMGUI — grow the box or overlap, #199).
-                float w = 520f, h = 256f;
+                // LFP-CASUAL-1 review round 1: +32px for the standing refusal
+                // line under the mode row; the box keeps one size either way.
+                if (lfpWarnStyle == null)
+                    lfpWarnStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, alignment = TextAnchor.MiddleCenter, richText = true, fontStyle = FontStyle.Bold, wordWrap = true };
+                float w = 520f, h = 288f;
                 float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
                 GUI.color = new Color(0f, 0f, 0f, 0.55f);
                 GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
@@ -2045,9 +2049,15 @@ namespace CompetitiveRounds
                     if (GUI.Button(new Rect(mbx + i * (bw + 8f), y + 166f, bw, 26f), NativeUI.LfpModeLabel(i), lfpTitleStyle))
                         NativeUI.LfpModeSel[i] = !NativeUI.LfpModeSel[i];
                 }
-                if (GUI.Button(new Rect(x + 60f, y + 204f, 180f, 32f), I18n.Tr("Send ping")))
+                // The refusal of a ranked pick while ranked is off, drawn by the
+                // prompt itself every frame the condition holds: it does not rest
+                // on the notification slot (which can be off or taken).
+                if (NativeUI.LfpRankedPickRefused())
+                    GUI.Label(new Rect(x + 16f, y + 198f, w - 32f, 32f),
+                        "<color=#FFCC4D>" + I18n.Tr("Ranked is off - only the Casual ping can be sent. Untick the ranked modes, or press Enable on the RANKED row first.") + "</color>", lfpWarnStyle);
+                if (GUI.Button(new Rect(x + 60f, y + 236f, 180f, 32f), I18n.Tr("Send ping")))
                     NativeUI.SubmitLfpPing();
-                if (GUI.Button(new Rect(x + w - 240f, y + 204f, 180f, 32f), I18n.Tr("Cancel")))
+                if (GUI.Button(new Rect(x + w - 240f, y + 236f, 180f, 32f), I18n.Tr("Cancel")))
                     NativeUI.CancelLfpPing();
             }
             catch { }
