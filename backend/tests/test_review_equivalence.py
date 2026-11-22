@@ -208,6 +208,14 @@ def _ruleset():
     return rr.load_dir(_p("revision"))
 
 
+def _old_kind_ids(rs):
+    """The revision's rules the old worker had a kind for: its game and
+    sitting rules. A revision may also hold card, identity and combat rules,
+    which the old worker never had; the rule map covers the game and sitting
+    rules exactly, and the oracle judges nothing else."""
+    return {r.id for r in rs.rules if r.scope in ("game", "sitting")}
+
+
 class OracleRefused(AssertionError):
     """The old worker's source is not the bound one."""
 
@@ -313,11 +321,11 @@ def _expected_by_rule(kindmap, expected_game):
     return {kindmap[k]: v for k, v in expected_game.items()}
 
 
-def test_a16_the_rule_map_is_one_to_one_and_covers_the_revision():
+def test_a16_the_rule_map_is_one_to_one_and_covers_the_game_and_sitting_rules():
     rs = _ruleset()
     kindmap = _json("kindmap")
     assert len(set(kindmap.values())) == len(kindmap)
-    assert set(kindmap.values()) == {r.id for r in rs.rules}
+    assert set(kindmap.values()) == _old_kind_ids(rs)
 
 
 def test_a16_games_reproduce_the_reference_items_and_text():
@@ -357,7 +365,8 @@ def test_a16_posting_matches_the_reference_arming():
     kindmap = _json("kindmap")
     posting = _oracle()["posting"]
     assert set(posting) == set(kindmap)
-    assert {kindmap[k]: v for k, v in posting.items()} == {r.id: r.post for r in rs.rules}
+    old = _old_kind_ids(rs)
+    assert {kindmap[k]: v for k, v in posting.items()} == {r.id: r.post for r in rs.rules if r.id in old}
 
 
 def _mutant(rs, m, kindmap):
@@ -371,7 +380,9 @@ def _mutant(rs, m, kindmap):
         node = node[key]
     assert node[m["path"][-1]] != m["value"], "a mutation must change a value"
     node[m["path"][-1]] = m["value"]
-    out = rr.compile_rules(doc, rr._Binder(doc["vocabulary"]), {})
+    # The loaded revision's own data tables: a rule that reads one compiles
+    # only beside it, and a mutant must compile as its revision does.
+    out = rr.compile_rules(doc, rr._Binder(doc["vocabulary"]), rs.data)
     out.rev = "mutant"
     return out
 
@@ -596,7 +607,8 @@ async def _sitting_run(muts=()):
                 "INSERT INTO matches (%s, ended_at, created_at, invalidated_at) VALUES (%s, "
                 "date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' "
                 " - make_interval(days => $%d) + make_interval(hours => $%d) + make_interval(mins => $%d), "
-                "now(), CASE WHEN $%d THEN now() END)" % (cols, ph, n + 1, n + 2, n + 3, n + 4),
+                "now(), CASE WHEN $%d THEN now() END)"
+                % (cols, ph, n + 1, n + 2, n + 3, n + 4),
                 *vals, r["days_ago"], ROW_HOUR, r["minute"], r["invalidated"])
         await _check_placement(conn, fx["rows"])
         # the worker's dirty set over the OLD candidate window only: the same
