@@ -515,6 +515,10 @@ def test_pg_qdig_d1_adds_keys_that_carry_names_and_no_ids(monkeypatch):
     assert [p["name"] for p in c2["players"]] == ["Ash", "Birch", "Cedar", "Dune", "Elm", "Fern"]
     assert c2["winner_name"] == "Dune" and c2["reporter_name"] == "Ash" and c2["game_number"] == 2
     assert d["rows"][2]["game_key"] == d["rows"][3]["game_key"] != d["rows"][4]["game_key"]
+    # D1's accept keys are the list's verdict (_qapply_verdict) for every row;
+    # None is the feed's word for a verdict that was never reached.
+    for r in d["rows"]:
+        assert r["can_accept"] is not None, (r["id"], r["accept_blocked_reason"])
 
 
 def test_pg_qdig_both_bots_read_the_real_answer(monkeypatch):
@@ -587,6 +591,10 @@ def test_pg_qdig_the_admin_lists_strings(monkeypatch):
         assert set(r) == ADMIN_KEYS
         assert len(r["reason"]) <= 140 and len(r["score"]) <= 64
         assert r["can_accept"] is False
+    # Every row of both listings carries the verdict, never the sentence of a
+    # check that failed: a refused statement must not pass as "not accepted".
+    for r in rep + rostered["reports"]:
+        assert r["accept_blocked_reason"] != main.QDIG_ELIGIBILITY_FAILED, r["id"]
     c2 = rep[1]
     assert c2["reason"] == ("The lobby had already been closed when this report arrived, so the game was "
                             "never recorded. [lobby_completed]")

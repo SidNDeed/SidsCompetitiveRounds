@@ -50252,8 +50252,8 @@ async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=No
 # Bans part 2a (F1 b): the ONE place that says which records no writer may pay.
 # A series or an unstarted FFA lobby the ban void ended carries one of these
 # reasons (_ban_void_apply); a played FFA lobby it completed carries its close
-# record instead. Series writers read the reason; the held-report actions read
-# both (_ffa_lobby_ended_by_ban, test_seam_r2), also after the ban has run out.
+# record instead. Series writers read the reason; the held-report actions read both (_ffa_lobby_ended_by_ban,
+# test_seam_r2_both_actions_refuse_a_lobby_the_ban_void_ended), also after the ban is lifted.
 BAN_VOID_REASONS = frozenset({"member_banned", "member_banned_played"})
 
 
@@ -75833,16 +75833,16 @@ def _quarantine_accept_verdict(results: int, players: int) -> tuple:
 # readmission lobbies, and write their moderator record through
 # _modlog_write in the same transaction as their effects.
 #
-# THE LOCK ORDER: the held row (FOR UPDATE), the identity keys of the report's reporter and players (shared,
-# one ordered pass by _ban_lock_and_gate, before any row the ban core locks), the lobby (FOR NO KEY UPDATE), the
-# players rows in str(id) order (FOR NO KEY UPDATE), then, under Accept only, their glicko_ratings_ffa rows in
-# that order (FOR UPDATE). What makes it safe is ONE invariant: NO transaction requests a lock on an EXISTING held
-# row (table match_report_quarantine) while it holds an identity key or a lock on a row the ban core locks, except
-# the two actions' own finishing UPDATE of the row they already hold (test_seam_f1's census). The paths: the
-# discard route, the janitor's filing (SKIP LOCKED) and the bot's digest acknowledgement lock or write held rows
-# with no key or other row lock before; the list, triage and digest reads lock none; the ban core locks none; the
-# capture (_quarantine_report) INSERTS new rows under the group's advisory lock (outside a journal window after a
-# rollback; inside one holding identity keys, the settle writer's ban read): ON CONFLICT DO NOTHING or no key.
+# THE LOCK ORDER: the held row (FOR UPDATE), the identity keys of the report's reporter and players (shared, one ordered
+# pass by _ban_lock_and_gate, before any row the ban core locks), the lobby (FOR NO KEY UPDATE), the players rows in str(id)
+# order (FOR NO KEY UPDATE), then, under Accept only, their glicko_ratings_ffa rows in that order (FOR UPDATE). What makes
+# it safe is ONE invariant: NO transaction requests a lock on an EXISTING held row (table match_report_quarantine) while it
+# holds an identity key or a lock on a row the ban core locks, except the two actions' own finishing UPDATE of the row they
+# already hold (test_seam_f1_no_held_row_lock_after_an_identity_key_or_a_ban_core_row_lock). The paths: the discard route,
+# the janitor's filing (SKIP LOCKED) and the bot's digest acknowledgement lock or write held rows with no key or other row
+# lock before; the list, triage and digest reads lock none; the ban core locks none; the capture (_quarantine_report)
+# INSERTS new rows under the group's advisory lock (outside a journal window after a rollback; inside one holding identity
+# keys, the settle writer's ban read): ON CONFLICT DO NOTHING or no key.
 
 # The reason words both actions serve; every other word, a word added later
 # included, is refused and the row stays held.
@@ -87279,7 +87279,7 @@ def _qapply_same_lobby(report, row) -> bool:
 
 
 # STACK-SEAM-1 R1-FIX (F2b): the seat rules' reporter refusals in the list's read form. The statement is
-# _asm_report_rules' own first statement, character for character (test_seam_f2b's static check).
+# _asm_report_rules' own first statement, character for character (test_seam_f2b_the_seat_rules_statement_is_the_routes_own).
 _QAPPLY_SQL_ASM_SEATS = (
     "SELECT p.steam_id, s.slot, s.start_roster, s.late_admitted_at, s.late_game,"
     "       s.late_body_game, s.gone_game, s.lag_games"
