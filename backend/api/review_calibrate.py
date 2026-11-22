@@ -66,8 +66,8 @@ read included. When two or more matches tie for the canonical one (they end
 at the same instant), the choice is AMBIGUOUS: the tool does not choose. A
 read game whose canonical match ended at or before the cutoff is counted as
 `outside`, tied or not. A tied game whose canonical match ended after the
-cutoff is counted on the ambiguous line (cohort: apart, not a member) and in
-no other count.
+cutoff is counted on the ambiguous line
+(cohort: apart, not a member).
 
 HOW A COUNT DIFFERS FROM THE PASSES'. A count here is not a pass's count:
 
@@ -140,11 +140,11 @@ When every step yields, the report is out by the deadline plus
 REPORT_SLACK_S: a cancelled task that has not ended CANCEL_SLACK_S after the
 deadline is abandoned, the engine's disposal is waited for at most
 CLOSE_SLACK_S (a disposal that has not ended by then, one that does not
-honour its cancellation included, is asked once to cancel and abandoned
+honour its cancellation included, is asked to cancel and abandoned
 unfinished), and one second is left for the rest.
 THE STATEMENTS: each statement is bounded by the statement_timeout given at
 startup: the whole seconds left of the deadline when the run builds its
-session factory (once per run, in every run kind, before its first
+session factory (in every run kind, before its first
 connection), rounded up (never more than the deadline);
 idle_in_transaction_session_timeout is the same. The server counts a
 statement's timeout from that statement's own start, and the tool gives
@@ -173,8 +173,8 @@ connects, every process-environment variable its connect-parameter parser
 reads (_DRIVER_ENV) is removed, and put back once it returns: none of them
 shapes the connection. A target session attribute of `standby` planted in
 the process environment does not stop the tool's connection to a primary.
-A DECLARED LIMIT: the driver also reads files at its own default places for
-the platform (_DRIVER_HOME_FILES: .pgpass, pgpass.conf, .pg_service.conf,
+A DECLARED LIMIT: the driver also reads files at its own default places
+(_DRIVER_HOME_FILES: .pgpass, pgpass.conf,
 postgresql.crt, postgresql.key, root.crt, root.crl); the tool does not
 control them. The startup parameters are default_transaction_read_only=on,
 default_transaction_isolation=repeatable read, statement_timeout,
@@ -473,9 +473,9 @@ _DRIVER_ENV = ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGPASS
                "PGSSLCRL", "PGSSLKEY", "PGSSLCERT", "PGSSLMINPROTOCOLVERSION",
                "PGSSLMAXPROTOCOLVERSION", "PGTARGETSESSIONATTRS", "PGKRBSRVNAME", "PGGSSLIB",
                "SSLKEYLOGFILE")
-# The files the driver reads at its own default places for the platform: a
+# The files the driver reads at its own default places: a
 # declared limit of the module text, not controlled by the tool.
-_DRIVER_HOME_FILES = (".pgpass", "pgpass.conf", ".pg_service.conf", "postgresql.crt",
+_DRIVER_HOME_FILES = (".pgpass", "pgpass.conf", "postgresql.crt",
                       "postgresql.key", "root.crt", "root.crl")
 
 
@@ -1296,7 +1296,7 @@ def _remaining_s(deadline_at) -> int:
 async def _dispose(engine):
     """The engine's disposal, waited for at most CLOSE_SLACK_S. One that has
     not ended by then (one that does not honour its cancellation included)
-    is asked once to cancel and ABANDONED unfinished."""
+    is asked to cancel and ABANDONED unfinished."""
     try:
         task = asyncio.ensure_future(engine.dispose())
         done, _pending = await asyncio.wait({task}, timeout=CLOSE_SLACK_S)

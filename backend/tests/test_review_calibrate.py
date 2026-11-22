@@ -1262,7 +1262,7 @@ def test_the_drivers_environment_list_holds_every_variable_and_file_its_connect_
     driver's own source: every environment variable asyncpg's
     connect-parameter parser reads is in _DRIVER_ENV, and every environment
     access there has the read form counted; every file name it passes to its
-    .postgresql path helper or names as the password or service file is in
+    .postgresql path helper or names as the password file is in
     _DRIVER_HOME_FILES, which the module text names as a declared limit.
     The places where the connect module and the platform module build a path
     from the home directory or an application data directory are counted by
@@ -1284,7 +1284,7 @@ def test_the_drivers_environment_list_holds_every_variable_and_file_its_connect_
     assert len(re.findall(r"\bos\.(?:getenv|environ)\b", src)) == len(_ENV_READ.findall(src))
     assert names and names <= set(rc._DRIVER_ENV), sorted(names - set(rc._DRIVER_ENV))
     files = set(re.findall(r"""_dot_postgresql_path\(\s*['"]([^'"]+)['"]""", src))
-    files |= set(re.findall(r"""^\s*(?:PGPASSFILE|PG_SERVICEFILE)\s*=\s*['"]([^'"]+)['"]""", src, re.M))
+    files |= set(re.findall(r"""^\s*PGPASSFILE\s*=\s*['"]([^'"]+)['"]""", src, re.M))
     assert len(re.findall(r"_dot_postgresql_path\(", src)) == 1 + len(
         re.findall(r"""_dot_postgresql_path\(\s*['"]""", src))          # the definition + named calls
     assert files and files <= set(rc._DRIVER_HOME_FILES), sorted(files - set(rc._DRIVER_HOME_FILES))
@@ -1375,7 +1375,7 @@ def test_the_recorder_is_installed_only_in_the_constructor_of_the_connection_cla
     there; _connect hands that class to the driver as connection_class
     whenever a recorder is given (extra = {} if recorder is None else
     {"connection_class": _recording_class(recorder)}, passed as **extra after
-    **args to the driver's one connect call). Any other form is red."""
+    **args to the driver's one connect call). Seen: attribute store, setattr call, object.__setattr__ call."""
     tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
     funcs = {f.name: f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
     stores = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "_protocol"
@@ -1390,7 +1390,7 @@ def test_the_recorder_is_installed_only_in_the_constructor_of_the_connection_cla
     builds = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
               and getattr(n.func, "id", None) == "_RecordingProtocol"]
     assert len(builds) == 1 and builds[0] in list(ast.walk(init[0]))
-    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None)
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func)
                 in ("setattr", "object.__setattr__") and "_protocol" in ast.unparse(n)]
     con = funcs["_connect"]
     extra = [n for n in ast.walk(con) if isinstance(n, ast.Assign)
@@ -1410,7 +1410,7 @@ class _FirstSession(Exception):
 def test_every_run_kind_builds_its_session_factory_once_with_the_seconds_left_before_its_first_connection(
         planted, monkeypatch, mode):
     """[9] (ORDER-R3-FIX-3 G6): in the count run, the cohort run and the check
-    run, the session factory is built once, with the whole seconds left of
+    run, the session factory is built with the whole seconds left of
     the deadline at that moment (rounded up, never more than the deadline),
     and before the run's first connection (a session asked of the factory)."""
     path, _rs = planted
@@ -1456,9 +1456,9 @@ def test_the_outer_bound_leaves_room_for_the_tools_own_slack():
                  "can therefore run for one statement timeout more",
                  "A kill before the one write leaves nothing",
                  # ORDER-R3-FIX-2 F7a, F7d, F4: the sentences as the code gives them
-                 "one that does not honour its cancellation included, is asked once to cancel "
+                 "one that does not honour its cancellation included, is asked to cancel "
                  "and abandoned unfinished",
-                 "the whole seconds left of the deadline when the run builds its session factory",
+                 "builds its session factory (in every run kind, before its first connection)",
                  "the tool gives every statement the full value ON PURPOSE",
                  "a statement that starts late, when most of the deadline is gone, still has its "
                  "whole statement timeout",
