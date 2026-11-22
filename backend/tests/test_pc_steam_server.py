@@ -1023,7 +1023,16 @@ _NEW = (True, True, False, ["marker at the new value"])
 _UNKNOWN = (True, False, False, ["one marker old and one new"])
 _DOWN = (False, False, True, ["control answered 503"])
 _TRAILER = "\n\nCo-Authored-By: A Test <test@example.invalid>"
+UNKNOWN_COMMIT_SHA = "f" * 40   # HEAD after a commit whose message is not a text the train derives
 _DROP = object()
+
+
+def _rt_committed_text(message):
+    """The whole text a commit of the train must hand git: the derived message, the trailer after it, the last
+    line completed as `git commit -m` completes it. Written here and not read from the train, so a train that
+    drops or changes any part of it makes a commit that no check recognises."""
+    text = message + _TRAILER
+    return text if text.endswith("\n") else text + "\n"
 
 
 def _rt_done(kw, stdout, stderr="", rc=0):
@@ -1090,6 +1099,7 @@ class _RtWorld:
     def __init__(self, rt):
         self.rt = rt
         self.calls = []
+        self.commits = []
         self.deployed = {}
         self.head = "0" * 40
         self.branch_tip = rt.REVIEWED_TIP or "e" * 40
@@ -1109,9 +1119,23 @@ class _RtWorld:
         c = list(cmd)
         self.calls.append(("run",) + tuple(c[:4]))
         out = None
-        if c[:2] == ["git", "rev-parse"]:
+        # CMDLINE-REST 2a: what phase 4 reads before it acts, answered as a world with no earlier attempt: main
+        # checked out, no merge in progress, main a commit with one parent (no merge of the tip)
+        if c[:5] == ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"]:
+            return ("", 1) if want_rc else ""
+        if c[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return ("", 1) if want_rc else ""          # r2: the reviewed tip is not yet in main
+        if c[:4] == ["git", "symbolic-ref", "-q", "HEAD"]:
+            return ("refs/heads/main", 0) if want_rc else "refs/heads/main"
+        if c[:5] == ["git", "rev-list", "--parents", "-n", "1"] and len(c) == 6:
+            out = "%s %s" % (c[5], "9" * 40)
+        elif c[:4] == ["git", "ls-remote", "origin", "refs/heads/main"]:
+            out = "%s\trefs/heads/main" % self.head      # origin's main is main: nothing was pushed by another
+        elif c[:3] in (["git", "diff", "--cached"], ["git", "diff", "--name-only"]):
+            out = ""                                      # CMDLINE-REST 1: nothing staged, main no precursor commit
+        elif c[:2] == ["git", "rev-parse"]:
             ref = c[2]
-            out = {self.rt.BRANCH: self.branch_tip, "HEAD": self.head,
+            out = {self.rt.BRANCH: self.branch_tip, "HEAD": self.head, "refs/heads/main": self.head,
                    "HEAD^2": self.second_parent}.get(ref, "b" * 40 if ":" in ref else None)
         elif c[:3] == ["git", "--no-optional-locks", "status"]:
             out = ""
@@ -1120,6 +1144,11 @@ class _RtWorld:
         if out is None:
             raise AssertionError("a command the stubbed train should not issue: %r" % (c,))
         return (out, 0) if want_rc else out
+
+    def git_out(self, argv, stdin=None, index=None, want_rc=False):
+        # r1 F1: the world reads go through git_out (bytes); answered as run() answers the same command
+        got = self.run(argv, want_rc=want_rc)
+        return (got[0].encode("utf-8"), got[1]) if want_rc else got.encode("utf-8")
 
     def push_address(self, kw):
         """`git remote get-url --push --all origin` as the process call answers it: one line per destination
@@ -1143,9 +1172,23 @@ class _RtWorld:
         return "PLAY RECAP box : ok=9 changed=2 unreachable=0 failed=0"
 
     def git_child(self, lease, argv):
-        self.calls.append(("git",) + tuple(argv[:3]))
+        self.calls.append(("git",) + tuple([a for a in argv if a != "--cleanup=verbatim"][:3]))
         if argv[:2] == ["git", "commit"]:
-            self.head = MERGE_SHA if argv[3].startswith(self.rt.MERGE_MESSAGE) else PRECURSOR_SHA
+            # CMDLINE-1: both commits hand git their message in a file (`git commit -F PATH`), read here at the
+            # call. The message must be the WHOLE text the phase derived; any other form or text moves HEAD to a
+            # sha no check expects, and is recorded in self.commits.
+            text = None
+            rest = [a for a in argv[2:] if a != "--cleanup=verbatim"]
+            if len(rest) == 2 and rest[0] == "-F":
+                with open(rest[1], encoding="utf-8", newline="") as fh:
+                    text = fh.read()
+            self.commits.append((tuple(a for a in argv[2:] if a != "--cleanup=verbatim"), text))
+            if text == _rt_committed_text(self.rt.MERGE_MESSAGE):
+                self.head = MERGE_SHA
+            elif text == _rt_committed_text(self.rt.PRECURSOR_MESSAGE):
+                self.head = PRECURSOR_SHA
+            else:
+                self.head = UNKNOWN_COMMIT_SHA
         return ""
 
     def blocking_child(self, lease, step, argv, kind, timeout=None):
@@ -1174,6 +1217,16 @@ def _rt_world(monkeypatch, rt):
     monkeypatch.setattr(rt, "derive_trailer_suffix", lambda branch: _TRAILER)
     monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
     monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    # CMDLINE-REST 2c: the git form pre-flight is checked on its own; here it is recorded and runs nothing
+    w.preflights = []
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda *a, **kw: w.preflights.append((a, kw)) or [],
+                        raising=False)
+    monkeypatch.setattr(rt, "git_out", w.git_out, raising=False)
+    for name in ("tree_of", "staged_tree", "expected_precursor_tree", "expected_merge_tree"):
+        monkeypatch.setattr(rt, name, lambda *a: "7" * 40, raising=False)
+    monkeypatch.setattr(rt, "prove_before_push", lambda *a, **kw: None, raising=False)   # proved on scratch
+    monkeypatch.setattr(rt, "stored_message", lambda commit: ((w.commits[-1][1] or "").encode("utf-8")
+                                                              if w.commits else b""), raising=False)
     for name in ("assert_control", "assert_route_probes", "assert_health_keys"):
         monkeypatch.setattr(rt, name, lambda *a, **kw: None)
     monkeypatch.setattr(rt, "assert_edge_runs_new_code", lambda: None)
@@ -2423,6 +2476,13 @@ def _seat(monkeypatch, rt, controller=SEAT_CONTROLLER, pve_group=SEAT_PVE_GROUP,
     literals in the train they were in every review bundle built out of it, and
     the scan that was supposed to catch that kept a hand-written needle list
     which did not name them."""
+    if not hasattr(rt, "TRAIN_CONF"):
+        # The nine checks that call this helper pin the train lane's seat file and redaction door (rounds 7 to
+        # 13: TRAIN_CONF, seat_values, redact with its tokens, the one print door, recording). A train without
+        # TRAIN_CONF carries none of them, so each check would fail on a missing name and say nothing of the
+        # train it was handed. A train that has TRAIN_CONF runs them all.
+        pytest.skip("the train under test has no seat file (TRAIN_CONF) and no redaction door; this check "
+                    "pins that mechanism")
     monkeypatch.setattr(rt, "TRAIN_CONF", str(Path(__file__).parent / "no-such-train-conf.json"))
     monkeypatch.setenv("SCR_TRAIN_CONTROLLER", controller)
     monkeypatch.setenv("SCR_TRAIN_PVE_GROUP", pve_group)
@@ -5021,3 +5081,1929 @@ def test_r10_no_unit_test_spawns_a_network_program(_no_network_program):
     done = subprocess.run([_sys.executable, "--version"], capture_output=True)
     assert done.returncode == 0 and _no_network_program == []
 
+
+# ── CMDLINE-1: both commits take their message from a file ────────────────
+# 21 Nov 2026: a 52,440-character merge message on `git commit -m` passed the Windows command-line bound and
+# stopped the code phase after its merge was staged. Both commits now hand git a file (`git commit -F PATH`);
+# the checks below pin the names, the lists, the measure, where the run measures, the file's life under the
+# lease, and both phases on a real repository.
+
+
+def _cmdline_sql_batch(monkeypatch, rt, where):
+    """Bind the newest entry that carries sql (so its precursor commits), every state file under `where`."""
+    for name in list(NEWEST_THREE) + list(reversed(list(rt.BATCHES))):
+        path = _rt_bind(monkeypatch, rt, name, where)
+        if rt.ALL_SQL and rt.REVIEWED_TIP:
+            return name, path
+    pytest.skip("no entry of the train carries sql and a reviewed tip")
+
+
+def _cmdline_units(text):
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def test_cmdline_each_message_file_name_is_its_own_and_the_plan_name_is_the_longest(tmp_path):
+    """message_file_path gives a new name at every call (two calls of one process differ), the commit's kind in
+    it, beside the base it is given; message_file_plan_name, what a plan prints in its place, is longer in UTF-16
+    units than the longest real name (a ten-digit process id, the largest a DWORD holds, and the twelve hex
+    digits of the random part), so a plan never measures a shorter command line than the run."""
+    rt, _src = _release_train()
+    base = str(tmp_path / ("state-%s.json" % "\U0001F600"))
+    assert rt.message_file_path(base).startswith(base + ".merge-message."), rt.message_file_path(base)
+    for kind in ("merge-message", "precursor-message"):
+        a, b = rt.message_file_path(base, kind), rt.message_file_path(base, kind)
+        assert a != b, (a, b)
+        worst = "%s.%s.%d.%s.txt" % (base, kind, 4294967295, "f" * 12)
+        for p in (a, b):
+            assert p.startswith("%s.%s.%d." % (base, kind, os.getpid())) and p.endswith(".txt"), p
+            assert _cmdline_units(p) <= _cmdline_units(worst), (p, worst)
+        plan = rt.message_file_plan_name(base, kind)
+        assert plan.startswith(base + "." + kind + "."), plan
+        assert _cmdline_units(plan) > _cmdline_units(worst), (plan, worst)
+        assert (rt.cmdline_units(["git", "commit", "-F", plan])
+                > rt.cmdline_units(["git", "commit", "-F", worst]))
+
+
+def _cmdline_commit_m_sites(src):
+    """Every list or tuple literal of `src` in which the constant "commit" is directly followed by a constant
+    that hands git its message on the command line (-m, -mTEXT, --message)."""
+    import ast
+    sites = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            vals = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
+            for x, y in zip(vals, vals[1:]):
+                if x == "commit" and isinstance(y, str) and (y.startswith("-m") or y.startswith("--message")):
+                    sites.append(node.lineno)
+    return sites
+
+
+def test_cmdline_the_two_command_lists_are_exact_and_no_commit_puts_its_message_on_the_line(monkeypatch,
+                                                                                              tmp_path):
+    """precursor_cmds and code_cmds, the one builder each phase runs and the run measures, give exactly these
+    lists; and no list in the train's text hands `git commit` a message on the command line."""
+    rt, src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    files = rt.precursor_files()
+    assert files == rt.ALL_SQL + ([rt.ROLLBACK_SQL] if rt.ROLLBACK_SQL and rt.ROLLBACK_SQL not in rt.ALL_SQL
+                                  else [])
+    p = str(tmp_path / "the-message-file.txt")
+    commit = ["git", "commit"] + (["--cleanup=verbatim"] if hasattr(rt, "COMMIT_CLEANUP") else []) + ["-F", p]
+    assert getattr(rt, "COMMIT_CLEANUP", "verbatim") == "verbatim"
+    assert rt.precursor_cmds(files, p) == [
+        ["git", "checkout", "main"],
+        ["git", "pull", "--ff-only"],
+        ["git", "checkout", rt.BRANCH, "--"] + ["backend/sql/" + f for f in files],
+        commit,
+        ["git", "push", "origin", "main"],
+    ]
+    assert rt.code_cmds(p) == [
+        ["git", "checkout", "main"],
+        ["git", "merge", "--no-ff", "--no-commit", rt.BRANCH],
+        commit,
+        ["git", "push", "origin", "main"],
+    ]
+    assert not re.search(r"""["']commit["']\s*,\s*["']-m""", src)
+    assert _cmdline_commit_m_sites(src) == []
+    # the census's own control: it finds a planted list, and it reads the train's commit lists at all
+    assert _cmdline_commit_m_sites('x = ["git", "commit", "-m", msg]\ny = ("commit", "--message=a")\n') == [1, 2]
+    assert (src.count('"commit-file": (_BOTH, ("path",), lambda p: ["git", "commit", "--cleanup=" + COMMIT_CLEANUP, '
+                      '"-F", p]),') == 1 if hasattr(rt, "COMMIT_CLEANUP")
+            else src.count('["git", "commit", "-F", msg_path]') == 2)
+
+
+def test_cmdline_the_measure_is_utf16_units_and_a_line_over_the_bound_is_refused_naming_its_phase():
+    """cmdline_units measures what CreateProcessW measures: the UTF-16 units of the line subprocess builds (N
+    characters outside the basic plane count 2N, an argument with a space is quoted). assert_cmdlines_fit lets
+    a line of exactly CMDLINE_MAX units through, refuses one unit more, and the refusal names the phase."""
+    rt, _src = _release_train()
+    face = "\U0001F600"
+    bound = rt.CMDLINE_MAX
+    assert 0 < bound < 32767
+    assert rt.cmdline_units(["git", "x" * 10]) == 14
+    assert rt.cmdline_units(["git", "a b"]) == 9
+    for n in (1, 7, 1000):
+        assert rt.cmdline_units(["git", face * n]) == 4 + 2 * n, n
+    rt.assert_cmdlines_fit([["git", "status"], ["git", "x" * (bound - 4)]], "phase 4")
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_cmdlines_fit([["git", "status"], ["git", "x" * (bound - 3)]], "phase 4")
+    assert str(exc.value).startswith("phase 4: ") and " %d UTF-16 units" % (bound + 1) in str(exc.value)
+    m = (bound - 4) // 2 + 1         # 4 + 2m units over the bound, 4 + m characters well under it
+    assert 4 + m < bound < 4 + 2 * m
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_cmdlines_fit([["git", face * m]], "phase 1")
+    assert str(exc.value).startswith("phase 1: "), str(exc.value)[:200]
+
+
+def test_cmdline_the_run_measures_both_lists_in_main_before_its_token_and_before_any_phase(monkeypatch, tmp_path,
+                                                                                            capsys):
+    """main() calls assert_run_cmdlines_fit once, unconditionally, before its first train_token_write, before
+    the phase loop and before any lease; and a run whose phase-1 checkout list is over the bound stops there:
+    return code 1, no token written, no lease opened, no state written, no message file, no git command."""
+    import ast
+    import copy
+    rt, src = _release_train()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def calls(name):
+        return sorted(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name) and n.func.id == name)
+    fit, token, lease = calls("assert_run_cmdlines_fit"), calls("train_token_write"), calls("controller_lease_session")
+    loop = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.For)
+            and isinstance(n.iter, ast.Name) and n.iter.id == "PHASES"]
+    assert len(fit) == 1 and token and len(loop) == 1, (fit, token, loop)
+    assert fit[0] < token[0] and fit[0] < loop[0] and all(fit[0] < x for x in lease), (fit, token, loop, lease)
+    top = [s for s in fn.body if s.lineno <= fit[0] <= s.end_lineno]
+    assert len(top) == 1 and isinstance(top[0], ast.Try), ast.dump(top[0])[:200]
+    assert [s for s in top[0].body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+            and getattr(s.value.func, "id", None) == "assert_run_cmdlines_fit"], ast.dump(top[0])[:300]
+
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["schema_sql"] = ["%04d_a_migration_with_a_long_name_for_this_check.sql" % i for i in range(700)]
+    monkeypatch.setitem(rt.BATCHES, "cmdline-long", entry)
+    w = _rt_world(monkeypatch, rt)
+    events = []
+    real_save, real_write = rt.save_state, rt.write_message_file
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+    monkeypatch.setattr(rt, "controller_lease_session",
+                        lambda what, **kw: events.append(("lease", what)) or contextlib.nullcontext("lease"))
+    monkeypatch.setattr(rt, "save_state", lambda st: events.append(("save",)) or real_save(st))
+    monkeypatch.setattr(rt, "write_message_file", lambda p, t: events.append(("write", p)) or real_write(p, t))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "cmdline-long",
+                                         "--from", "precursor"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "phase 1, asked before the run: the command `git checkout %s ...`" % rt.BRANCH in out, out[-600:]
+    assert "Stopped before any phase ran and before a train token was written." in out, out[-600:]
+    assert events == [] and w.calls == [] and _rt_files(tmp_path) == [], (events, w.calls, _rt_files(tmp_path))
+    # the control: the same entry from the code phase is not measured for phase 1, so the run passes the
+    # measure and writes its token (the code phase then refuses for its own reason)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "cmdline-long",
+                                         "--from", "code"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert events[:2] == [("token", "start"), ("token", "code")], events
+    assert "schema phase has not passed" in out, out[-600:]
+
+
+def _cmdline_lease_world(monkeypatch, rt):
+    """The stubbed world, with the lease's opening and closing, each message file written and each read-back
+    recorded in its call list."""
+    w = _rt_world(monkeypatch, rt)
+
+    @contextlib.contextmanager
+    def lease(what, **kw):
+        w.calls.append(("lease-open",))
+        try:
+            yield "lease"
+        finally:
+            w.calls.append(("lease-close",))
+    real_write, real_check = rt.write_message_file, rt.assert_message_file
+
+    def write(path, text):
+        w.calls.append(("write", path))
+        return real_write(path, text)
+
+    def check(path, text):
+        w.calls.append(("read-back", path))
+        return real_check(path, text)
+    monkeypatch.setattr(rt, "controller_lease_session", lease)
+    monkeypatch.setattr(rt, "write_message_file", write)
+    monkeypatch.setattr(rt, "assert_message_file", check)
+    return w
+
+
+def _cmdline_lease_span(w):
+    span = w.calls[w.calls.index(("lease-open",)):w.calls.index(("lease-close",)) + 1]
+    # the push address and the read-only rev-parse reads of the push proof (r2 HIGH 1) are not the sequence judged
+    return [c for c in span if c[0] != "push-address" and c[:3] != ("run", "git", "rev-parse")]
+
+
+@pytest.mark.parametrize("phase", ["precursor", "code"])
+def test_cmdline_the_message_file_is_written_under_the_lease_and_read_back_at_the_commit(monkeypatch, tmp_path,
+                                                                                         phase):
+    """Each phase writes its message file under the lease, before its first git command, to a name of its own
+    beside the state file; reads it back at the commit; and git is handed that file holding the WHOLE text the
+    phase derived. A file changed between the write and the commit refuses: no commit, no push, no sha
+    recorded."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    w = _cmdline_lease_world(monkeypatch, rt)
+    kind, message = (("precursor-message", rt.PRECURSOR_MESSAGE) if phase == "precursor"
+                     else ("merge-message", rt.MERGE_MESSAGE))
+    run_phase = rt.phase_precursor if phase == "precursor" else rt.phase_code
+    st = _rt_fresh(rt, schema_done=True)
+    run_phase(GO, st)
+    written = [c[1] for c in w.calls if c[0] == "write"]
+    assert len(written) == 1 and written[0].startswith(rt.STATE_PATH + "." + kind + "."), written
+    path = written[0]
+    if phase == "precursor":
+        middle = [("git", "git", "checkout", "main"), ("git", "git", "pull", "--ff-only"),
+                  ("git", "git", "checkout", rt.BRANCH)]
+    else:
+        middle = [("git", "git", "checkout", "main"), ("git", "git", "merge", "--no-ff")]
+    # the write reads its file back once (write_message_file), and the phase again at the commit
+    assert _cmdline_lease_span(w) == ([("lease-open",), ("write", path), ("read-back", path)] + middle
+                                      + [("read-back", path), ("git", "git", "commit", "-F"),
+                                         ("push", "git push origin"), ("lease-close",)]), w.calls
+    assert w.commits == [(("-F", path), _rt_committed_text(message))], w.commits
+    assert st["precursor_sha" if phase == "precursor" else "code_sha"] == (
+        PRECURSOR_SHA if phase == "precursor" else MERGE_SHA)
+
+    # the same phase again, the file changed after the write and before the commit
+    w2 = _cmdline_lease_world(monkeypatch, rt)
+    inner = w2.git_child
+    trigger = ["git", "checkout", rt.BRANCH] if phase == "precursor" else ["git", "merge", "--no-ff"]
+
+    def change(lease, argv):
+        if argv[:3] == trigger:
+            with open([c[1] for c in w2.calls if c[0] == "write"][0], "a", encoding="utf-8") as fh:
+                fh.write("x")
+        return inner(lease, argv)
+    monkeypatch.setattr(rt, "git_child", change)
+    st2 = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        run_phase(GO, st2)
+    assert "does not read back as written" in str(exc.value), str(exc.value)[:300]
+    assert w2.commits == [] and w2.kinds("push", "deploy") == [], w2.calls
+    assert "precursor_sha" not in st2 and "code_sha" not in st2
+
+
+def _cmdline_git(repo, *argv, stdin=None):
+    p = subprocess.run(["git"] + list(argv), cwd=str(repo), capture_output=True, input=stdin)
+    assert p.returncode == 0, (argv, p.stderr.decode("utf-8", "replace")[-500:])
+    return p.stdout
+
+
+def _cmdline_scratch(monkeypatch, rt, tmp_path):
+    """A scratch repository for the commit phases, bound to the newest entry with sql: a bare origin beside it,
+    main with one commit pushed, the entry's branch carrying its sql files and a code change in two commits that
+    carry the trailer, main checked out, a pre-commit hook installed after the setup (its marker counts the
+    commits made from here on). Every child of the train runs here and nowhere else: the lease is a null context,
+    git children and pushes run in the scratch repository, pyflakes answers nothing, and the deploy raises
+    ns.Deployed with the sha it was handed."""
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    repo, origin = Path(rt.REPO), tmp_path / "origin.git"
+    assert repo == tmp_path / "repo"
+    _cmdline_git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    repo.mkdir()
+    _cmdline_git(repo, "init", "-q", "-b", "main")
+    for k, v in (("user.name", "t"), ("user.email", "t@example.invalid"), ("core.autocrlf", "false"),
+                 ("commit.gpgsign", "false"), ("commit.cleanup", "default"), ("core.hooksPath", ".git/hooks")):
+        _cmdline_git(repo, "config", k, v)
+    url = origin.as_posix()
+    _cmdline_git(repo, "remote", "add", "origin", url)
+    (repo / "README").write_text("root\n")
+    _cmdline_git(repo, "add", "README")
+    _cmdline_git(repo, "commit", "-q", "-m", "root")
+    _cmdline_git(repo, "push", "-q", "-u", "origin", "main")
+    root = _cmdline_git(repo, "rev-parse", "HEAD").decode().strip()
+    _cmdline_git(repo, "checkout", "-q", "-b", rt.BRANCH)
+    (repo / "backend" / "sql").mkdir(parents=True)
+    for f in rt.precursor_files():
+        (repo / "backend" / "sql" / f).write_text("-- %s\n" % f)
+    _cmdline_git(repo, "add", "backend")
+    _cmdline_git(repo, "commit", "-q", "-m", "the sql" + _TRAILER)
+    (repo / "code.txt").write_text("new\n")
+    _cmdline_git(repo, "add", "code.txt")
+    _cmdline_git(repo, "commit", "-q", "-m", "the code" + _TRAILER)
+    tip = _cmdline_git(repo, "rev-parse", "HEAD").decode().strip()
+    _cmdline_git(repo, "checkout", "-q", "main")
+    marker = tmp_path / "hook-ran.txt"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    with open(hook, "w", newline="\n") as fh:
+        fh.write("#!/bin/sh\necho ran >> '%s'\n" % marker.as_posix())
+    monkeypatch.setattr(rt, "REVIEWED_TIP", tip)
+    monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", url)
+    monkeypatch.setattr(rt, "controller_lease_session", lambda what, **kw: contextlib.nullcontext("lease"))
+    with open(repo / ".git" / "info" / "exclude", "a", encoding="utf-8", newline="\n") as fh:
+        fh.write("ai-collab/\n")       # as in the repository the train runs in, the state folder is ignored
+    ns = SimpleNamespace(repo=repo, origin=origin, root=root, tip=tip, marker=marker, pushes=[])
+
+    def child(lease, step, argv, kind, timeout=None):
+        assert kind in ("git", "push"), kind
+        if kind == "push":
+            ns.pushes.append(list(argv))
+        p = subprocess.run(argv, cwd=rt.REPO, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return (p.stdout or "") + (p.stderr or ""), p.returncode
+    monkeypatch.setattr(rt, "blocking_child", child)
+    real_run = rt.run
+    monkeypatch.setattr(rt, "run", lambda cmd, *a, **kw: "" if list(cmd[:3]) == ["python", "-m", "pyflakes"]
+                        else real_run(cmd, *a, **kw))
+
+    class Deployed(Exception):
+        pass
+
+    def no_deploy(sha, **kw):
+        raise Deployed(sha)
+    monkeypatch.setattr(rt, "_deploy_both", no_deploy)
+    ns.Deployed = Deployed
+    ns.git = lambda *argv, **kw: _cmdline_git(repo, *argv, **kw)
+    ns.head = lambda ref: _cmdline_git(repo, "rev-parse", ref).decode().strip()
+    ns.origin_main = lambda: _cmdline_git(origin, "rev-parse", "main").decode().strip()
+    ns.parents = lambda rev: _cmdline_git(repo, "rev-list", "--parents", "-n", "1", rev).decode().split()[1:]
+    ns.stored = lambda rev: _cmdline_git(repo, "cat-file", "commit", rev).split(b"\n\n", 1)[1]
+    ns.cleanup = lambda text: _cmdline_git(repo, "stripspace", stdin=text.encode("utf-8"))
+    ns.marker_lines = lambda: marker.read_text().split() if marker.exists() else []
+    ns.reset_marker = lambda: marker.unlink() if marker.exists() else None
+
+    def merge_head():
+        p = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=str(repo), capture_output=True)
+        return p.stdout.decode().strip() if p.returncode == 0 else None
+    ns.merge_head = merge_head
+    return ns
+
+
+def test_cmdline_both_phases_commit_from_their_files_on_a_scratch_repository(monkeypatch, tmp_path, capsys):
+    """Phase 1 and phase 4 run their own commands with real git on a scratch repository (a bare origin beside
+    it, the lane's commits carrying the trailer, a pre-commit hook standing), the merge message made longer
+    than the command-line bound: each stored message is byte for byte git's own cleanup of the text the phase
+    derived, the parents are the wanted commits by identity, the merge's tree is the reviewed tip's, origin's
+    main is each new commit, and the hook ran once per commit."""
+    rt, _src = _release_train()
+    ns = _cmdline_scratch(monkeypatch, rt, tmp_path)
+    long_merge = rt.MERGE_MESSAGE + "\n\n" + "\n".join("line %05d of a merge message past the bound" % i
+                                                        for i in range(1000))
+    assert _cmdline_units(long_merge) > rt.CMDLINE_MAX
+    monkeypatch.setattr(rt, "MERGE_MESSAGE", long_merge)
+
+    st = _rt_fresh(rt)
+    rt.phase_precursor(GO, st)
+    pre = st["precursor_sha"]
+    assert pre == ns.head("HEAD") == ns.head("refs/remotes/origin/main") == ns.origin_main()
+    assert ns.parents(pre) == [ns.root]
+    assert ns.stored(pre) == ns.cleanup(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    assert ns.stored(pre).endswith(_TRAILER.strip().encode("utf-8") + b"\n")
+    assert sorted(ns.git("diff", "--name-only", ns.root, pre).decode().split()) == sorted(
+        "backend/sql/" + f for f in rt.precursor_files())
+    assert ns.marker_lines() == ["ran"]
+
+    st["schema_done"] = True
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    code = st["code_sha"]
+    assert code == ns.head("HEAD") == ns.origin_main()
+    assert ns.parents(code) == [pre, ns.tip]
+    assert ns.head(code + "^{tree}") == ns.head(ns.tip + "^{tree}")
+    assert ns.stored(code) == ns.cleanup(_rt_committed_text(long_merge))
+    assert len(ns.stored(code)) > rt.CMDLINE_MAX
+    assert ns.marker_lines() == ["ran", "ran"]
+    assert ns.pushes == [["git", "push", "origin", "main"]] * 2
+    state = Path(rt.STATE_PATH).name
+    kinds = sorted(p.name[len(state) + 1:].split(".")[0] for p in Path(rt.STATE_PATH).parent.iterdir()
+                   if p.name.startswith(state + "."))
+    assert kinds == ["merge-message", "precursor-message"], kinds
+    capsys.readouterr()
+
+
+# ── CMDLINE-REST: the release tool's remaining command-line gaps (item 36, part 2) ──
+# Red on a train without the part-2 patch (apply_rest.py), green with it: phase 4 resumes from the world it reads
+# (2a), `check` measures every entry (2b), a pre-flight runs each git form once (2c), and every other line built
+# from batch text has one builder and is measured before the token (2d).
+
+
+def _rest_scratch(monkeypatch, rt, tmp_path):
+    """The scratch repository of the commit phases with the lane NOT yet merged: main at its root commit, pushed;
+    the hook installed after the setup, so its marker counts the commits the train makes."""
+    ns = _cmdline_scratch(monkeypatch, rt, tmp_path)
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda *a, **kw: [], raising=False)
+
+    def commit_exact(text):
+        """A commit an earlier attempt made from a message file, stored byte for byte (verbatim)."""
+        path = tmp_path / "earlier-attempt-message.txt"
+        path.write_bytes(text.encode("utf-8"))
+        ns.git("commit", "-q", "--cleanup=verbatim", "-F", str(path))
+        return ns.head("HEAD")
+    ns.commit_exact = commit_exact
+
+    def merge_exact():
+        """The lane's merge as an earlier attempt committed it: the reviewed tip, this batch's merge message."""
+        ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+        return commit_exact(_rt_committed_text(rt.MERGE_MESSAGE))
+    ns.merge_exact = merge_exact
+    return ns
+
+
+def test_rest_2a_a_staged_merge_of_the_lane_is_committed_from_the_file_and_pushed(monkeypatch, tmp_path, capsys):
+    """A restart that finds the lane's merge staged and not committed goes on to the commit, from its own message
+    file, then proves and pushes it: one merge, its parents main's root and the tip, its stored message git's
+    cleanup of the derived text, the hook run once, one push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    assert ns.merge_head() == ns.tip
+    st = _rt_fresh(rt, schema_done=True)
+    rt.phase_code(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    merge = st["code_sha"]
+    assert merge == ns.head("HEAD") == ns.origin_main() and ns.merge_head() is None
+    assert ns.parents(merge) == [ns.root, ns.tip]
+    assert ns.stored(merge) == ns.cleanup(_rt_committed_text(rt.MERGE_MESSAGE))
+    assert ns.marker_lines() == ["ran"] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "a merge of the reviewed tip is staged on main and not committed" in planned, planned[-600:]
+
+
+def test_rest_2a_a_staged_set_that_is_not_the_lanes_is_refused_with_nothing_committed(monkeypatch, tmp_path):
+    """A staged merge that carries a file the lane does not change is refused: nothing committed, nothing pushed,
+    the merge still staged for the operator, no sha recorded."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    (ns.repo / "not-the-lanes.txt").write_text("x\n")
+    ns.git("add", "not-the-lanes.txt")
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    said = ("is not the clean merge's" if hasattr(rt, "expected_merge_tree") else "the staged merge carries")
+    assert said in str(exc.value), str(exc.value)[:300]
+    assert ns.merge_head() == ns.tip and ns.head("HEAD") == ns.root == ns.origin_main()
+    assert ns.pushes == [] and ns.marker_lines() == [] and "code_sha" not in st
+
+
+def test_rest_2a_a_committed_merge_is_proved_and_pushed_never_merged_twice(monkeypatch, tmp_path, capsys):
+    """A restart that finds the lane's merge committed and not pushed proves it (parents by identity, tree) and
+    pushes THAT commit: no second merge, no commit, one push; the plan says so first. The hand route, `run --go
+    --from code`, reaches the same end through main()."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    merge = ns.merge_exact()
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    rt.phase_code(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    rt.save_state(st)
+    monkeypatch.setitem(rt.BATCHES[rt.BATCH_NAME], "reviewed_tip", ns.tip)   # main() selects the entry again
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
+    monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", rt.BATCH_NAME,
+                                         "--from", "code"])
+    with pytest.raises(ns.Deployed):
+        rt.main()
+    assert rt.load_state()["code_sha"] == merge == ns.head("HEAD") == ns.origin_main()
+    assert ns.parents(merge) == [ns.root, ns.tip]
+    assert ns.marker_lines() == [] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "committed and not pushed; a run would prove the merge %s" % merge in planned, planned[-600:]
+
+
+def test_rest_2a_a_committed_merge_whose_tree_is_not_the_lanes_is_not_pushed(monkeypatch, tmp_path):
+    """A committed merge of the tip whose tree carries more than the lane is refused before the push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    (ns.repo / "not-the-lanes.txt").write_text("x\n")
+    ns.git("add", "not-the-lanes.txt")
+    ns.git("commit", "-q", "-m", "a merge with one file more")
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    said = ("not the clean merge's" if hasattr(rt, "expected_merge_tree") else "does not read as the lane's merge")
+    assert said in str(exc.value) and "NOT pushed" in str(exc.value), str(exc.value)[:300]
+    assert ns.origin_main() == ns.root and ns.pushes == [] and "code_sha" not in st
+
+
+def test_rest_2a_a_pushed_merge_is_proved_and_recorded_with_nothing_run(monkeypatch, tmp_path):
+    """A restart that finds the lane's merge already on origin's main records its sha and goes on: no commit, no
+    push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    merge = ns.merge_exact()
+    ns.git("push", "-q", "origin", "main")
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    assert st["code_sha"] == merge == ns.head("HEAD") == ns.origin_main()
+    assert ns.marker_lines() == [] and ns.pushes == []
+
+
+def test_rest_2b_check_measures_every_batch_entry_with_the_phases_builders(monkeypatch, tmp_path, capsys):
+    """measure_every_batch measures every entry with precursor_cmds, code_cmds (the plan's file names) and
+    batch_cmdlines, finds an entry whose line is over the bound (a long sql list, a long column list) and not one
+    whose merge message alone is long (it travels in a file), and selects the chosen batch again; `check` refuses
+    on such an entry before any probe of the world, and goes on to its probes without it."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    misses, unread = rt.measure_every_batch()
+    assert misses == [] and len(unread) < len(rt.BATCHES), (misses, unread)
+    assert rt.BATCH_NAME == name
+    sql_long, cols_long, msg_long = (copy.deepcopy(rt.BATCHES[name]) for _ in range(3))
+    sql_long["schema_sql"] = ["%03d_a_migration_with_a_long_name_for_this_check.sql" % i for i in range(700)]
+    cols_long["expect_columns"] = [["a_table_%04d" % i, "a_column_with_a_long_name_%04d" % i] for i in range(700)]
+    msg_long["merge_message"] = "m" * 60000
+    for key, entry in (("zz-cmdline-sql", sql_long), ("zz-cmdline-columns", cols_long),
+                       ("zz-cmdline-message", msg_long)):
+        monkeypatch.setitem(rt.BATCHES, key, entry)
+    misses, _unread = rt.measure_every_batch()
+    assert sorted(m[0] for m in misses) == ["zz-cmdline-columns", "zz-cmdline-sql"], misses
+    said = dict(misses)
+    assert said["zz-cmdline-sql"].startswith("phase 1 of batch zz-cmdline-sql: the command `git checkout ")
+    assert said["zz-cmdline-columns"].startswith("the schema probe on "), said["zz-cmdline-columns"][:200]
+    assert rt.BATCH_NAME == name
+    w = _rt_world(monkeypatch, rt)
+    checked = []
+    monkeypatch.setattr(rt, "phase_check", lambda args, st: checked.append(args.batch))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "check", "--batch", name])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "zz-cmdline-columns: the schema probe on " in out and checked == [] and w.calls == [], out[-800:]
+    monkeypatch.delitem(rt.BATCHES, "zz-cmdline-sql")
+    monkeypatch.delitem(rt.BATCHES, "zz-cmdline-columns")
+    assert rt.main() == 0 and checked == [name]
+
+
+def _rest_form(c):
+    return " ".join(c[:3]) + (" ..." if len(c) > 3 else "")
+
+
+def test_rest_2c_the_preflight_runs_each_git_form_once_on_a_scratch_repository_of_its_own(monkeypatch, tmp_path):
+    """git_forms_preflight runs phase 1's and phase 4's lists, as their builders give them, once each with real git
+    in a folder it makes, its merge message past the bound; it removes that folder and nothing else; a form git
+    refuses is a Fail naming the form, with the folder removed too."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    where = tmp_path / "preflight"
+    where.mkdir()
+    (where / "standing.txt").write_text("not the pre-flight's\n")
+    forms = rt.git_forms_preflight(where=str(where))
+    assert [f for f in forms if f.startswith("phase ")] == (
+        ["phase 1: " + _rest_form(c) for c in rt.precursor_cmds(rt.precursor_files(), "F")]
+        + ["phase 4: " + _rest_form(c) for c in rt.code_cmds("F")]), forms
+    assert sorted(p.name for p in where.iterdir()) == ["standing.txt"]
+    real = rt.code_cmds
+    monkeypatch.setattr(rt, "code_cmds", lambda p: [c if c[:2] != ["git", "commit"]
+                                                    else ["git", "commit", "--no-such-option", "-F", p]
+                                                    for c in real(p)])
+    with pytest.raises(rt.Fail) as exc:
+        rt.git_forms_preflight(where=str(where))
+    assert "phase 4: git commit --no-such-option ..." in str(exc.value), str(exc.value)[:300]
+    assert sorted(p.name for p in where.iterdir()) == ["standing.txt"]
+
+
+def test_rest_2c_main_runs_the_preflight_after_the_measure_and_before_the_token(monkeypatch, tmp_path, capsys):
+    """In main() the pre-flight's one call stands after assert_run_cmdlines_fit and before the first
+    train_token_write; a pre-flight that refuses stops the run with no token; one that passes lets it write it."""
+    import ast
+    rt, src = _release_train()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def calls(name):
+        return sorted(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name) and n.func.id == name)
+    pre, fit, token = calls("git_forms_preflight"), calls("assert_run_cmdlines_fit"), calls("train_token_write")
+    assert len(pre) == 1 and fit[0] < pre[0] < token[0], (fit, pre, token)
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    _rt_world(monkeypatch, rt)
+    events = []
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+
+    def refuse(*a, **kw):
+        raise rt.Fail("the git form pre-flight: `phase 4: git commit -F ...` was refused (rc=129): planted")
+    monkeypatch.setattr(rt, "git_forms_preflight", refuse)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", name, "--from", "code"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert "planted" in out and "before a train token was written" in out and events == [], out[-600:]
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda *a, **kw: ["phase 4: git checkout main"])
+    assert rt.main() == 1      # the code phase then refuses for its own reason (no schema_done)
+    assert events[:1] == [("token", "start")], events
+
+
+def test_rest_2d_every_line_built_from_batch_text_has_one_builder_and_is_measured_before_the_token(monkeypatch,
+                                                                                                tmp_path, capsys):
+    """batch_cmdlines holds each migration's ssh line, each sql file's two reads, the schema probes on both boxes
+    and each batch path as http_code_argv builds it; schema_state and index_state send the builders' queries and
+    http_code runs http_code_argv's line; and a run whose column probe is over the bound stops before its token,
+    the refusal naming the probe."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    lines = rt.batch_cmdlines()
+    for f in rt.SCHEMA_SQL + rt.POST_CODE_SQL + rt.I18N_SQL + rt.BACKFILL_SQL:
+        line = rt.migrate_argv(f) if hasattr(rt, "migrate_argv") else rt.ssh_argv(rt.PRIMARY, "migrate:" + f)
+        assert line in [c for _w, c in lines] and any(w.startswith("the migration %s" % f) for w, _c in lines), f
+    for f in rt.precursor_files():
+        assert ["git", "cat-file", "-e", "%s:backend/sql/%s" % (rt.BRANCH, f)] in [c for _w, c in lines]
+    for path in [rt.SMOKE_ROUTE] + list(rt.NEW_ROUTES):
+        for host in (rt.PRIMARY, rt.STANDBY, rt.EDGE_HOST):
+            assert rt.http_code_argv(host, path) in [c for _w, c in lines], (host, path)
+    monkeypatch.setattr(rt, "EXPECT_TABLES", ["t_one"])
+    monkeypatch.setattr(rt, "EXPECT_COLUMNS", [("t_one", "c_one")])
+    monkeypatch.setattr(rt, "EXPECT_INDEXES", ["i_one"])
+    queries = [rt.schema_table_query(), rt.schema_column_query(), rt.index_query()]
+    assert all(queries) and "'t_one'" in queries[0] and "('t_one','c_one')" in queries[1] and "'i_one'" in queries[2]
+    for host in (rt.PRIMARY, rt.STANDBY):
+        for q in queries:
+            assert any(w.startswith("the schema probe on %s" % host) and c == rt.ssh_argv(host, "sql-readonly:" + q)
+                       for w, c in rt.batch_cmdlines()), (host, q)
+    sent = []
+    monkeypatch.setattr(rt, "sql", lambda host, query: sent.append(query) or "")
+    rt.schema_state(rt.PRIMARY)
+    rt.index_state(rt.PRIMARY)
+    assert sent == queries, sent
+    ran = []
+    monkeypatch.setattr(rt.subprocess, "run", lambda cmd, *a, **kw: ran.append(list(cmd)) or SimpleNamespace(
+        returncode=0, stdout=b"200", stderr=b""))
+    assert rt.http_code(rt.STANDBY, "/api/v1/a-path", method="POST") == "200"
+    assert ran == [rt.http_code_argv(rt.STANDBY, "/api/v1/a-path", method="POST")], ran
+    monkeypatch.undo()
+
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["expect_columns"] = [["a_table_%04d" % i, "a_column_with_a_long_name_%04d" % i] for i in range(700)]
+    monkeypatch.setitem(rt.BATCHES, "zz-cmdline-columns", entry)
+    w = _rt_world(monkeypatch, rt)
+    events = []
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "zz-cmdline-columns",
+                                         "--only", "verify"])
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert re.search(r"the schema probe on %s[^\n]*, asked before the run" % re.escape(rt.PRIMARY), out), out[-600:]
+    assert "Stopped before any phase ran and before a train token was written." in out
+    assert events == [] and w.calls == []
+
+
+# ── CMDLINE-REST, second pass: phase 1's restart gap, origin read from origin, the curl builder's line ──
+
+
+def _rest_stage_precursor(rt, ns):
+    paths = ["backend/sql/" + f for f in rt.precursor_files()]
+    ns.git("checkout", rt.BRANCH, "--", *paths)
+    return paths
+
+
+def _rest_commit_precursor(rt, ns, tmp_path, text):
+    """A precursor commit an earlier attempt made: the batch's files from the branch, committed from a file."""
+    _rest_stage_precursor(rt, ns)
+    path = tmp_path / "earlier-attempt-message.txt"
+    path.write_bytes(text.encode("utf-8"))
+    ns.git("commit", "-q", "-F", str(path))
+    commit = ns.head("HEAD")
+    ns.reset_marker()
+    return commit
+
+
+def test_rest_1_a_staged_precursor_of_the_batch_is_committed_from_the_file_and_pushed(monkeypatch, tmp_path,
+                                                                                     capsys):
+    """A restart of phase 1 that finds the batch's sql files staged on main commits them from its message file,
+    proves the commit and pushes it: one commit, its parent main's root, its stored message git's cleanup of the
+    derived text, the hook run once, one push; the plan says so first."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    _rest_stage_precursor(rt, ns)
+    st = _rt_fresh(rt)
+    rt.phase_precursor(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    rt.phase_precursor(GO, st)
+    pre = st["precursor_sha"]
+    assert pre == ns.head("HEAD") == ns.origin_main() and ns.parents(pre) == [ns.root]
+    assert ns.stored(pre) == ns.cleanup(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    assert ns.marker_lines() == ["ran"] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "the batch's sql files are staged on main and not committed" in planned, planned[-600:]
+
+
+def test_rest_1_a_staged_set_that_is_not_the_batchs_is_refused_with_nothing_committed(monkeypatch, tmp_path):
+    """A staged set beside the batch's sql files is refused: nothing committed, nothing pushed, no sha."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    _rest_stage_precursor(rt, ns)
+    (ns.repo / "not-the-batchs.txt").write_text("x\n")
+    ns.git("add", "not-the-batchs.txt")
+    st = _rt_fresh(rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_precursor(GO, st)
+    said = ("is not main's tree with the batch's sql files" if hasattr(rt, "expected_precursor_tree")
+            else "not the batch's sql files")
+    assert said in str(exc.value), str(exc.value)[:300]
+    assert ns.head("HEAD") == ns.root == ns.origin_main() and ns.pushes == [] and ns.marker_lines() == []
+    assert "precursor_sha" not in st
+
+
+def test_rest_1_a_committed_precursor_is_proved_and_pushed_never_committed_twice(monkeypatch, tmp_path, capsys):
+    """A restart that finds the precursor committed and not pushed proves it (its parent, tree and message) and
+    pushes THAT commit, through main's `run --go --from precursor`: no second commit, one push, the sha
+    recorded; the plan says so first."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    commit = _rest_commit_precursor(rt, ns, tmp_path, _rt_committed_text(rt.PRECURSOR_MESSAGE))
+    st = _rt_fresh(rt)
+    rt.phase_precursor(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    rt.save_state(st)
+    monkeypatch.setitem(rt.BATCHES[rt.BATCH_NAME], "reviewed_tip", ns.tip)   # main() selects the entry again
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
+    monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", rt.BATCH_NAME,
+                                         "--from", "precursor"])
+    with pytest.raises(ns.Deployed):      # phase 2 deploys the recorded precursor
+        rt.main()
+    assert rt.load_state()["precursor_sha"] == commit == ns.head("HEAD") == ns.origin_main()
+    assert ns.parents(commit) == [ns.root]
+    assert ns.marker_lines() == [] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "committed and not pushed; a run would prove the precursor %s" % commit in planned, planned[-600:]
+
+
+def test_rest_1_a_committed_precursor_with_another_message_is_not_pushed(monkeypatch, tmp_path):
+    """A committed precursor whose message is not this batch's derived text is refused before the push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    _rest_commit_precursor(rt, ns, tmp_path, "a precursor with another message\n")
+    st = _rt_fresh(rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_precursor(GO, st)
+    assert "does not carry this batch's precursor message" in str(exc.value), str(exc.value)[:300]
+    assert ns.origin_main() == ns.root and ns.pushes == [] and "precursor_sha" not in st
+
+
+def test_rest_1_a_pushed_precursor_is_proved_and_recorded_with_nothing_run(monkeypatch, tmp_path):
+    """A restart that finds the precursor already on origin's main records its sha: no commit, no push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    commit = _rest_commit_precursor(rt, ns, tmp_path, _rt_committed_text(rt.PRECURSOR_MESSAGE))
+    ns.git("push", "-q", "origin", "main")
+    st = _rt_fresh(rt)
+    rt.phase_precursor(GO, st)
+    assert st["precursor_sha"] == commit == ns.head("HEAD") == ns.origin_main()
+    assert ns.marker_lines() == [] and ns.pushes == []
+
+
+def _rest_origin_moves_ahead(ns, tmp_path):
+    """Another clone pushes one commit onto origin's main; this checkout's remote-tracking ref stays behind."""
+    other = tmp_path / "other"
+    _cmdline_git(tmp_path, "clone", "-q", str(ns.origin), str(other))
+    for k, v in (("user.name", "o"), ("user.email", "o@example.invalid"), ("core.hooksPath", "no-hooks")):
+        _cmdline_git(other, "config", k, v)
+    (other / "elsewhere.txt").write_text("pushed by another\n")
+    _cmdline_git(other, "add", "elsewhere.txt")
+    _cmdline_git(other, "commit", "-q", "-m", "pushed by another")
+    _cmdline_git(other, "push", "-q", "origin", "main")
+    ahead = ns.origin_main()
+    assert ahead != ns.head("refs/remotes/origin/main")
+    return ahead
+
+
+@pytest.mark.parametrize("merged", ["committed", "fresh"])
+def test_rest_3_origin_is_read_from_origin_not_from_the_tracking_ref(monkeypatch, tmp_path, merged):
+    """Phase 4 reads origin's main from origin. With origin moved ahead of this checkout's remote-tracking ref, a
+    committed merge on the old main is refused before any push, and a fresh merge onto a main that is not
+    origin's is refused before any merge: nothing pushed, no sha recorded, origin where the other clone left it."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    if merged == "committed":
+        ns.merge_exact()
+    before = ns.head("HEAD")
+    ahead = _rest_origin_moves_ahead(ns, tmp_path)
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "origin's main reads %s" % ahead in str(exc.value), str(exc.value)[:300]
+    assert ns.pushes == [] and "code_sha" not in st and ns.origin_main() == ahead
+    assert ns.head("HEAD") == before and ns.merge_head() is None
+
+
+def test_rest_2d_http_code_argv_is_the_exact_curl_line():
+    """The one builder of the status-code probe gives exactly this line, with and without a method and the header."""
+    rt, _src = _release_train()
+    rt.MOD_VERSION_HEADER = "9.9.9"
+    head = ["curl", "-sS", "--max-time", "20", "-o", os.devnull, "-w", "%{http_code}"]
+    assert rt.http_code_argv("a-host", "/p?x=1") == head + ["-H", "X-Mod-Version: 9.9.9", "http://a-host:8443/p?x=1"]
+    assert rt.http_code_argv("a-host", "/p", method="POST", header=False, port=81) == head + [
+        "-X", "POST", "http://a-host:81/p"]
+
+
+import ast  # noqa: E402  (the census below reads the train's syntax tree)
+
+
+# ── CMDLINE-REST r1 F4: the census of every process start, read from the syntax tree of the train under test ──
+
+_CENSUS_RAW = ({("subprocess", n) for n in ("run", "Popen", "check_output", "check_call", "call", "getoutput",
+                                             "getstatusoutput")}
+               | {("os", n) for n in ("system", "popen", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv",
+                                       "spawnve", "spawnvp", "spawnvpe", "execl", "execle", "execlp", "execlpe",
+                                       "execv", "execve", "execvp", "execvpe", "posix_spawn", "posix_spawnp",
+                                       "startfile")}
+               | {("asyncio", "create_subprocess_exec"), ("asyncio", "create_subprocess_shell"),
+                  ("pty", "spawn")})
+
+
+def _census_functions(tree):
+    """qualname -> FunctionDef, for every function and method (nested ones as Outer.<locals>.inner)."""
+    out = {}
+
+    def walk(node, prefix):
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                q = prefix + ch.name
+                out[q] = ch
+                walk(ch, q + ".<locals>.")
+            elif isinstance(ch, ast.ClassDef):
+                walk(ch, prefix + ch.name + ".")
+            else:
+                walk(ch, prefix)
+    walk(tree, "")
+    return out
+
+
+def _census_own_nodes(fn):
+    """The nodes of `fn`'s own body, not those of the functions defined inside it."""
+    stack, out = list(fn.body), []
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        for ch in ast.iter_child_nodes(n):
+            if not isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                stack.append(ch)
+    return out
+
+
+def _census_bindings(fn):
+    """name -> the expressions bound to it in `fn` (an assignment's value; each element of a literal a for loop
+    iterates, else the iterable marked as iterated; a with's context; a tuple unpacking binds the whole value)."""
+    b = {}
+    for n in _census_own_nodes(fn):
+        pairs = []
+        if isinstance(n, ast.Assign):
+            pairs = [(t, n.value) for t in n.targets]
+        elif isinstance(n, (ast.AnnAssign, ast.AugAssign)) and n.value is not None:
+            pairs = [(n.target, n.value)]
+        elif isinstance(n, (ast.For, ast.comprehension)):
+            vals = n.iter.elts if isinstance(n.iter, (ast.Tuple, ast.List)) else [ast.Starred(n.iter)]
+            pairs = [(n.target, v) for v in vals]
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            pairs = [(n.optional_vars, n.context_expr)]
+        elif isinstance(n, ast.NamedExpr):
+            pairs = [(n.target, n.value)]
+        for t, v in pairs:
+            if isinstance(t, (ast.Tuple, ast.List)) and isinstance(v, (ast.Tuple, ast.List)) and                     len(t.elts) == len(v.elts) and not any(isinstance(e, ast.Starred) for e in t.elts):
+                for te, ve in zip(t.elts, v.elts):
+                    if isinstance(te, ast.Name):
+                        b.setdefault(te.id, []).append(ve)
+                continue
+            for name in ast.walk(t):
+                if isinstance(name, ast.Name):
+                    b.setdefault(name.id, []).append(v)
+    return b
+
+
+def _census_root(node):
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _census_classify(expr, fn, params, rt, seen=None):
+    """'git' (built by the git registry), 'const' (only literals and names the registry calls bounded), 'param' (the
+    enclosing function's own argument flows in) or 'other'. The weakest class of the parts wins: other < param <
+    const; git where a part is a git builder's result and nothing is other. A git form's arguments are read by
+    their kinds: a "rev" must be bounded; a branch, a file, a list of files or a message file is the form's to
+    measure. A subscript is read by what it indexes; a conditional by its two results."""
+    seen = set() if seen is None else seen
+    bounded = set(rt.CENSUS_BOUNDED)
+    kinds = set()
+    binds = _census_bindings(fn)
+
+    def visit(n):
+        if isinstance(n, ast.Call):
+            f = n.func
+            name = f.id if isinstance(f, ast.Name) else (ast.unparse(f) if isinstance(f, ast.Attribute) else None)
+            if name == "git_argv":
+                kinds.add("git")
+                form = n.args[0].value if n.args and isinstance(n.args[0], ast.Constant) else None
+                for arg, kind in zip(n.args[1:], rt.GIT_FORMS.get(form, ((), ()))[1]):
+                    if kind == "rev":
+                        visit(arg)
+                return
+            if name in ("precursor_cmds", "code_cmds") or _census_root(f) == "GIT_FORMS":
+                kinds.add("git")
+                return
+            if name in rt.CENSUS_TRANSPARENT or name in bounded:
+                for arg in n.args:
+                    visit(arg.value if isinstance(arg, ast.Starred) else arg)
+                for k in n.keywords:
+                    visit(k.value)
+                return
+            kinds.add("other")
+            return
+        if isinstance(n, ast.Subscript):
+            visit(n.value)
+            return
+        if isinstance(n, ast.IfExp):
+            visit(n.body)
+            visit(n.orelse)
+            return
+        if isinstance(n, ast.Attribute):
+            if ast.unparse(n) in ("os.devnull",):
+                return
+            visit(n.value)
+            return
+        if isinstance(n, ast.Name):
+            if n.id in bounded or n.id in ("True", "False", "None"):
+                return
+            if n.id in params:
+                kinds.add("param")
+            elif n.id in binds:
+                if n.id not in seen:
+                    seen.add(n.id)
+                    for v in binds[n.id]:
+                        kinds.add(_census_classify(v.value if isinstance(v, ast.Starred) else v, fn, params, rt,
+                                                   seen))
+            elif n.id in rt.CENSUS_BOUNDED_GLOBALS or n.id in ("os", "subprocess"):
+                return
+            else:
+                kinds.add("other")
+            return
+        for ch in ast.iter_child_nodes(n):
+            visit(ch)
+
+    visit(expr)
+    if "other" in kinds:
+        return "other"
+    if "param" in kinds:
+        return "param"
+    if "git" in kinds:
+        return "git"
+    return "const"
+
+
+def _census(rt, src):
+    """Every process start of the train under test: (problems, sites). A site is a call of start_process or of a
+    function RUNNERS names; it is named by COMMAND_REGISTRY (its key), by the git registry (its command is a git
+    form's), by RUNNERS (it hands on its own function's argument), or by CONSTANT_COMMANDS (bounded, with its reason
+    and its measured length). Anything else, and any process start outside start_process, is a problem."""
+    tree = ast.parse(src)
+    fns = _census_functions(tree)
+    problems, sites = [], []
+    starter = fns.get("start_process")
+    starter_nodes = set(map(id, ast.walk(starter))) if starter else set()
+    # the one seam: the module-level SUBPROCESS_RUNNER = subprocess.run (a name the tests replace), never a call
+    seam = {id(st.value) for st in tree.body if isinstance(st, ast.Assign) and isinstance(st.value, ast.Attribute)
+            and [ast.unparse(t) for t in st.targets] == ["SUBPROCESS_RUNNER"]}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and (n.value.id, n.attr) in _CENSUS_RAW:
+            if id(n) not in starter_nodes and id(n) not in seam:
+                problems.append("a process start outside start_process at line %d: %s" % (n.lineno, ast.unparse(n)))
+        if isinstance(n, ast.ImportFrom) and n.module in ("subprocess", "os", "asyncio", "pty"):
+            for a in n.names:
+                if (n.module, a.name) in _CENSUS_RAW:
+                    problems.append("a process start imported by name at line %d: %s" % (n.lineno, a.name))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "SUBPROCESS_RUNNER" \
+                and id(n) not in starter_nodes:
+            problems.append("the seam SUBPROCESS_RUNNER called outside start_process at line %d" % n.lineno)
+    runner_simple = {}
+    for q in rt.RUNNERS:
+        runner_simple.setdefault(q.split(".")[-1], []).append(q)
+    keys_seen = set()
+    for q, fn in fns.items():
+        params = {a.arg for a in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs} - {"self"}
+        params |= {a.arg for a in (fn.args.vararg, fn.args.kwarg) if a is not None}
+        params -= set(rt.CENSUS_BOUNDED)
+        for n in _census_own_nodes(fn):
+            if not isinstance(n, ast.Call) or not isinstance(n.func, ast.Name):
+                continue
+            cands = runner_simple.get(n.func.id, [])
+            target = None
+            for c in cands:
+                if "<locals>" in c:
+                    if c.rsplit(".<locals>.", 1)[0] in (q, q.rsplit(".<locals>.", 1)[0]) or q.startswith(
+                            c.rsplit(".<locals>.", 1)[0]):
+                        target = c
+                elif "<locals>" not in c:
+                    target = target or c
+            if target is None:
+                continue
+            pos, kws, _builder, _injects = rt.RUNNERS[target]
+            args = [n.args[i] for i in pos if i < len(n.args) and not isinstance(n.args[i], ast.Starred)]
+            args += [k.value for k in n.keywords if k.arg in kws]
+            key = "%s|%s|%s" % (q, target, ", ".join(ast.unparse(a) for a in args))
+            keys_seen.add(key)
+            classes = [_census_classify(a, fn, params, rt) for a in args]
+            own = rt.RUNNERS.get(q, (None, None, None, False))[2]
+            binds = _census_bindings(fn)
+
+            def by_own(a):
+                vals = binds.get(a.id, []) if isinstance(a, ast.Name) else [a]
+                return bool(own) and bool(vals) and all(isinstance(v, ast.Call) and getattr(v.func, "id", None) == own
+                                                        for v in vals)
+            if key in rt.COMMAND_REGISTRY:
+                how = "registry"
+            elif args and all(by_own(a) for a in args):
+                how = "runner"
+            elif "other" in classes:
+                how = None
+                problems.append("a process start no registry names: %s (line %d)" % (key, n.lineno))
+            elif "param" in classes:
+                how = "runner" if q in rt.RUNNERS else None
+                if how is None:
+                    problems.append("a function hands its own argument to a process start and RUNNERS does not "
+                                    "name it: %s (line %d)" % (key, n.lineno))
+            elif "git" in classes:
+                how = "git"
+            elif rt.RUNNERS[target][3]:
+                how = None
+                problems.append("a call of %s, whose builder adds batch text, that COMMAND_REGISTRY does not name: %s "
+                                "(line %d)" % (target, key, n.lineno))
+            elif key in rt.CONSTANT_COMMANDS:
+                how = "constant"
+                if _census_measure(rt, src, key) != rt.CONSTANT_COMMANDS[key][1]:
+                    problems.append("a constant command's recorded length is not its measured length: %s (recorded "
+                                    "%d, measured %d)" % (key, rt.CONSTANT_COMMANDS[key][1],
+                                                          _census_measure(rt, src, key)))
+            else:
+                how = None
+                problems.append("a constant command CONSTANT_COMMANDS does not list: %s (line %d)" % (key, n.lineno))
+            sites.append((key, how, n.lineno))
+    for key in sorted(set(rt.COMMAND_REGISTRY) - keys_seen):
+        problems.append("a registry entry names no site: %s" % key)
+    for key in sorted(set(rt.CONSTANT_COMMANDS) - keys_seen):
+        problems.append("a constant entry names no site: %s" % key)
+    used = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "git_argv":
+            if not n.args or not isinstance(n.args[0], ast.Constant) or n.args[0].value not in rt.GIT_FORMS:
+                problems.append("git_argv names no form of GIT_FORMS at line %d: %s" % (n.lineno, ast.unparse(n)))
+                continue
+            form = n.args[0].value
+            used.add(form)
+            if len(n.args) - 1 != len(rt.GIT_FORMS[form][1]):
+                problems.append("git_argv(%r) at line %d hands %d arguments, the form takes %d"
+                                % (form, n.lineno, len(n.args) - 1, len(rt.GIT_FORMS[form][1])))
+    for form in sorted(set(rt.GIT_FORMS) - used):
+        problems.append("the git form %s is built nowhere" % form)
+    return problems, sites
+
+
+def _census_measure(rt, src, key):
+    """The measured length of one CONSTANT_COMMANDS site: its command arguments evaluated with the registry's stand-ins
+    for bounded names and the module's values for the rest, made into the line by the runner's own builder; every
+    binding a name has is tried and the longest line counts."""
+    import itertools
+    tree = ast.parse(src)
+    fns = _census_functions(tree)
+    q, target, _text = key.split("|", 2)
+    fn = fns[q]
+    pos, kws, builder, _injects = rt.RUNNERS[target]
+    binds = _census_bindings(fn)
+    best = 0
+    for n in _census_own_nodes(fn):
+        if not isinstance(n, ast.Call) or not isinstance(n.func, ast.Name) or n.func.id != target.split(".")[-1]:
+            continue
+        args = [n.args[i] for i in pos if i < len(n.args)] + [k.value for k in n.keywords if k.arg in kws]
+        if "%s|%s|%s" % (q, target, ", ".join(ast.unparse(a) for a in args)) != key:
+            continue
+        names = sorted({m.id for a in args for m in ast.walk(a) if isinstance(m, ast.Name)
+                        and m.id in binds and m.id not in rt.CENSUS_BOUNDED})
+        choices = [[v.value if isinstance(v, ast.Starred) else v for v in binds[x]] for x in names]
+        for combo in itertools.product(*choices):
+            env = dict(vars(rt))
+            env.update({k: v[1]() for k, v in rt.CENSUS_BOUNDED.items()})
+            for x, v in zip(names, combo):
+                env[x] = eval(compile(ast.Expression(v), "<census>", "eval"), env)
+            vals = [eval(compile(ast.Expression(a), "<census>", "eval"), env) for a in args]
+            argv = vals[0] if builder is None else getattr(rt, builder)(*vals)
+            units = (len(argv.encode("utf-16-le", "surrogatepass")) // 2 if isinstance(argv, str)
+                     else rt.cmdline_units(argv))
+            best = max(best, units)
+    return best
+
+
+# ── CMDLINE-REST r1 fixes: tree-id restart proofs (F1), one isolated scratch configuration and contained names (F2),
+# the pre-flight scoped to the run (F3), one runner and its census (F4), every commit argument scanned (F6) ──
+
+
+def _r2_precursor_on_main(rt, ns, tmp_path):
+    """The batch's precursor committed from its message file and pushed: the sql files are on main and origin."""
+    paths = ["backend/sql/" + f for f in rt.precursor_files()]
+    ns.git("checkout", rt.BRANCH, "--", *paths)
+    commit = ns.commit_exact(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    ns.git("push", "-q", "origin", "main")
+    ns.reset_marker()
+    return commit
+
+
+@pytest.mark.parametrize("left", ["staged", "committed", "pushed"])
+def test_r2_f1_a_phase_4_restart_after_a_completed_precursor_is_proved_by_tree_ids(monkeypatch, tmp_path, left):
+    """With the batch's sql already on main (a completed precursor), a restart of phase 4 that finds the lane's merge
+    staged, committed or pushed proves it by tree ids (the clean merge of the base and the tip) and finishes: one
+    merge, its parents the precursor and the tip, its stored message exactly the derived text."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    base = _r2_precursor_on_main(rt, ns, tmp_path)
+    if left == "staged":
+        ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    else:
+        ns.merge_exact()
+        if left == "pushed":
+            ns.git("push", "-q", "origin", "main")
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    try:
+        rt.phase_code(GO, st)
+    except ns.Deployed:
+        pass
+    except rt.Fail as e:
+        pytest.fail("the restart (%s) after a completed precursor was refused: %s" % (left, str(e)[:300]))
+    merge = st.get("code_sha")
+    assert merge == ns.head("HEAD") == ns.origin_main(), (left, merge)
+    assert ns.parents(merge) == [base, ns.tip], left
+    assert ns.stored(merge) == _rt_committed_text(rt.MERGE_MESSAGE).encode("utf-8"), left
+    assert ns.marker_lines() == (["ran"] if left == "staged" else []), left
+
+
+def test_r2_f1_a_precursor_whose_sql_partly_equals_mains_is_proved_by_tree_ids(monkeypatch, tmp_path):
+    """One of the batch's sql files already on main with the branch's content: the precursor, staged and then
+    restarted, is proved by tree ids (main's tree with the batch's blobs) and committed and pushed once."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    first = "backend/sql/" + rt.precursor_files()[0]
+    ns.git("checkout", rt.BRANCH, "--", first)
+    ns.git("commit", "-q", "-m", "one sql file already on main")
+    ns.git("push", "-q", "origin", "main")
+    base = ns.head("HEAD")
+    ns.reset_marker()
+    ns.git("checkout", rt.BRANCH, "--", *["backend/sql/" + f for f in rt.precursor_files()])
+    st = _rt_fresh(rt)
+    try:
+        rt.phase_precursor(GO, st)
+    except rt.Fail as e:
+        pytest.fail("a staged precursor beside a file main already holds was refused: %s" % str(e)[:300])
+    pre = st.get("precursor_sha")
+    assert pre == ns.head("HEAD") == ns.origin_main() and ns.parents(pre) == [base]
+    assert ns.marker_lines() == ["ran"] and ns.pushes == [["git", "push", "origin", "main"]]
+
+
+def test_r2_f1_a_merge_of_two_changes_to_one_file_with_the_wrong_content_is_not_pushed(monkeypatch, tmp_path):
+    """Main and the lane each change one file in another place; a committed merge that keeps main's side only
+    (the right parents and message, the wrong tree) is refused before the push: it is not the clean merge."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("checkout", "-q", rt.BRANCH)
+    (ns.repo / "README").write_text("the lane's line\nroot\n")
+    ns.git("commit", "-q", "-am", "the lane changes the readme" + _TRAILER)
+    tip = ns.head("HEAD")
+    ns.git("checkout", "-q", "main")
+    (ns.repo / "README").write_text("root\nmain's line\n")
+    ns.git("commit", "-q", "-am", "main changes the readme")
+    ns.git("push", "-q", "origin", "main")
+    base = ns.head("HEAD")
+    monkeypatch.setattr(rt, "REVIEWED_TIP", tip)
+    ns.git("merge", "-q", "--no-ff", "--no-commit", rt.BRANCH)
+    (ns.repo / "README").write_text("root\nmain's line\n")
+    ns.git("add", "README")
+    merge = ns.commit_exact(_rt_committed_text(rt.MERGE_MESSAGE))
+    assert ns.parents(merge) == [base, tip]
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    try:
+        rt.phase_code(GO, st)
+    except rt.Fail as e:
+        said = str(e)
+    except ns.Deployed:
+        pytest.fail("the merge with the wrong tree was pushed and deployed")
+    else:
+        pytest.fail("the merge with the wrong tree was not refused")
+    assert "not the clean merge's" in said and "NOT pushed" in said, said[:300]
+    assert ns.origin_main() == base and ns.pushes == [] and "code_sha" not in st
+
+
+def test_r2_f1_a_precursor_that_changes_a_files_mode_is_not_pushed(monkeypatch, tmp_path):
+    """A committed precursor with the batch's blobs and message but one sql file made executable is not the
+    expected tree (main's tree with the tip's blobs AND modes): refused, nothing pushed, no sha recorded."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    paths = ["backend/sql/" + f for f in rt.precursor_files()]
+    ns.git("checkout", rt.BRANCH, "--", *paths)
+    ns.git("update-index", "--chmod=+x", paths[0])
+    ns.commit_exact(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    ns.reset_marker()
+    st = _rt_fresh(rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_precursor(GO, st)
+    assert ns.origin_main() == ns.root and ns.pushes == [] and "precursor_sha" not in st, str(exc.value)[:300]
+
+
+def _r2_global_config(monkeypatch, tmp_path, lines):
+    path = tmp_path / "scratch-global.gitconfig"
+    path.write_text(lines)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(path))
+    return path
+
+
+def test_r2_f2_the_release_commit_stores_the_whole_message_whatever_the_cleanup_config(monkeypatch, tmp_path):
+    """commit.cleanup=verbatim in a (scratch) global configuration and messages with trailing whitespace: the
+    precursor an earlier attempt committed under it stores the whole text, and the restart proves exactly that text
+    (the stored message equals the message file byte for byte) and pushes it; the merge after it commits with the
+    explicit --cleanup=verbatim and stores its whole text too."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.git("config", "--unset", "commit.cleanup")
+    _r2_global_config(monkeypatch, tmp_path, "[commit]\n\tcleanup = verbatim\n")
+    tail = "\n\nA line with trailing spaces   \nand a last line"
+    monkeypatch.setattr(rt, "PRECURSOR_MESSAGE", rt.PRECURSOR_MESSAGE + tail)
+    monkeypatch.setattr(rt, "MERGE_MESSAGE", rt.MERGE_MESSAGE + tail)
+    ns.git("checkout", rt.BRANCH, "--", *["backend/sql/" + f for f in rt.precursor_files()])
+    earlier = ns.commit_exact(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    assert ns.stored(earlier) == _rt_committed_text(rt.PRECURSOR_MESSAGE).encode("utf-8")
+    ns.reset_marker()
+    st = _rt_fresh(rt)
+    try:
+        rt.phase_precursor(GO, st)
+    except rt.Fail as e:
+        pytest.fail("the precursor committed under commit.cleanup=verbatim was refused: %s" % str(e)[:300])
+    assert st.get("precursor_sha") == earlier == ns.origin_main() and ns.marker_lines() == []
+    st["schema_done"] = True
+    with pytest.raises(ns.Deployed):
+        rt.phase_code(GO, st)
+    assert ns.stored(st["code_sha"]) == _rt_committed_text(rt.MERGE_MESSAGE).encode("utf-8")
+
+
+def test_r2_f2_a_non_ascii_sql_name_under_the_default_quote_path_is_proved(monkeypatch, tmp_path):
+    """A batch whose sql list holds a non-ASCII name (git's default core.quotePath quotes it in path output): a
+    staged precursor is proved by tree ids, never by parsing quoted names, and committed and pushed once."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["schema_sql"] = list(entry.get("schema_sql") or []) + ["427_café_name.sql"]
+    monkeypatch.setitem(rt.BATCHES, name, entry)
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    assert "427_café_name.sql" in rt.precursor_files()
+    ns.git("checkout", rt.BRANCH, "--", *["backend/sql/" + f for f in rt.precursor_files()])
+    st = _rt_fresh(rt)
+    try:
+        rt.phase_precursor(GO, st)
+    except rt.Fail as e:
+        pytest.fail("a staged precursor with a non-ASCII name was refused: %s" % str(e)[:300])
+    assert st.get("precursor_sha") == ns.origin_main() and ns.marker_lines() == ["ran"]
+
+
+def test_r2_f2_the_preflight_runs_isolated_from_global_hooks(monkeypatch, tmp_path):
+    """A rejecting pre-receive (and pre-commit) hook named by a global core.hooksPath: the pre-flight passes and
+    neither hook runs, since its scratch repositories read no system or global configuration and set their own
+    empty hooks folder."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    hooks = tmp_path / "global-hooks"
+    hooks.mkdir()
+    marker = tmp_path / "global-hook-ran.txt"
+    for hook in ("pre-receive", "pre-commit"):
+        with open(hooks / hook, "w", newline="\n") as fh:
+            fh.write("#!/bin/sh\necho %s >> '%s'\nexit 1\n" % (hook, marker.as_posix()))
+    _r2_global_config(monkeypatch, tmp_path, "[core]\n\thooksPath = %s\n" % hooks.as_posix())
+    where = tmp_path / "preflight"
+    where.mkdir()
+    try:
+        rt.git_forms_preflight(where=str(where))
+    except rt.Fail as e:
+        pytest.fail("the pre-flight read the global hooks: %s" % str(e)[:300])
+    assert not marker.exists(), marker.read_text()
+
+
+def test_r2_f2_an_escaping_sql_name_is_refused_with_nothing_written(monkeypatch, tmp_path):
+    """A sql name that leaves backend/sql/ is outside the migration name form at check, and the pre-flight refuses
+    it by containment before it makes anything: the parent folder's listing is the same before and after."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["schema_sql"] = list(entry.get("schema_sql") or []) + ["../" * 6 + "escaped.sql"]
+    monkeypatch.setitem(rt.BATCHES, "zz-escaping-name", entry)
+    misses, _unread = rt.measure_every_batch()
+    assert [m[0] for m in misses] == ["zz-escaping-name"] and "migration name form" in misses[0][1], misses
+    rt.select_batch("zz-escaping-name")
+    where = tmp_path / "deep" / "er" / "preflight"
+    where.mkdir(parents=True)
+    before = sorted(str(p) for p in tmp_path.rglob("*"))
+    with pytest.raises(rt.Fail) as exc:
+        rt.git_forms_preflight(where=str(where))
+    assert "escaped.sql" in str(exc.value), str(exc.value)[:300]
+    assert sorted(str(p) for p in tmp_path.rglob("*")) == before
+
+
+def test_r2_f3_the_preflight_takes_the_runs_selected_phases(monkeypatch, tmp_path):
+    """About 700 short sql names whose phase-1 checkout is over the bound: with the precursor completed, a run of
+    --from code passes the pre-flight (phase 1's forms are not this run's); a run that includes phase 1 is refused
+    by the pre-token measure before any token."""
+    import copy
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    entry = copy.deepcopy(rt.BATCHES[name])
+    entry["schema_sql"] = ["%03d_a_short_migration_name_here.sql" % i for i in range(700)]
+    monkeypatch.setitem(rt.BATCHES, name, entry)
+    rt.select_batch(name)
+    checkout = rt.precursor_cmds(rt.precursor_files(), "F")[2]
+    assert rt.cmdline_units(checkout) > rt.CMDLINE_MAX
+    phases = [p for p, _fn in rt.PHASES]
+    later = phases[phases.index("code"):]
+    st = {"precursor_sha": "f" * 40, "schema_done": True}
+    where = tmp_path / "preflight"
+    where.mkdir()
+    try:
+        ran = rt.git_forms_preflight(later, st, where=str(where))
+    except rt.Fail as e:
+        pytest.fail("the pre-flight of a --from code run measured phase 1: %s" % str(e)[:300])
+    assert not any(r.startswith("phase 1: ") for r in ran), ran
+    with pytest.raises(rt.Fail) as exc:
+        rt.assert_run_cmdlines_fit(phases, {})
+    assert "phase 1" in str(exc.value), str(exc.value)[:300]
+
+
+def _r2_route_at(rt, units):
+    """A path whose longest status-probe line (over the three hosts) is exactly `units` UTF-16 units."""
+    head = "/api/v1/zz-boundary?pad="
+    longest = max((rt.PRIMARY, rt.STANDBY, rt.EDGE_HOST), key=lambda h: rt.cmdline_units(rt.http_code_argv(h, head)))
+    return head + "a" * (units - rt.cmdline_units(rt.http_code_argv(longest, head)))
+
+
+def test_r2_f4_the_runner_refuses_a_line_over_the_bound_before_it_starts(monkeypatch, tmp_path, capsys):
+    """start_process, the one runner, starts a line of exactly CMDLINE_MAX units and refuses one unit more before
+    the process starts, naming the builder; and a run whose route probe is one unit over stops before its token,
+    while the same run at exactly the bound writes it."""
+    import copy
+    rt, _src = _release_train()
+    started = []
+    monkeypatch.setattr(rt.subprocess, "run", lambda argv, **kw: started.append(list(argv)) or SimpleNamespace(
+        returncode=0, stdout=b"", stderr=b""))
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+
+    def a_builder(units):
+        argv = ["git", "x"]
+        return argv + ["a" * (units - rt.cmdline_units(argv) - 1)]
+    exact = a_builder(rt.CMDLINE_MAX)
+    while rt.cmdline_units(exact) < rt.CMDLINE_MAX:
+        exact[-1] += "a"
+    assert rt.cmdline_units(exact) == rt.CMDLINE_MAX
+    rt.start_process("run", exact)
+    assert started == [exact]
+    over = exact[:-1] + [exact[-1] + "a"]
+    with pytest.raises(rt.Fail) as exc:
+        rt.start_process("run", over)
+    assert "test_r2_f4_the_runner_refuses" in str(exc.value) and "not started" in str(exc.value), str(exc.value)
+    assert started == [exact]
+    monkeypatch.undo()
+
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    for units, written in ((rt.CMDLINE_MAX, True), (rt.CMDLINE_MAX + 1, False)):
+        entry = copy.deepcopy(rt.BATCHES[name])
+        entry["new_routes"] = [_r2_route_at(rt, units)]
+        entry.pop("smoke_route", None)
+        monkeypatch.setitem(rt.BATCHES, "zz-boundary", entry)
+        _rt_world(monkeypatch, rt)
+        events = []
+        monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+        monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "zz-boundary",
+                                             "--only", "verify"])
+        try:
+            rt.main()
+        except Exception:
+            pass                       # what a phase does after the token is not this check's subject
+        out = capsys.readouterr().out
+        assert bool(events) == written, (units, out[-600:])
+        if not written:
+            assert "Stopped before any phase ran and before a train token was written." in out, out[-600:]
+
+
+def test_r2_f4_the_census_names_every_process_start(monkeypatch):
+    """Every place the train starts a process is named: by COMMAND_REGISTRY, the git registry, RUNNERS or
+    CONSTANT_COMMANDS (with its reason and its measured length); the census refuses a planted start outside them."""
+    rt, src = _release_train()
+    problems, sites = _census(rt, src)
+    assert problems == [], problems
+    assert len(sites) >= 100 and {how for _k, how, _l in sites} <= {"registry", "git", "runner", "constant"}
+    for key, (reason, units) in rt.CONSTANT_COMMANDS.items():
+        assert reason and units <= rt.CMDLINE_MAX, key
+    planted = src + "\n\ndef zz_planted_start(x):\n    return run([\"curl\", x])\n"
+    assert any("zz_planted_start" in p for p in _census(rt, planted)[0])
+    planted = src + "\n\ndef zz_planted_raw():\n    return subprocess.run([\"git\", \"status\"])\n"
+    line = len(planted.splitlines())
+    assert any("a process start outside start_process at line %d" % line in p for p in _census(rt, planted)[0])
+
+
+def test_r2_f4_the_preflight_runs_every_reached_git_form_against_scratch(monkeypatch, tmp_path):
+    """Every form of GIT_FORMS runs once in the pre-flight of a whole landing (the lists' forms by their list,
+    the others by name, stripspace-free cat-file, the restart reads, ls-remote and the push address included),
+    every git command in the scratch folder and none against a network address."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    seen = []
+    real = rt.subprocess.run
+
+    def spy(argv, **kw):
+        seen.append((list(argv), kw.get("cwd")))
+        return real(argv, **kw)
+    monkeypatch.setattr(rt.subprocess, "run", spy)
+    where = tmp_path / "preflight"
+    where.mkdir()
+    try:
+        ran = rt.git_forms_preflight(where=str(where))
+    except rt.Fail as e:
+        pytest.fail("the pre-flight of a whole landing was refused: %s" % str(e)[:300])
+    named = {r.split(": ", 1)[1] for r in ran if r.startswith("form: ")}
+    used = {f for f, v in rt.GIT_FORMS.items() if set(v[0]) - {"check"}}     # check's own reads are not the run's
+    assert named | set(rt.LIST_FORMS) | {"checkout-new-branch"} >= used, used - named
+    assert seen and all(str(where) in str(cwd) for _a, cwd in seen), [c for _a, c in seen][:3]
+    assert not any("://" in a or "github" in a for argv, _c in seen for a in argv)
+    monkeypatch.setitem(rt.GIT_FORMS, "zz-unrun", (("code",), (), lambda: ["git", "--version"]))
+    monkeypatch.setattr(rt, "_preflight_call", (lambda real_call: lambda form, *a: (
+        (_ for _ in ()).throw(KeyError(form)) if form == "zz-unrun" else real_call(form, *a)))(rt._preflight_call))
+    with pytest.raises((rt.Fail, KeyError)):
+        rt.git_forms_preflight(where=str(where))
+
+
+def _r2_commit_arguments(src):
+    """Every list or tuple literal of `src` holding the constant "commit": each constant after it that hands git its
+    message on the command line (-m, -mTEXT, --message, -am...), wherever it stands after "commit"."""
+    import ast
+    sites = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            vals = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
+            if "commit" in vals:
+                rest = vals[vals.index("commit") + 1:]
+                if any(isinstance(y, str) and y.startswith("-") and not y.startswith("--") and "m" in y[1:]
+                       or isinstance(y, str) and y.startswith("--message") for y in rest):
+                    sites.append(node.lineno)
+    return sites
+
+
+def test_r2_f6_no_commit_anywhere_in_the_train_puts_its_message_on_the_line():
+    """Every commit argument of every list in the train is scanned, the pre-flight's seeds included (they commit
+    from seed files too), with no exception; the scan finds a planted message after other flags."""
+    rt, src = _release_train()
+    assert _r2_commit_arguments(src) == []
+    assert _r2_commit_arguments('a = ["git", "commit", "-q", "-m", x]\nb = ("commit", "-q", "--message=y")\n'
+                                'c = ["git", "commit", "-qam", z]\nd = ["git", "commit", "-q", "-F", p]\n') == [1, 2, 3]
+
+
+# ── CMDLINE-REST r2 fixes: every push proved first and every unexpected index refused (HIGH 1), a precursor
+# recognised by main's tree (HIGH 2), the census's reject rule (HIGH 3), the pre-flight on recorded states (MEDIUM 4),
+# the exact code-only form set (MEDIUM 5), the control probe at the bound (MEDIUM 6) ──
+
+_REJECT_OS = ("system", "popen", "spawn", "exec", "posix_spawn", "fork", "startfile")
+_REJECT_SUBPROCESS_ATTRS = ("TimeoutExpired", "SubprocessError", "CalledProcessError", "PIPE", "STDOUT", "DEVNULL",
+                            "list2cmdline")
+_RUNNER_FUNCTIONS = ("start_process",)
+# The census's closed list of the OTHER modules that start a process (besides subprocess and os): no import of any
+# of them, in any form (plain, aliased, dotted, from-import), at any level. Matched on the import's top-level name.
+_REJECT_SIBLING_MODULES = {
+    "asyncio": "create_subprocess_exec, create_subprocess_shell and a loop's subprocess_exec start a process",
+    "multiprocessing": "Process, Pool and its spawn and forkserver start methods start an interpreter",
+    "concurrent": "concurrent.futures hands out ProcessPoolExecutor, whose workers are processes",
+    "pty": "pty.spawn and pty.fork start a process",
+    "_winapi": "CreateProcess, the Windows start under subprocess",
+    "_posixsubprocess": "fork_exec, the POSIX start under subprocess",
+    "nt": "the os module's Windows half: system, spawnv and startfile without the name os",
+    "posix": "the os module's POSIX half: system, fork, execv and posix_spawn without the name os",
+    "webbrowser": "open starts a browser process",
+    "pydoc": "its pagers run a shell command",
+}
+# Every module the census watches by name: an attribute of that name on any receiver (os.path.os, tempfile._os) or a
+# from-import binding that name (from shutil import os) reaches the module itself.
+_CENSUS_MODULE_NAMES = ("os", "subprocess") + tuple(_REJECT_SIBLING_MODULES)
+# Attribute names (prefixes) that start a process whatever their receiver: the Windows entry points ctypes reaches
+# (the train imports ctypes inside two functions for job objects) and an asyncio loop's subprocess methods.
+_REJECT_STARTER_ATTRS = ("CreateProcess", "ShellExecute", "WinExec", "NtCreateProcess", "NtCreateUserProcess",
+                         "ZwCreateProcess", "ZwCreateUserProcess", "RtlCreateUserProcess", "create_subprocess",
+                         "subprocess_exec", "subprocess_shell")
+# Attribute names that open a namespace or a lookup by text on any receiver (f.__globals__, m.__dict__, the builtins
+# module behind print.__self__, b.__import__).
+_REJECT_NAMESPACE_ATTRS = ("__import__", "eval", "exec", "__builtins__", "__globals__", "__dict__", "__self__")
+# The train's sound lookups of its OWN module-level names by text (globals()), keyed by the function that holds them:
+# function -> (the form, how many such lookups the function holds, why). Any other count or form there is refused.
+_CENSUS_NAME_LOOKUP_ALLOWED = {
+    "registry_cmdlines": ("a subscript on globals()", 1,
+                          "calls each enumerator function the command registry names, by that name"),
+    "_hosts": ("a subscript on globals()", 1, "reads each address constant the probe list names, by that name"),
+    "_longest_host": ("globals().get", 1, "reads each address constant of a fixed tuple, absent ones as empty"),
+}
+
+
+def _census_reject(src):
+    """The census's REJECT rule over the train's syntax tree. It refuses: (a) any import of subprocess but one plain
+    module-level `import subprocess`; (b) the name subprocess other than as the receiver of an attribute: a call only
+    inside a runner function, else one of the non-starting names (exceptions, pipes, list2cmdline), the one
+    module-level seam SUBPROCESS_RUNNER excepted; (c) the same for os: any import of os but one plain module-level
+    `import os` (an alias, an import inside a function or class, a dotted import, any from-import, `from os import *`
+    included), the name os rebound or used other than as an attribute's receiver, os's process functions outside a
+    runner, os's private and dunder attributes anywhere; (d) any import, at any level and in any form, of a module of
+    the closed list _REJECT_SIBLING_MODULES; an attribute or a from-imported name equal to a watched module's name;
+    (e) __import__, importlib, builtins, __builtins__, eval, exec, getattr on os or subprocess, and the namespace
+    attributes of _REJECT_NAMESPACE_ATTRS anywhere; (f) sys.modules in any use (a subscript, a .get, a value, through
+    os.sys, or from-imported); a subscript on, an attribute of, or any other use of globals(), locals() or vars(),
+    save the allow-listed sites of _CENSUS_NAME_LOOKUP_ALLOWED in their exact form and count; (g) an attribute, a
+    getattr name or a subscript name that starts a process on any receiver (_REJECT_STARTER_ATTRS: ctypes's
+    CreateProcess*, ShellExecute*, WinExec and the native creators; a loop's subprocess_exec). Returns one line per
+    refusal, naming the form and its line number. The census is syntactic: a start reached through a computed name,
+    or through a module outside its closed list, is outside it."""
+    tree = ast.parse(src)
+    out, plain, plain_os = [], 0, 0
+    funcs = _census_functions(tree)
+    inside = {}
+    for q, fn in funcs.items():
+        for n in ast.walk(fn):
+            inside.setdefault(id(n), q.split(".<locals>.")[0])
+    seam = {id(st.value) for st in tree.body if isinstance(st, ast.Assign) and isinstance(st.value, ast.Attribute)
+            and [ast.unparse(t) for t in st.targets] == ["SUBPROCESS_RUNNER"]
+            and ast.unparse(st.value) == "subprocess.run"}
+    calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    parent = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+    lookups = {}
+    for n in ast.walk(tree):
+        line = getattr(n, "lineno", 0)
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                top = a.name.split(".")[0]
+                if a.name == "subprocess" and a.asname is None and n in tree.body:
+                    plain += 1
+                elif a.name == "os" and a.asname is None and n in tree.body:
+                    plain_os += 1
+                elif top == "os":
+                    out.append("an import of os other than the one plain module-level import (%s%s%s) refused "
+                               "(line %d)" % (a.name, " as %s" % a.asname if a.asname else "",
+                                              "" if n in tree.body else ", below module level", line))
+                elif top in _REJECT_SIBLING_MODULES:
+                    out.append("an import of %s refused: %s (line %d)" % (a.name, _REJECT_SIBLING_MODULES[top], line))
+                elif top in ("subprocess", "importlib", "builtins"):
+                    out.append("an import of %s refused (line %d)" % (a.name, line))
+        elif isinstance(n, ast.ImportFrom):
+            mod = n.module or ""
+            top = mod.split(".")[0] if not n.level else ""
+            if top in ("subprocess", "importlib", "builtins"):
+                out.append("a from-import of %s refused (line %d)" % (mod, line))
+            elif top == "os":
+                what = ("a star import from %s" % mod if any(a.name == "*" for a in n.names)
+                        else "a from-import of os's process functions" if any(a.name.startswith(_REJECT_OS)
+                                                                             for a in n.names)
+                        else "a from-import of %s (os is reached only as os.<name>)" % mod)
+                out.append("%s refused (line %d)" % (what, line))
+            elif top in _REJECT_SIBLING_MODULES:
+                out.append("a from-import of %s refused: %s (line %d)" % (mod, _REJECT_SIBLING_MODULES[top], line))
+            elif top == "sys" and any(a.name == "modules" for a in n.names):
+                out.append("a from-import of sys.modules refused (line %d)" % line)
+            elif any(a.name.lstrip("_") in _CENSUS_MODULE_NAMES for a in n.names):
+                out.append("a from-import binding a watched module's name (%s) refused (line %d)"
+                           % (", ".join(a.name for a in n.names), line))
+        elif isinstance(n, ast.Name) and n.id in ("subprocess", "os") and not isinstance(n.ctx, ast.Load):
+            out.append("the name %s rebound (line %d)" % (n.id, line))
+        elif isinstance(n, ast.Name) and n.id in ("__import__", "eval", "exec", "importlib", "__builtins__"):
+            out.append("%s refused (line %d)" % (n.id, line))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and n.args \
+                and isinstance(n.args[0], ast.Name) and n.args[0].id in ("os", "subprocess"):
+            out.append("getattr on %s refused (line %d)" % (n.args[0].id, line))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" \
+                and len(n.args) > 1 and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str) \
+                and n.args[1].value.startswith(_REJECT_STARTER_ATTRS):
+            out.append("getattr naming the process starter %s refused (line %d)" % (n.args[1].value, line))
+        elif isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str) \
+                and n.slice.value.startswith(_REJECT_STARTER_ATTRS):
+            out.append("a subscript naming the process starter %s refused (line %d)" % (n.slice.value, line))
+        elif isinstance(n, ast.Attribute) and n.attr.startswith(_REJECT_STARTER_ATTRS):
+            out.append("an attribute named %s refused: it starts a process on any receiver (line %d)"
+                       % (n.attr, line))
+        elif isinstance(n, ast.Attribute) and n.attr in _REJECT_NAMESPACE_ATTRS:
+            out.append("the namespace attribute %s refused (line %d)" % (n.attr, line))
+        elif isinstance(n, ast.Attribute) and n.attr == "modules" and (
+                isinstance(n.value, ast.Name) and n.value.id == "sys"
+                or isinstance(n.value, ast.Attribute) and n.value.attr == "sys"):
+            p = parent.get(id(n))
+            how = ("a subscript on sys.modules" if isinstance(p, ast.Subscript) and p.value is n
+                   else "sys.modules.%s" % p.attr if isinstance(p, ast.Attribute) and p.value is n
+                   else "sys.modules taken as a value")
+            out.append("%s refused (line %d)" % (how, line))
+        elif isinstance(n, ast.Attribute) and n.attr.lstrip("_") in _CENSUS_MODULE_NAMES:
+            out.append("the watched module %s reached as an attribute (.%s) refused (line %d)"
+                       % (n.attr.lstrip("_"), n.attr, line))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("globals", "locals", "vars"):
+            p = parent.get(id(n))
+            how = ("a subscript on %s()" % n.func.id if isinstance(p, ast.Subscript) and p.value is n
+                   else "%s().%s" % (n.func.id, p.attr) if isinstance(p, ast.Attribute) and p.value is n
+                   else "%s() taken as a value" % n.func.id)
+            key = (p.slice if isinstance(p, ast.Subscript) else
+                   (getattr(parent.get(id(p)), "args", None) or [None])[0] if isinstance(p, ast.Attribute) else None)
+            if isinstance(key, ast.Constant):
+                how += " naming %r" % (key.value,)      # a name written as text is never an allow-listed form
+            lookups.setdefault(inside.get(id(n)), []).append((how, line))
+    for q, seen in lookups.items():
+        allowed = _CENSUS_NAME_LOOKUP_ALLOWED.get(q)
+        if allowed and len(seen) == allowed[1] and all(how == allowed[0] for how, _ in seen):
+            continue
+        for how, line in seen:
+            out.append("%s refused%s (line %d)" % (how, " (the allow-listed %s holds %d such lookups of the form %s, "
+                                                    "not this)" % (q, allowed[1], allowed[0]) if allowed else "", line))
+    attr_parents = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            attr_parents[id(n.value)] = n
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
+            continue
+        line = n.lineno
+        if n.id == "subprocess":
+            a = attr_parents.get(id(n))
+            if a is None:
+                out.append("the name subprocess used other than as an attribute's receiver (line %d)" % line)
+            elif id(a) in seam:
+                continue
+            elif id(a) in calls and a.attr not in _REJECT_SUBPROCESS_ATTRS:
+                if inside.get(id(a)) not in _RUNNER_FUNCTIONS:
+                    out.append("subprocess.%s called outside a runner (line %d)" % (a.attr, line))
+            elif a.attr not in _REJECT_SUBPROCESS_ATTRS:
+                out.append("subprocess.%s taken as a value (line %d)" % (a.attr, line))
+        elif n.id == "os":
+            a = attr_parents.get(id(n))
+            if a is None:
+                out.append("the name os used other than as an attribute's receiver (line %d)" % line)
+            elif a.attr.startswith("_"):
+                out.append("os.%s refused: a private or dunder attribute of os (line %d)" % (a.attr, line))
+            elif a.attr.startswith(_REJECT_OS) and inside.get(id(a)) not in _RUNNER_FUNCTIONS:
+                out.append("os.%s outside a runner (line %d)" % (a.attr, line))
+    if plain != 1:
+        out.append("%d plain module-level imports of subprocess, not one" % plain)
+    if plain_os != 1:
+        out.append("%d plain module-level imports of os, not one" % plain_os)
+    return out
+
+
+_REJECT_PLANTS = {
+    "alias": "def zz_plant():\n    import subprocess as sp\n    return sp.run([\"git\", \"status\"])\n",
+    "from-run": "def zz_plant():\n    from subprocess import run as r\n    return r([\"git\", \"status\"])\n",
+    "from-os": "def zz_plant():\n    from os import system as s\n    return s(\"git status\")\n",
+    "value": "def zz_plant():\n    f = subprocess.run\n    return f([\"git\", \"status\"])\n",
+    "getattr": "def zz_plant():\n    return getattr(subprocess, \"run\")([\"git\", \"status\"])\n",
+    "dunder": "def zz_plant():\n    return __import__(\"subprocess\").run([\"git\", \"status\"])\n",
+    "importlib": "def zz_plant():\n    return importlib.import_module(\"subprocess\").run([\"git\", \"status\"])\n",
+    # TRAIN-CENSUS-OS-1 (item 40): the os module under another name, the sibling modules, a module reached by its
+    # name as text, and the process starters ctypes reaches
+    "os-alias": "def zz_plant():\n    import os as o\n    return o.system(\"git status\")\n",
+    "os-inner": "def zz_plant():\n    import os\n    return os.getpid()\n",
+    "os-class": "class ZzPlant:\n    import os\n    pid = os.getpid()\n",
+    "os-dotted": "def zz_plant():\n    import os.path as p\n    return p.join(\"a\")\n",
+    "os-twice": "import os\n\ndef zz_plant():\n    return os.getpid()\n",
+    "os-star": "from os import *\n\ndef zz_plant():\n    return system(\"git status\")\n",
+    "os-from": "def zz_plant():\n    from os import environ as e\n    return e\n",
+    "os-assigned": "def zz_plant():\n    o = os\n    return o.system(\"git status\")\n",
+    "os-argument": "def zz_plant():\n    return zz_call(os, \"system\")\n",
+    "os-returned": "def zz_plant():\n    return os\n",
+    "os-container": "def zz_plant():\n    return [os][0].system(\"git status\")\n",
+    "os-rebound": "def zz_plant():\n    os = zz_other\n",
+    "os-private": "def zz_plant():\n    return os._spawnvef(0, \"git\", [\"git\"], None, None)\n",
+    "os-attribute": "def zz_plant():\n    return zz_path.os.system(\"git status\")\n",
+    "os-from-other": "def zz_plant():\n    from shutil import os as o\n    return o.system(\"git status\")\n",
+    "sibling-from": "def zz_plant():\n    from concurrent.futures import ProcessPoolExecutor as P\n    return P().submit(print)\n",
+    "sibling-asyncio-from": "def zz_plant():\n    from asyncio import create_subprocess_exec as c\n    return c(\"git\")\n",
+    "loop-subprocess": "async def zz_plant(loop):\n    return await loop.subprocess_exec(zz_proto, \"git\", \"status\")\n",
+    "sys-modules-subscript": "def zz_plant():\n    return sys.modules[\"subprocess\"].run([\"git\", \"status\"])\n",
+    "sys-modules-get": "def zz_plant():\n    return sys.modules.get(\"os\").system(\"git status\")\n",
+    "sys-modules-value": "def zz_plant():\n    m = os.sys.modules\n    return m[\"os\"].system(\"git status\")\n",
+    "sys-modules-from": "def zz_plant():\n    from sys import modules as m\n    return m[\"os\"].system(\"git status\")\n",
+    "globals-subscript": "def zz_plant():\n    return globals()[\"subprocess\"].run([\"git\", \"status\"])\n",
+    "globals-get": "def zz_plant():\n    return globals().get(\"os\").system(\"git status\")\n",
+    "locals-subscript": "def zz_plant():\n    return locals()[\"zz_name\"]\n",
+    "vars-subscript": "def zz_plant():\n    return vars(sys)[\"modules\"][\"os\"].system(\"git status\")\n",
+    "globals-value": "def zz_plant():\n    g = globals()\n    return g[\"os\"].system(\"git status\")\n",
+    "namespace-globals": "def zz_plant():\n    return zz_plant.__globals__[\"os\"].system(\"git status\")\n",
+    "namespace-builtins": "def zz_plant():\n    return print.__self__.__import__(\"os\").system(\"git status\")\n",
+    "builtins-import": "def zz_plant():\n    import builtins as b\n    return b.open\n",
+    "builtins-name": "def zz_plant():\n    return __builtins__\n",
+    "ctypes-attribute": "def zz_plant(k):\n    return k.CreateProcessW(None, \"git status\", None, None, False, 0, None, None, None, None)\n",
+    "ctypes-getattr": "def zz_plant(k):\n    return getattr(k, \"ShellExecuteW\")(None, \"open\", \"git\", None, None, 1)\n",
+    "ctypes-subscript": "def zz_plant(k):\n    return k[\"WinExec\"](b\"git status\", 0)\n",
+}
+# Every module of the closed list, plain-imported inside a function and aliased-imported at module level.
+for _m in sorted(_REJECT_SIBLING_MODULES):
+    _REJECT_PLANTS["sibling-%s" % _m] = "def zz_plant():\n    import %s\n    return %s\n" % (_m, _m)
+    _REJECT_PLANTS["sibling-%s-alias" % _m] = "import %s.zz_sub as zz_alias\n" % _m
+
+
+@pytest.mark.parametrize("form", sorted(_REJECT_PLANTS))
+def test_r3_high3_the_census_rejects_every_other_way_to_reach_a_process_start(form):
+    """The train's own text passes the reject rule (the control); each planted form (an aliased import, a
+    from-import of subprocess's run or os's system, subprocess.run taken as a value, getattr on subprocess,
+    __import__, importlib; os under another name, inside a function or class, star- or from-imported, assigned,
+    passed, returned, contained, rebound or reached as an attribute; each module of the closed sibling list;
+    sys.modules, globals(), locals(), vars() and the namespace attributes; ctypes's process starters by attribute,
+    getattr or subscript) is refused with the line it stands on. The assertion names the plant not refused."""
+    rt, src = _release_train()
+    assert _census_reject(src) == [], _census_reject(src)
+    planted = src + "\n\n" + _REJECT_PLANTS[form]
+    first = len(src.splitlines()) + 3
+    said = _census_reject(planted)
+    assert said and all("(line %d)" % first in s or "(line %d)" % (first + 1) in s or "(line %d)" % (first + 2) in s
+                        for s in said if "plain module-level" not in s), ("the plant %s was not refused" % form, said)
+
+
+def test_r3_high3_the_census_lookup_allow_list_names_live_sites_only():
+    """Each allow-listed name lookup of _CENSUS_NAME_LOOKUP_ALLOWED stands in the train, in its function, in its
+    form and count: an entry whose site moved or vanished is stale and fails here, never silently widening the rule."""
+    rt, src = _release_train()
+    tree = ast.parse(src)
+    funcs = _census_functions(tree)
+    for q, (how, count, why) in _CENSUS_NAME_LOOKUP_ALLOWED.items():
+        assert q in funcs and why, q
+        got = [c for c in ast.walk(funcs[q]) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+               and c.func.id in ("globals", "locals", "vars")]
+        assert len(got) == count, (q, len(got), count)
+        one = "globals().get(zz_name)" if how == "globals().get" else "globals()[zz_name]"
+        named = "globals().get(\"os\")" if how == "globals().get" else "globals()[\"os\"]"
+        for probe, what in (("return globals()", "a changed form"),
+                            ("return [%s]" % ", ".join([one] * (count + 1)), "one lookup more than the count"),
+                            ("return %s" % named, "a lookup of a name written as text")):
+            said = _census_reject("def %s():\n    %s\n" % (q, probe))
+            assert any("allow-listed %s" % q in s for s in said), (q, what, "is not refused", said)
+        assert not [s for s in _census_reject("import os\nimport subprocess\ndef %s():\n    return [%s]\n"
+                                              % (q, ", ".join([one] * count))) if "globals" in s], q
+
+
+def _push_sites(src):
+    """(function, push line, proved) for every push call of the train: a blocking_child whose kind is "push"; proved
+    when, earlier in the same function, it calls prove_before_push or a proof of its own defined inside it that
+    reads both parents_of and tree_of."""
+    tree = ast.parse(src)
+    out = []
+    for q, fn in _census_functions(tree).items():
+        own = _census_own_nodes(fn)
+        proofs = {"prove_before_push"}
+        for d in own:
+            if isinstance(d, ast.FunctionDef):
+                names = {getattr(c.func, "id", None) for c in ast.walk(d) if isinstance(c, ast.Call)}
+                if {"parents_of", "tree_of"} <= names or "prove_before_push" in names:
+                    proofs.add(d.name)
+        for n in own:
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "blocking_child" and n.args and \
+                    isinstance(n.args[-1], ast.Constant) and n.args[-1].value == "push":
+                proved = any(isinstance(c, ast.Call) and getattr(c.func, "id", None) in proofs
+                             and c.lineno < n.lineno for c in own)
+                out.append((q, n.lineno, proved))
+    return out
+
+
+def test_r3_high1_every_push_of_the_train_is_proved_first():
+    """Every push site (each blocking_child of kind push) stands after a proof of the commit's parents and tree in
+    its own function; the census finds the four sites and refuses a planted unproved push."""
+    rt, src = _release_train()
+    sites = _push_sites(src)
+    assert len(sites) >= 4 and all(p for _q, _l, p in sites), sites
+    planted = src + "\n\ndef zz_unproved(lease, c):\n    return blocking_child(lease, \"push\", c, \"push\")\n"
+    assert ("zz_unproved", len(planted.splitlines()), False) in _push_sites(planted)
+
+
+@pytest.mark.parametrize("index", ["foreign-staged", "clean"])
+def test_r3_high1_a_fresh_phase_4_on_a_main_that_already_holds_the_tip_pushes_nothing(monkeypatch, tmp_path, index):
+    """main and origin hold the reviewed merge and a commit after it, code_sha is not recorded: with a foreign
+    file staged, or with a clean index, phase 4 refuses before anything is committed or pushed."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    ns.merge_exact()
+    (ns.repo / "after.txt").write_text("a commit after the merge\n")
+    ns.git("add", "after.txt")
+    ns.git("commit", "-q", "-m", "after the merge")
+    ns.git("push", "-q", "origin", "main")
+    before = ns.origin_main()
+    if index == "foreign-staged":
+        (ns.repo / "foreign.txt").write_text("not the lane's\n")
+        ns.git("add", "foreign.txt")
+    ns.reset_marker()
+    st = _rt_fresh(rt, schema_done=True)
+    try:
+        rt.phase_code(GO, st)
+    except rt.Fail as e:
+        said = str(e)
+    except ns.Deployed:
+        pytest.fail("a fresh phase 4 on a main that holds the tip deployed (%s)" % index)
+    else:
+        pytest.fail("a fresh phase 4 on a main that holds the tip was not refused (%s)" % index)
+    want = {"foreign-staged": "the index is not HEAD's tree", "clean": "is already contained in main"}[index]
+    assert want in said, (index, said[:300])
+    assert ns.pushes == [] and ns.origin_main() == before and ns.marker_lines() == [] and "code_sha" not in st, \
+        (index, ns.pushes)
+
+
+def test_r3_high1_the_fresh_merge_is_proved_before_its_push(monkeypatch, tmp_path):
+    """A fresh phase 4 whose commit is not the clean merge (here: a commit hook adds a file to it) is refused
+    before the push, by the parents-and-tree proof; origin's main is unchanged."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    hook = ns.repo / ".git" / "hooks" / "pre-commit"
+    with open(hook, "a", newline="\n") as fh:
+        fh.write("echo extra > extra.txt\ngit add extra.txt\n")
+    st = _rt_fresh(rt, schema_done=True)
+    try:
+        rt.phase_code(GO, st)
+    except rt.Fail as e:
+        said = str(e)
+    except ns.Deployed:
+        pytest.fail("the fresh merge with a file the lane does not carry was pushed and deployed")
+    else:
+        pytest.fail("the fresh merge with a file the lane does not carry was not refused")
+    assert "NOT pushed" in said and ns.pushes == [] and ns.origin_main() == ns.root, said[:300]
+
+
+def test_r3_high2_a_precursor_is_recognised_by_mains_tree_not_heads(monkeypatch, tmp_path):
+    """From the common root, the checked-out lane commit adds only the batch's sql while main adds an unrelated
+    file: main is not taken for a precursor (its tree is not the expected one), and phase 1 lands on main."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    (ns.repo / "unrelated.txt").write_text("main's own change\n")
+    ns.git("add", "unrelated.txt")
+    ns.git("commit", "-q", "-m", "an unrelated change on main")
+    ns.git("push", "-q", "origin", "main")
+    base = ns.head("HEAD")
+    sql_only = ns.head(ns.tip + "^")
+    ns.git("checkout", "-q", sql_only)
+    ns.reset_marker()
+    st = _rt_fresh(rt)
+    try:
+        rt.phase_precursor(GO, st)
+    except rt.Fail as e:
+        pytest.fail("main with an unrelated change was taken for a precursor: %s" % str(e)[:300])
+    pre = st.get("precursor_sha")
+    assert pre == ns.origin_main() and ns.parents(pre) == [base], (pre, base)
+
+
+def test_r3_medium4_a_recorded_state_still_runs_the_preflight(monkeypatch, tmp_path, capsys):
+    """With code_sha recorded, `run --go --only code` still reaches git forms (it reads HEAD), so main runs the
+    pre-flight for those forms before the token."""
+    rt, _src = _release_train()
+    name, _path = _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    w = _rt_world(monkeypatch, rt)
+    rt.save_state(dict(_rt_fresh(rt, schema_done=True), code_sha="c" * 40, precursor_sha="d" * 40))
+    events = []
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: events.append(("token", phase)))
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", name, "--only", "code"])
+    try:
+        rt.main()
+    except Exception:
+        pass                           # what the phase does after the token is not this check's subject
+    capsys.readouterr()
+    assert w.preflights, "the pre-flight did not run for a recorded code_sha"
+
+
+_R3_CODE_ONLY_FORMS = {
+    "cat-file-commit", "checkout-main", "checkout-new-branch", "commit-file", "git-path-index", "log-trailer",
+    "ls-remote-main", "merge-no-ff", "merge-tree", "push-main", "push-url", "remote-url", "rev-list-parents",
+    "rev-parse", "rev-parse-branch", "status-tracked-z", "symbolic-ref-head", "tip-in-main", "verify-merge-head",
+    "write-tree"}
+
+
+def test_r3_medium5_the_code_only_preflight_runs_exactly_phase_4s_forms(monkeypatch, tmp_path):
+    """A --from code run with the precursor done: the pre-flight runs exactly phase 4's forms (by set equality),
+    never precursor recovery's cat-file-e-commit or is-ancestor."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    where = tmp_path / "preflight"
+    where.mkdir()
+    try:
+        ran = rt.git_forms_preflight(["code"], {"precursor_sha": "f" * 40}, where=str(where))
+    except rt.Fail as e:
+        pytest.fail("the code-only pre-flight was refused: %s" % str(e)[:300])
+    named = {r.split(": ", 1)[1] for r in ran if r.startswith("form: ")}
+    lists = set(rt.CODE_LIST) if any(r.startswith("phase 4: ") for r in ran) else set()
+    assert named | lists == _R3_CODE_ONLY_FORMS, sorted((named | lists) ^ _R3_CODE_ONLY_FORMS)
+
+
+def test_r3_medium6_the_control_probe_at_the_bound_passes_and_one_unit_over_is_refused(monkeypatch, tmp_path):
+    """The control probe's own line (http_code_argv on CONTROL_ROUTE, the mod-version header on it), measured
+    apart from every route: at exactly CMDLINE_MAX the pre-token measure passes, one unit over it refuses naming
+    the control probe."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    hosts = (rt.PRIMARY, rt.STANDBY, rt.EDGE_HOST)
+    head = rt.CONTROL_ROUTE + "?pad="
+    longest = max(hosts, key=lambda h: rt.cmdline_units(rt.http_code_argv(h, head)))
+    for extra, refused in ((0, False), (1, True)):
+        route = head + "a" * (rt.CMDLINE_MAX + extra - rt.cmdline_units(rt.http_code_argv(longest, head)))
+        assert rt.cmdline_units(rt.http_code_argv(longest, route)) == rt.CMDLINE_MAX + extra
+        monkeypatch.setattr(rt, "CONTROL_ROUTE", route)
+        if refused:
+            with pytest.raises(rt.Fail) as exc:
+                rt.assert_run_cmdlines_fit(["verify"], {})
+            assert "control probe" in str(exc.value), str(exc.value)[:300]
+        else:
+            try:
+                rt.assert_run_cmdlines_fit(["verify"], {})
+            except rt.Fail as e:
+                pytest.fail("the control probe at exactly the bound was refused: %s" % str(e)[:300])
+
+
+def test_r3_b6_the_preflight_holds_its_scratch_paths_to_the_census_stand_in(monkeypatch, tmp_path):
+    """Every scratch path of the pre-flight is held to SCRATCH_PATH_MAX, the length its census stand-in measures:
+    with the bound below the real paths the pre-flight refuses before it runs a command, and leaves its folder."""
+    rt, _src = _release_train()
+    _cmdline_sql_batch(monkeypatch, rt, tmp_path)
+    assert rt.SCRATCH_PATH_MAX == 260 and rt.CENSUS_BOUNDED["top"][1]() == "S" * 260
+    monkeypatch.setattr(rt, "SCRATCH_PATH_MAX", 20)
+    started = []
+    real = rt.subprocess.run
+    monkeypatch.setattr(rt.subprocess, "run", lambda argv, **kw: started.append(argv) or real(argv, **kw))
+    where = tmp_path / "preflight"
+    where.mkdir()
+    with pytest.raises(rt.Fail) as exc:
+        rt.git_forms_preflight(where=str(where))
+    assert "over the 20" in str(exc.value) and started == [], str(exc.value)[:300]
+    assert list(where.iterdir()) == []

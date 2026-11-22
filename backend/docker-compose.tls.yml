@@ -68,3 +68,10 @@ services:
         ipv4_address: 172.30.0.10
     security_opt:
       - apparmor:unconfined
+    # Log size limit: the same options as the base file's services, written
+    # out here rather than shared (see the api's comment in docker-compose.yml).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
