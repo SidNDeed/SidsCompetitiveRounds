@@ -826,6 +826,10 @@ def _release_train():
     spec = importlib.util.spec_from_file_location("release_train_under_test", train)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    if hasattr(mod, "closure_guard"):
+        # item 41: the closure guard reads git objects of the reviewed tip and both boxes' /health, which the
+        # worlds of this file do not answer; test_release_train_closure_guard.py drives it, the code phase included
+        mod.closure_guard = lambda st, stage, write=False: None
     return mod, train.read_text(encoding="utf-8")
 
 
@@ -6964,7 +6968,9 @@ def test_r3_medium5_the_code_only_preflight_runs_exactly_phase_4s_forms(monkeypa
         pytest.fail("the code-only pre-flight was refused: %s" % str(e)[:300])
     named = {r.split(": ", 1)[1] for r in ran if r.startswith("form: ")}
     lists = set(rt.CODE_LIST) if any(r.startswith("phase 4: ") for r in ran) else set()
-    assert named | lists == _R3_CODE_ONLY_FORMS, sorted((named | lists) ^ _R3_CODE_ONLY_FORMS)
+    # item 41: a tool that carries the closure guard reads the tip's evaluator files with one more form
+    want = _R3_CODE_ONLY_FORMS | ({"cat-file-batch"} if "cat-file-batch" in rt.GIT_FORMS else set())
+    assert named | lists == want, sorted((named | lists) ^ want)
 
 
 def test_r3_medium6_the_control_probe_at_the_bound_passes_and_one_unit_over_is_refused(monkeypatch, tmp_path):
