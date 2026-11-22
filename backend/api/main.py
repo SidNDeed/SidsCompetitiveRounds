@@ -46435,6 +46435,13 @@ async def internal_pending_dm_cancelled(
 
 LFP_COOLDOWN_SECONDS = 3600
 LFP_VALID_EXPIRY_MINUTES = (15, 30, 60, 180)
+# The closed list of mode words a ping may name, in the stored order: the three
+# ranked modes, then "casual" (LFP-CASUAL-1). The longest canonical value,
+# "1v1,2v2,ffa,casual", is 18 characters: it fits lfp_pings.modes VARCHAR(20)
+# (migration 202), and a client sends it within the request's 32-character
+# bound on modes.
+LFP_RANKED_MODES = ("1v1", "2v2", "ffa")
+LFP_MODE_ORDER = LFP_RANKED_MODES + ("casual",)
 
 
 class LfpPingRequest(BaseModel):
@@ -46459,7 +46466,19 @@ async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Dep
     )).scalar_one_or_none()
     if player is None or player.deleted_at is not None or not player.discord_id:
         return {"status": "not_linked"}
-    if not player.ranked_enabled:
+    # Aug 7 item 11: mode multi-select. Canonicalize against a closed allowlist
+    # (split, lowercase, dedupe, FIXED order) — never interpolated into SQL and
+    # never echoed raw (#188 mindset). Empty/garbage falls back to 1v1, which
+    # is also what pre-modes clients get via the Pydantic default.
+    # LFP-CASUAL-1: the list gains exactly one word, "casual" (the bot pings
+    # the casual role for it). A clock-free, data-free computation, so reading
+    # it before the gates below changes no answer an older client gets.
+    picked = {m.strip().lower() for m in (req.modes or "").split(",")}
+    modes = ",".join(m for m in LFP_MODE_ORDER if m in picked) or "1v1"
+    # The ranked gate applies whenever a ranked mode is named; a request whose
+    # only mode is casual passes it. The fallback above is a ranked mode, so a
+    # request that names nothing valid keeps the gate.
+    if not player.ranked_enabled and modes != "casual":
         return {"status": "ranked_disabled"}
     elapsed = (await db.execute(text(
         "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
@@ -46480,13 +46499,6 @@ async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Dep
     msg = _re.sub(r"(?i)\b(?:https?://|www\.|discord(?:app)?\.(?:gg|com/invite)/)\S+",
                   "(link removed)", msg)
     msg = _re.sub(r"[\r\n]+", " ", msg).strip()[:200]
-    # Aug 7 item 11: mode multi-select. Canonicalize against a closed allowlist
-    # (split, lowercase, dedupe, FIXED order) — never interpolated into SQL and
-    # never echoed raw (#188 mindset). Empty/garbage falls back to 1v1, which
-    # is also what pre-modes clients get via the Pydantic default.
-    _mode_order = ("1v1", "2v2", "ffa")
-    picked = {m.strip().lower() for m in (req.modes or "").split(",")}
-    modes = ",".join(m for m in _mode_order if m in picked) or "1v1"
     await db.execute(text(
         "INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at, modes) "
         "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m), :modes)"
