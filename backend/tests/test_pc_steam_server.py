@@ -1127,6 +1127,10 @@ class _RtWorld:
             return ("refs/heads/main", 0) if want_rc else "refs/heads/main"
         if c[:5] == ["git", "rev-list", "--parents", "-n", "1"] and len(c) == 6:
             out = "%s %s" % (c[5], "9" * 40)
+        elif c[:4] == ["git", "ls-remote", "origin", "refs/heads/main"]:
+            out = "%s\trefs/heads/main" % self.head      # origin's main is main: nothing was pushed by another
+        elif c[:3] in (["git", "diff", "--cached"], ["git", "diff", "--name-only"]):
+            out = ""                                      # CMDLINE-REST 1: nothing staged, main no precursor commit
         elif c[:2] == ["git", "rev-parse"]:
             ref = c[2]
             out = {self.rt.BRANCH: self.branch_tip, "HEAD": self.head, "refs/heads/main": self.head,
@@ -5355,6 +5359,8 @@ def _cmdline_scratch(monkeypatch, rt, tmp_path):
     monkeypatch.setattr(rt, "REVIEWED_TIP", tip)
     monkeypatch.setattr(rt, "ORIGIN_PUSH_URL", url)
     monkeypatch.setattr(rt, "controller_lease_session", lambda what, **kw: contextlib.nullcontext("lease"))
+    with open(repo / ".git" / "info" / "exclude", "a", encoding="utf-8", newline="\n") as fh:
+        fh.write("ai-collab/\n")       # as in the repository the train runs in, the state folder is ignored
     ns = SimpleNamespace(repo=repo, origin=origin, root=root, tip=tip, marker=marker, pushes=[])
 
     def child(lease, step, argv, kind, timeout=None):
@@ -5685,4 +5691,150 @@ def test_rest_2d_every_line_built_from_batch_text_has_one_builder_and_is_measure
     assert "the schema probe on %s, asked before the run" % rt.PRIMARY in out, out[-600:]
     assert "Stopped before any phase ran and before a train token was written." in out
     assert events == [] and w.calls == []
+
+
+# ── CMDLINE-REST, second pass: phase 1's restart gap, origin read from origin, the curl builder's line ──
+
+
+def _rest_stage_precursor(rt, ns):
+    paths = ["backend/sql/" + f for f in rt.precursor_files()]
+    ns.git("checkout", rt.BRANCH, "--", *paths)
+    return paths
+
+
+def _rest_commit_precursor(rt, ns, tmp_path, text):
+    """A precursor commit an earlier attempt made: the batch's files from the branch, committed from a file."""
+    _rest_stage_precursor(rt, ns)
+    path = tmp_path / "earlier-attempt-message.txt"
+    path.write_bytes(text.encode("utf-8"))
+    ns.git("commit", "-q", "-F", str(path))
+    commit = ns.head("HEAD")
+    ns.reset_marker()
+    return commit
+
+
+def test_rest_1_a_staged_precursor_of_the_batch_is_committed_from_the_file_and_pushed(monkeypatch, tmp_path,
+                                                                                     capsys):
+    """A restart of phase 1 that finds the batch's sql files staged on main commits them from its message file,
+    proves the commit and pushes it: one commit, its parent main's root, its stored message git's cleanup of the
+    derived text, the hook run once, one push; the plan says so first."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    _rest_stage_precursor(rt, ns)
+    st = _rt_fresh(rt)
+    rt.phase_precursor(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    rt.phase_precursor(GO, st)
+    pre = st["precursor_sha"]
+    assert pre == ns.head("HEAD") == ns.origin_main() and ns.parents(pre) == [ns.root]
+    assert ns.stored(pre) == ns.cleanup(_rt_committed_text(rt.PRECURSOR_MESSAGE))
+    assert ns.marker_lines() == ["ran"] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "the batch's sql files are staged on main and not committed" in planned, planned[-600:]
+
+
+def test_rest_1_a_staged_set_that_is_not_the_batchs_is_refused_with_nothing_committed(monkeypatch, tmp_path):
+    """A staged set beside the batch's sql files is refused: nothing committed, nothing pushed, no sha."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    _rest_stage_precursor(rt, ns)
+    (ns.repo / "not-the-batchs.txt").write_text("x\n")
+    ns.git("add", "not-the-batchs.txt")
+    st = _rt_fresh(rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_precursor(GO, st)
+    assert "not the batch's sql files" in str(exc.value), str(exc.value)[:300]
+    assert ns.head("HEAD") == ns.root == ns.origin_main() and ns.pushes == [] and ns.marker_lines() == []
+    assert "precursor_sha" not in st
+
+
+def test_rest_1_a_committed_precursor_is_proved_and_pushed_never_committed_twice(monkeypatch, tmp_path, capsys):
+    """A restart that finds the precursor committed and not pushed proves it (its parent, tree and message) and
+    pushes THAT commit, through main's `run --go --from precursor`: no second commit, one push, the sha
+    recorded; the plan says so first."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    commit = _rest_commit_precursor(rt, ns, tmp_path, _rt_committed_text(rt.PRECURSOR_MESSAGE))
+    st = _rt_fresh(rt)
+    rt.phase_precursor(PLAN, dict(st))
+    planned = capsys.readouterr().out     # asserted last, so the run's own behaviour is judged first
+    rt.save_state(st)
+    monkeypatch.setitem(rt.BATCHES[rt.BATCH_NAME], "reviewed_tip", ns.tip)   # main() selects the entry again
+    monkeypatch.setattr(rt, "train_token_write", lambda phase: None)
+    monkeypatch.setattr(rt, "train_token_release", lambda: None)
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", rt.BATCH_NAME,
+                                         "--from", "precursor"])
+    with pytest.raises(ns.Deployed):      # phase 2 deploys the recorded precursor
+        rt.main()
+    assert rt.load_state()["precursor_sha"] == commit == ns.head("HEAD") == ns.origin_main()
+    assert ns.parents(commit) == [ns.root]
+    assert ns.marker_lines() == [] and ns.pushes == [["git", "push", "origin", "main"]]
+    assert "committed and not pushed; a run would prove the precursor %s" % commit in planned, planned[-600:]
+
+
+def test_rest_1_a_committed_precursor_with_another_message_is_not_pushed(monkeypatch, tmp_path):
+    """A committed precursor whose message is not this batch's derived text is refused before the push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    _rest_commit_precursor(rt, ns, tmp_path, "a precursor with another message\n")
+    st = _rt_fresh(rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_precursor(GO, st)
+    assert "does not carry this batch's precursor message" in str(exc.value), str(exc.value)[:300]
+    assert ns.origin_main() == ns.root and ns.pushes == [] and "precursor_sha" not in st
+
+
+def test_rest_1_a_pushed_precursor_is_proved_and_recorded_with_nothing_run(monkeypatch, tmp_path):
+    """A restart that finds the precursor already on origin's main records its sha: no commit, no push."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    commit = _rest_commit_precursor(rt, ns, tmp_path, _rt_committed_text(rt.PRECURSOR_MESSAGE))
+    ns.git("push", "-q", "origin", "main")
+    st = _rt_fresh(rt)
+    rt.phase_precursor(GO, st)
+    assert st["precursor_sha"] == commit == ns.head("HEAD") == ns.origin_main()
+    assert ns.marker_lines() == [] and ns.pushes == []
+
+
+def _rest_origin_moves_ahead(ns, tmp_path):
+    """Another clone pushes one commit onto origin's main; this checkout's remote-tracking ref stays behind."""
+    other = tmp_path / "other"
+    _cmdline_git(tmp_path, "clone", "-q", str(ns.origin), str(other))
+    for k, v in (("user.name", "o"), ("user.email", "o@example.invalid"), ("core.hooksPath", "no-hooks")):
+        _cmdline_git(other, "config", k, v)
+    (other / "elsewhere.txt").write_text("pushed by another\n")
+    _cmdline_git(other, "add", "elsewhere.txt")
+    _cmdline_git(other, "commit", "-q", "-m", "pushed by another")
+    _cmdline_git(other, "push", "-q", "origin", "main")
+    ahead = ns.origin_main()
+    assert ahead != ns.head("refs/remotes/origin/main")
+    return ahead
+
+
+@pytest.mark.parametrize("merged", ["committed", "fresh"])
+def test_rest_3_origin_is_read_from_origin_not_from_the_tracking_ref(monkeypatch, tmp_path, merged):
+    """Phase 4 reads origin's main from origin. With origin moved ahead of this checkout's remote-tracking ref, a
+    committed merge on the old main is refused before any push, and a fresh merge onto a main that is not
+    origin's is refused before any merge: nothing pushed, no sha recorded, origin where the other clone left it."""
+    rt, _src = _release_train()
+    ns = _rest_scratch(monkeypatch, rt, tmp_path)
+    if merged == "committed":
+        ns.git("merge", "-q", "--no-ff", "-m", "the merge an earlier attempt committed", rt.BRANCH)
+    before = ns.head("HEAD")
+    ahead = _rest_origin_moves_ahead(ns, tmp_path)
+    st = _rt_fresh(rt, schema_done=True)
+    with pytest.raises(rt.Fail) as exc:
+        rt.phase_code(GO, st)
+    assert "origin's main reads %s" % ahead in str(exc.value), str(exc.value)[:300]
+    assert ns.pushes == [] and "code_sha" not in st and ns.origin_main() == ahead
+    assert ns.head("HEAD") == before and ns.merge_head() is None
+
+
+def test_rest_2d_http_code_argv_is_the_exact_curl_line():
+    """The one builder of the status-code probe gives exactly this line, with and without a method and the header."""
+    rt, _src = _release_train()
+    rt.MOD_VERSION_HEADER = "9.9.9"
+    head = ["curl", "-sS", "--max-time", "20", "-o", os.devnull, "-w", "%{http_code}"]
+    assert rt.http_code_argv("a-host", "/p?x=1") == head + ["-H", "X-Mod-Version: 9.9.9", "http://a-host:8443/p?x=1"]
+    assert rt.http_code_argv("a-host", "/p", method="POST", header=False, port=81) == head + [
+        "-X", "POST", "http://a-host:81/p"]
 
