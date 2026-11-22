@@ -567,6 +567,47 @@ def test_every_deploy_goes_through_the_one_wrapper_that_judges_its_sha():
         assert [ast.unparse(k.value) for k in n.keywords if k.arg == "st"] == ["st"], (name, ast.unparse(n))
 
 
+def test_the_phases_hand_the_guard_their_state_before_any_lease():
+    """Limit L8 of round 1: the phases' guard calls, read from the tool's syntax tree. phase_precursor and phase_code
+    each ask the guard (with the batch's state) before their first lease; the code phase asks it again for a
+    resumed run; phase_check asks it."""
+    rt = _release_train()
+    fns = _top_functions(ast.parse(Path(rt.__file__).read_text(encoding="utf-8")))
+
+    def calls(name):
+        return [(n.lineno, ast.unparse(n)) for n in ast.walk(fns[name]) if isinstance(n, ast.Call)]
+    for phase, guard in (("phase_precursor", "assert_reviewed_tip('precursor', st, write=args.go)"),
+                         ("phase_code", "assert_reviewed_tip('code', st, write=args.go)"),
+                         ("phase_code", "closure_guard(st, 'code', write=args.go)"),
+                         ("phase_check", "closure_guard(st, 'check', write=True)")):
+        seen = [line for line, text in calls(phase) if text == guard]
+        leases = [line for line, text in calls(phase) if text.startswith("controller_lease_session(")]
+        assert len(seen) == 1 and all(seen[0] < lease for lease in leases), (phase, guard, seen, leases)
+    asked = [text for _l, text in calls("assert_reviewed_tip") if text.startswith("closure_guard(")]
+    assert asked == ["closure_guard(st, stage, write=write)"], asked
+
+
+def test_a_landed_batch_resumed_without_a_record_redeploys_only_the_tips_word(world, monkeypatch, tmp_path):
+    """Both boxes already run the new build at the tip's word and the state file (an older tool's) holds the merge but
+    no word: the guard records the tip's word as the word before the landing, so the resumed deploy of a sha at the
+    tip's word goes on, and a sha at any other word is refused before any play."""
+    rt, scratch, base_word = world
+    tip = _changed_tip(scratch)
+    tip_word = _word(rt, tip)
+    boxes = Boxes(tip_word)
+    boxes.state = {PRIMARY: NEW, STANDBY: NEW}
+    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change={"eval_to": tip_word}, rows=_rows(tip_word))
+    st = {"code_sha": tip}
+    rt.closure_guard(st, "code", write=True)
+    assert st[rt.CLOSURE_STATE_KEY]["from"] == tip_word
+    plays = _deploys(monkeypatch, rt)
+    with pytest.raises(rt.Fail) as exc:
+        rt._deploy_both(scratch.base, expect="new", st=dict(st, code_sha=scratch.base))
+    assert base_word in str(exc.value) and plays == [], (str(exc.value), plays)
+    rt._deploy_both(tip, expect="new", st=st)
+    assert len(plays) == 2, plays
+
+
 def test_the_precursor_deploy_is_judged_by_the_precursors_own_word(world, monkeypatch, tmp_path):
     """Review finding 1: main carries an evaluator change the boxes do not run (word B); the tip leaves the evaluator
     as the boxes run it (word A), so the tip's guard asks nothing. The precursor (main with the batch's sql) carries
