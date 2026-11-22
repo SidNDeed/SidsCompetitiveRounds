@@ -961,7 +961,7 @@
           ],
           "main",
           "delete_player_data",
-          "8dd96527c26ef77daf23cd0fc619dddd85598b07"
+          "fe212cc38980b0b94500612fac1b5ac9806c8325"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1507,7 +1507,7 @@
           ],
           "main",
           "steam_auth",
-          "fe731e294f167a1d8e4c31dd1c5752c29302ab7a"
+          "62edad089bc12a8e498c06c9bfc0e81078aba78a"
         ],
         [
           "/api/v1/bets",
@@ -1876,7 +1876,7 @@
           ],
           "main",
           "health_check",
-          "daf988c8b86be6175db8ffb869c8c42b01a644e0"
+          "27b4dfe931a396ac04b232bed490333ad1725028"
         ],
         [
           "/api/v1/i18n/approved",
@@ -4121,7 +4121,7 @@
       [
         "main",
         "lifespan",
-        "1f40ffe2d09f2b55e6c3607dfac92473066cad3a"
+        "a6d523eb5645e2ce994ee560f373ffafb2b069ad"
       ]
     ]
   },
