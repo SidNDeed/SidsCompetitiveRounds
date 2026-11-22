@@ -17313,6 +17313,231 @@ async def alt_signals_retention_loop() -> None:
         await asyncio.sleep(_alt_signals.PASS_PERIOD_S)
 
 
+# -- Alternate-account signals: the read (CHEAT-ALT-1, design 8 and 9) --------
+# What the three tables relate to one account, for a moderator's report
+# (CHEAT-REPORT-1's to call; this lane adds no route). Counts and current
+# players only: no address, block, mark or key id leaves this function, and
+# every account a list names has a players row with no deletion stamp (R3).
+# The owner of a borrowed copy is resolved here, with the loaded key, by
+# computing each candidate's mark (R2): nothing stored resolves it.
+
+# The address or the block relation of one account over the window, per
+# related current player: the marks both recorded, the UTC days both
+# recorded one of them, the marks never shared on one day, the last day
+# EITHER recorded a shared mark (finding 24), the smallest population of a
+# shared mark (every account recording it in the window, players or not),
+# and the classes on both accounts' rows of those marks. {mark} is
+# addr_mark or block_mark (_alt_relation_sql).
+_ALT_RELATION_SQL = (
+    "WITH s AS ("
+    " SELECT key_id, {mark} AS mark, day, conn_class FROM conn_markers"
+    " WHERE steam_id = CAST(:sid AS text)"
+    " AND last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    "), s_mark AS ("
+    " SELECT key_id, mark, max(day) AS s_last_day FROM s GROUP BY key_id, mark"
+    "), s_day AS ("
+    " SELECT DISTINCT key_id, mark, day FROM s"
+    "), pop AS ("
+    " SELECT c.key_id, c.{mark} AS mark, count(DISTINCT c.steam_id) AS n"
+    " FROM conn_markers c JOIN s_mark m ON m.key_id = c.key_id AND m.mark = c.{mark}"
+    " WHERE c.last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " GROUP BY c.key_id, c.{mark}"
+    "), o AS ("
+    " SELECT c.steam_id, c.key_id, c.{mark} AS mark, c.day, c.conn_class,"
+    " (sd.day IS NOT NULL) AS same_day"
+    " FROM conn_markers c"
+    " JOIN s_mark m ON m.key_id = c.key_id AND m.mark = c.{mark}"
+    " JOIN players p ON p.steam_id = c.steam_id AND p.deleted_at IS NULL"
+    " LEFT JOIN s_day sd ON sd.key_id = c.key_id AND sd.mark = c.{mark} AND sd.day = c.day"
+    " WHERE c.steam_id <> CAST(:sid AS text)"
+    " AND c.last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    "), om AS ("
+    " SELECT o.steam_id, o.key_id, o.mark, max(o.day) AS o_last_day, bool_or(o.same_day) AS any_same"
+    " FROM o GROUP BY o.steam_id, o.key_id, o.mark"
+    "), per AS ("
+    " SELECT om.steam_id, count(*) AS shared_markers,"
+    " count(*) FILTER (WHERE NOT om.any_same) AS any_day_only,"
+    " GREATEST(max(om.o_last_day), max(m.s_last_day)) AS last_shared_day,"
+    " min(pop.n) AS min_population"
+    " FROM om"
+    " JOIN s_mark m ON m.key_id = om.key_id AND m.mark = om.mark"
+    " JOIN pop ON pop.key_id = om.key_id AND pop.mark = om.mark"
+    " GROUP BY om.steam_id"
+    "), same AS ("
+    " SELECT o.steam_id, count(DISTINCT o.day) AS same_day_days FROM o WHERE o.same_day"
+    " GROUP BY o.steam_id"
+    "), cls AS ("
+    " SELECT x.steam_id, array_agg(DISTINCT x.conn_class ORDER BY x.conn_class) AS classes"
+    " FROM (SELECT o.steam_id, o.conn_class FROM o"
+    " UNION SELECT om.steam_id, s.conn_class FROM om"
+    " JOIN s ON s.key_id = om.key_id AND s.mark = om.mark) x"
+    " GROUP BY x.steam_id"
+    ")"
+    " SELECT per.steam_id, per.shared_markers, COALESCE(same.same_day_days, 0) AS same_day_days,"
+    " per.any_day_only, per.last_shared_day, per.min_population, cls.classes,"
+    " count(*) OVER () AS total"
+    " FROM per LEFT JOIN same ON same.steam_id = per.steam_id"
+    " JOIN cls ON cls.steam_id = per.steam_id"
+    " ORDER BY COALESCE(same.same_day_days, 0) DESC, per.min_population ASC, per.steam_id ASC"
+    " LIMIT CAST(:cap AS integer)")
+
+
+def _alt_relation_sql(mark_column: str) -> str:
+    if mark_column not in ("addr_mark", "block_mark"):
+        raise ValueError(mark_column)
+    return _ALT_RELATION_SQL.replace("{mark}", mark_column)
+
+
+def _alt_iso(value):
+    return value.isoformat() if value is not None else None
+
+
+def _alt_listing(rows, entry) -> dict:
+    total = int(rows[0]["total"]) if rows else 0
+    return {"related": [entry(r) for r in rows], "more": max(0, total - len(rows))}
+
+
+async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> dict:
+    """What the alternate-account signal tables relate to the account
+    `steam_id` over a window of DUE_DAYS, or of `days` when smaller (never
+    larger: a row past the due age may already be gone). Uses the caller's
+    session; takes no lock; writes nothing; commits nothing. The shape is
+    design 9.4's. Raises ValueError for a window that is not a positive
+    integer."""
+    if days is None:
+        window = _alt_signals.DUE_DAYS
+    elif isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError("days")
+    else:
+        window = min(days, _alt_signals.DUE_DAYS)
+    key = _alt_signals.loaded_key()
+    sid = str(steam_id)
+    cap = _alt_signals.LIST_CAP
+    base = {"sid": sid, "w": window}
+
+    counts = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)) AS facts,"
+        " (SELECT count(*) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
+        " AND last_at >= now() - make_interval(days => CAST(:w AS integer))) AS markers,"
+        " (SELECT count(DISTINCT day) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
+        " AND last_at >= now() - make_interval(days => CAST(:w AS integer))) AS address_days,"
+        " (SELECT count(*) FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer))) AS shares,"
+        " (SELECT count(*) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
+        " AND last_at >= now() - make_interval(days => CAST(:w AS integer))"
+        " AND key_id <> CAST(:kid AS text))"
+        " + (SELECT count(*) FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+        " AND key_id <> CAST(:kid AS text)) AS earlier"),
+        {**base, "kid": key.key_id if key is not None else ""})).mappings().one()
+    facts = (await db.execute(text(
+        "SELECT copy_state, first_seen_at, last_seen_at, vac_banned, vac_banned_first_at,"
+        " vac_banned_last_at, publisher_banned, publisher_banned_first_at,"
+        " publisher_banned_last_at, over_limit_days"
+        " FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)"), {"sid": sid})).mappings().first()
+
+    def relation(r):
+        return {"steam_id": r["steam_id"], "shared_markers": int(r["shared_markers"]),
+                "same_day_days": int(r["same_day_days"]), "any_day_only": int(r["any_day_only"]),
+                "last_shared_day": _alt_iso(r["last_shared_day"]),
+                "min_population": int(r["min_population"]), "classes": list(r["classes"])}
+
+    address = _alt_listing((await db.execute(text(_alt_relation_sql("addr_mark")),
+                                             {**base, "cap": cap})).mappings().all(), relation)
+    block = _alt_listing((await db.execute(text(_alt_relation_sql("block_mark")),
+                                           {**base, "cap": cap})).mappings().all(), relation)
+
+    def family_entry(r):
+        out = {"steam_id": r["steam_id"], "last_seen_at": _alt_iso(r["last_seen_at"])}
+        if "owners" in r:
+            out["owners"] = int(r["owners"])
+        return out
+
+    # Accounts sharing an owner with this one: a join on (key_id, owner_mark),
+    # no key needed.
+    sharing = _alt_listing((await db.execute(text(
+        "WITH mine AS (SELECT key_id, owner_mark FROM steam_family_shares"
+        " WHERE steam_id = CAST(:sid AS text)"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer)))"
+        " SELECT f.steam_id, count(*) AS owners, max(f.last_seen_at) AS last_seen_at,"
+        " count(*) OVER () AS total"
+        " FROM steam_family_shares f"
+        " JOIN mine m ON m.key_id = f.key_id AND m.owner_mark = f.owner_mark"
+        " JOIN players p ON p.steam_id = f.steam_id AND p.deleted_at IS NULL"
+        " WHERE f.steam_id <> CAST(:sid AS text)"
+        " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+        " GROUP BY f.steam_id"
+        " ORDER BY max(f.last_seen_at) DESC, f.steam_id ASC"
+        " LIMIT CAST(:cap AS integer)"), {**base, "cap": cap})).mappings().all(), family_entry)
+
+    if key is None:
+        owner = {"state": "no_key"}
+        lends = {"state": "no_key"}
+    else:
+        # Accounts this one lends to: one mark, its own, under the loaded key.
+        lends = _alt_listing((await db.execute(text(
+            "SELECT f.steam_id, max(f.last_seen_at) AS last_seen_at, count(*) OVER () AS total"
+            " FROM steam_family_shares f"
+            " JOIN players p ON p.steam_id = f.steam_id AND p.deleted_at IS NULL"
+            " WHERE f.key_id = CAST(:kid AS text) AND f.owner_mark = CAST(:om AS bytea)"
+            " AND f.steam_id <> CAST(:sid AS text)"
+            " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+            " GROUP BY f.steam_id"
+            " ORDER BY max(f.last_seen_at) DESC, f.steam_id ASC"
+            " LIMIT CAST(:cap AS integer)"),
+            {**base, "cap": cap, "kid": key.key_id,
+             "om": _alt_signals.account_mark(key.secret, sid) if sid.isascii() and sid.isdigit()
+             else b""})).mappings().all(), family_entry)
+        mine = (await db.execute(text(
+            "SELECT key_id, owner_mark FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+            " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"), base)).all()
+        if not mine:
+            owner = {"state": "none"}
+        else:
+            ids = [r[0] for r in (await db.execute(text(
+                "SELECT steam_id FROM players WHERE deleted_at IS NULL LIMIT CAST(:n AS integer)"),
+                {"n": _alt_signals.OWNER_CANDIDATE_CAP + 1})).all()]
+            if len(ids) > _alt_signals.OWNER_CANDIDATE_CAP:
+                owner = {"state": "not_computed"}
+            else:
+                # Only rows under the loaded key id can resolve; the rest, and
+                # every mark no candidate matches, are "unresolved" and nothing
+                # more (finding 25).
+                want = {bytes(m) for k, m in mine if k == key.key_id}
+                unresolved = sum(1 for k, _m in mine if k != key.key_id)
+                found = {}
+                for cand in ids:
+                    if isinstance(cand, str) and cand.isascii() and cand.isdigit():
+                        mk = _alt_signals.account_mark(key.secret, str(int(cand)))
+                        if mk in want:
+                            found.setdefault(mk, cand)
+                unresolved += len(want - set(found))
+                resolved = sorted(set(found.values()))
+                owner = ({"state": "resolved", "steam_ids": resolved, "unresolved": unresolved}
+                         if resolved else {"state": "unresolved", "unresolved": unresolved})
+
+    steam = None
+    if facts is not None:
+        steam = {"copy_state": facts["copy_state"],
+                 "first_seen_at": _alt_iso(facts["first_seen_at"]),
+                 "last_seen_at": _alt_iso(facts["last_seen_at"]),
+                 "vac_banned": facts["vac_banned"],
+                 "vac_banned_first_at": _alt_iso(facts["vac_banned_first_at"]),
+                 "vac_banned_last_at": _alt_iso(facts["vac_banned_last_at"]),
+                 "publisher_banned": facts["publisher_banned"],
+                 "publisher_banned_first_at": _alt_iso(facts["publisher_banned_first_at"]),
+                 "publisher_banned_last_at": _alt_iso(facts["publisher_banned_last_at"])}
+    return {"window_days": window,
+            "recorded": {"facts": bool(counts["facts"]), "markers": int(counts["markers"]),
+                         "address_days": int(counts["address_days"]), "shares": int(counts["shares"]),
+                         "earlier_key_rows": int(counts["earlier"]) if key is not None else None,
+                         "over_limit_days": int(facts["over_limit_days"]) if facts is not None else 0},
+            "steam": steam,
+            "address": address,
+            "block": block,
+            "family": {"owner": owner, "sharing_owner": sharing, "lends_to": lends}}
+
+
 def _alt_boot() -> None:
     """Load the signal key from the environment and say its state in one
     line, on both roles: `key absent`, `key refused`, or `key loaded id=`
