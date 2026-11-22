@@ -1,4 +1,4 @@
-"""The release tool's closure guard (item 41). Without the tool every test here skips."""
+"""The release tool's closure guard (item 41)."""
 import ast
 import hashlib
 import importlib.util
@@ -73,7 +73,6 @@ class Scratch:
         return p.stdout.decode("utf-8").strip()
 
     def index_commit(self, put, drop=()):
-        """A commit made in the index alone (paths spelled exactly, whatever the file system folds)."""
         for path in drop:
             self.git("rm", "-q", "--cached", path)
         for path, data in put.items():
@@ -351,7 +350,7 @@ def _as8(c):
     return p in (O_W, new) and s in (O_W, new) and not (new != O_W and p == O_W and s == new)
 
 
-ROWS = (   # (row, predicate over a cell, outcome): the first matching row is the cell's one outcome
+ROWS = (
     (1, lambda c: c["key"] == "invalid", "refuse"),
     (2, lambda c: (c["pre"] or c["code"]) and c["rec"] == "invalid", "refuse"),
     (3, lambda c: (c["pre"] or c["code"]) and c["rec"] == "absent", "refuse"),
@@ -484,7 +483,6 @@ def test_a_resumed_run_with_the_primary_new_passes_f_writes_nothing_and_the_code
 
 
 def _fake_plays(monkeypatch, rt, after):
-    """zap records a play and sets that box's /health word to `after[host]` (None: silent)."""
     plays, health = [], {}
     real = rt.health_json
 
@@ -518,7 +516,7 @@ def test_the_standby_is_not_deployed_when_the_primary_publishes_another_word(mon
         rt._deploy_both(CODE, expect="new", st=st)
     msg = str(exc.value)
     assert len(plays) == 1 and "the primary publishes %s" % (after or "nothing") in msg and N_W in msg, msg
-    assert "no further box is deployed" in msg and BASE[:12] in msg, msg
+    assert "no further box is deployed" in msg and "the rollback point recorded" in msg and BASE[:12] in msg, msg
 
 
 def test_every_deploy_play_is_followed_by_the_box_judge_before_the_next():
@@ -543,7 +541,9 @@ def test_the_bot_judge_refuses_a_primary_at_another_word(monkeypatch):
                                            call="W"), [])
     with pytest.raises(rt.ClosureRefusal) as exc:
         rt.closure_judge_bot(st)
-    assert "(bot) the primary publishes %s" % O_W in str(exc.value)
+    msg = str(exc.value)
+    assert "(bot) the primary publishes %s" % O_W in msg and "the bot phase is not saved" in msg, msg
+    assert "the rollback point NOT recorded" in msg and BASE[:12] in msg, msg
 
 
 # ---------------------------------------------------------------- the command line: F, B2, C8, C9, C10
@@ -633,6 +633,10 @@ def test_only_the_first_pass_writes_the_record():
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "closure_guard"]
     writes = [c for c in calls if "write" in c[1]]
     assert writes == [("main", "closure_guard(st, 'start', write=True, reach=reach)")], calls
+    assert sorted(calls) == [("assert_reviewed_tip", "closure_guard(st, stage)"),
+                             ("main", "closure_guard(st, 'start', write=True, reach=reach)"),
+                             ("phase_check", "closure_guard(st, 'check')"),
+                             ("phase_code", "closure_guard(st, 'code')")], calls
     saves = [fn.name for fn in tree.body if isinstance(fn, ast.FunctionDef) and "closure" in fn.name
              for n in ast.walk(fn) if isinstance(n, ast.Call) and ast.unparse(n.func) == "save_state"]
     assert saves == ["_closure_guard"], saves
@@ -686,3 +690,198 @@ def test_the_guard_runs_exactly_where_the_preflight_runs(monkeypatch, tmp_path, 
         if ("guard" in events or "origin" in events) and "preflight" not in events:
             bad.append((argv, events))
     assert bad == [], bad
+
+
+def test_a_refused_check_returns_one_with_the_fixed_line(monkeypatch, tmp_path, capsys):
+    rt = _release_train()
+    events = []
+    _main_world(monkeypatch, rt, tmp_path, events, ["check"])
+    monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(rt, "measure_every_batch", lambda: ([], []))
+
+    def phase_check(args, st):
+        raise rt.ClosureRefusal("closure guard: row 5: planted")
+    monkeypatch.setattr(rt, "phase_check", phase_check)
+    assert rt.main() == 1
+    assert "!!! check refused: closure guard: row 5: planted" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- the fixed lines each by its holder
+
+
+RULES_REV = "0123456789ab"
+
+
+@pytest.mark.parametrize("rules_next,want", [(False, "do not answer for the word"),
+                                             (True, "the proof that rules_next is staged is not built")])
+def test_row_1_with_review_rules_installed_names_the_staging_proof_or_the_generic_line(monkeypatch, rules_next,
+                                                                                       want):
+    rt = _release_train()
+    cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="F")
+    saved = []
+    st = _cell_world(monkeypatch, rt, cell, saved)
+    change = {"eval_to": N_W, "rules_next": RULES_REV} if rules_next else {"eval_to": N_W}
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", change)
+    monkeypatch.setattr(rt, "HEALTH_EXPECT", _rows(N_W, RULES_REV))
+    monkeypatch.setattr(rt, "health_json", lambda host: {"review_eval": O_W, "review_rules": "fedcba987654"})
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_guard(st, "start", write=True, reach=())
+    assert "row 1:" in str(exc.value) and want in str(exc.value) and saved == [], str(exc.value)
+
+
+@pytest.mark.parametrize("change", [[], {}, {"x": 1}, {"eval_to": "ABCDEF12"}, {"eval_to": "abc"},
+                                    {"rules_next": "zz"}, {"build": []}, {"build": {"p": "short"}}])
+def test_a_closure_change_out_of_form_is_refused(change):
+    rt = _release_train()
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_change_form("zz-closure-guard", change)
+    assert "the closure_change of batch zz-closure-guard is out of form" in str(exc.value)
+    for good in ({"eval_to": "a" * 8}, {"rules_next": "0" * 12}, {"build": {"p": "0" * 64}}):
+        assert rt.closure_change_form("zz-closure-guard", good) == good
+
+
+def test_a_read_that_raises_is_refused_by_the_fixed_line(monkeypatch):
+    rt = _release_train()
+
+    def git_out(*a, **kw):
+        raise OSError("planted")
+    monkeypatch.setattr(rt, "git_out", git_out)
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt._closure_ancestor("a" * 40, "b" * 40)
+    assert "asking git whether the base is an ancestor did not succeed; refused" in str(exc.value)
+
+
+def _state_files(monkeypatch, rt, scratch, files):
+    batches = {}
+    for name, body in files.items():
+        p = scratch.root / "states" / (name + ".json")
+        p.parent.mkdir(exist_ok=True)
+        p.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+        batches[name] = {"state_path": tuple(p.parts)}
+    monkeypatch.setattr(rt, "BATCHES", batches)
+
+
+def test_the_base_is_the_code_sha_of_the_newest_verified_state_file_printed_whole(world, monkeypatch, capsys):
+    rt, scratch, base_word = world
+    later = scratch.commit({"main.py": b"# later\n"})
+    _state_files(monkeypatch, rt, scratch, {"a-old": {"verified": True, "code_sha": scratch.base},
+                                            "b-new": {"verified": True, "code_sha": later},
+                                            "c-open": {"code_sha": "c" * 40}, "d-bad": "{not json"})
+    assert rt.closure_base() == (later, "state")
+    out = capsys.readouterr().out
+    assert ("BASE %s is the code_sha of the newest verified state file (batch b-new; 1 unreadable)" % later) in out
+
+
+def test_two_verified_state_files_on_diverging_lines_are_refused(world, monkeypatch):
+    rt, scratch, base_word = world
+    lane = scratch.commit({"main.py": b"# lane\n"})
+    scratch.git("checkout", "-q", "main")
+    other = scratch.commit({"main.py": b"# main\n"}, "main moved")
+    scratch.git("checkout", "-q", "lane")
+    _state_files(monkeypatch, rt, scratch, {"a": {"verified": True, "code_sha": lane},
+                                            "b": {"verified": True, "code_sha": other}})
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_base()
+    assert "neither of which is an ancestor" in str(exc.value)
+
+
+def test_without_a_verified_state_file_the_base_is_origins_main_declared(world, monkeypatch, capsys):
+    rt, scratch, base_word = world
+    _state_files(monkeypatch, rt, scratch, {"c-open": {"code_sha": "c" * 40}})
+    monkeypatch.setattr(rt, "_git_line", lambda argv: "%s\trefs/heads/main" % scratch.base)
+    assert rt.closure_base() == (scratch.base, "origin")
+    out = capsys.readouterr().out
+    assert ("BASE %s is origin's main, a declared inference: no verified state file of this tool can be read "
+            "(0 unreadable)" % scratch.base) in out
+
+
+@pytest.mark.parametrize("what,want", [("tip", "no reviewed_tip is pinned as a full commit id"),
+                                       ("sha", "a recorded sha is not a full commit id")])
+def test_a_reviewed_tip_or_a_recorded_sha_not_a_full_commit_id_is_refused(monkeypatch, what, want):
+    rt = _release_train()
+    cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="W")
+    st = _cell_world(monkeypatch, rt, cell, [])
+    if what == "tip":
+        monkeypatch.setattr(rt, "REVIEWED_TIP", "a" * 12)
+    else:
+        st["precursor_sha"] = "1" * 12
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_guard(st, "check")
+    assert want in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize("call", ["guard", "tree", "deploy"])
+def test_a_call_that_cannot_decide_is_refused_by_its_fixed_line(monkeypatch, call):
+    rt = _release_train()
+    monkeypatch.setattr(rt, "REVIEWED_TIP", TIP)
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        if call == "guard":
+            rt.closure_guard(None, "check")
+        elif call == "tree":
+            rt.closure_judge_tree(None, TIP, TIP, "old", "the precursor tree")
+        else:
+            rt.closure_judge_deploy(None, PRE, "old")
+    assert "could not decide" in str(exc.value), str(exc.value)
+
+
+def test_a_stage_the_guard_does_not_know_is_refused(monkeypatch):
+    rt = _release_train()
+    cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="W")
+    st = _cell_world(monkeypatch, rt, cell, [])
+    rt.closure_guard(st, "check")
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_guard(st, "planted")
+    assert "a stage it does not know" in str(exc.value)
+
+
+MAIN, MERGE = "3" * 40, "4" * 40
+
+
+@pytest.mark.parametrize("reach,want", [("precursor", "that the precursor must carry"),
+                                        ("code", "the merge of main and the reviewed tip does not carry")])
+def test_the_first_pass_refuses_a_main_or_a_merge_without_its_word(monkeypatch, reach, want):
+    rt = _release_train()
+    cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="F")
+    saved = []
+    st = _cell_world(monkeypatch, rt, cell, saved)
+    words = {TIP: N_W, BASE: O_W, MAIN: X_W if reach == "precursor" else O_W, MERGE: X_W}
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
+    monkeypatch.setattr(rt, "ALL_SQL", ["999_closure_test.sql"])
+    monkeypatch.setattr(rt, "_closure_main_sha", lambda: MAIN)
+    monkeypatch.setattr(rt, "expected_merge_tree", lambda main, tip: MERGE)
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_guard(st, "start", write=True, reach=(reach,))
+    assert want in str(exc.value) and saved == [], str(exc.value)
+
+
+def test_a_commit_tree_without_its_word_is_not_committed(monkeypatch):
+    rt = _release_train()
+    cell = dict(rec="valid", pre=False, code=False, P="O", Sb="O", key="valid", call="W")
+    st = _cell_world(monkeypatch, rt, cell, [])
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: X_W)
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_judge_tree(st, MERGE, MAIN, "old", "the precursor tree")
+    assert "the precursor tree does not carry the word %s; nothing is committed" % O_W in str(exc.value)
+
+
+def test_a_commit_to_deploy_without_the_approved_word_is_not_deployed(monkeypatch):
+    rt = _release_train()
+    cell = dict(rec="valid", pre=False, code=True, P="O", Sb="O", key="valid", call="Jc")
+    st = _cell_world(monkeypatch, rt, cell, [])
+    words = {TIP: N_W, BASE: O_W, CODE: X_W}
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
+    plays = _fake_plays(monkeypatch, rt, {PRIMARY: N_W, STANDBY: N_W})
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt._deploy_both(CODE, expect="new", st=st)
+    assert plays == [] and "(deploy) the commit %s does not carry the word %s" % (CODE[:12], N_W) in str(exc.value)
+
+
+@pytest.mark.parametrize("judge", ["box", "bot"])
+def test_a_judge_without_a_closure_record_refuses_by_its_fixed_line(judge):
+    rt = _release_train()
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        if judge == "box":
+            rt.closure_judge_box({}, "primary", PRIMARY, CODE, "new")
+        else:
+            rt.closure_judge_bot({})
+    assert "(%s) no closure record" % judge in str(exc.value)
