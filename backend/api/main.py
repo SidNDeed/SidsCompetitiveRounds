@@ -75833,16 +75833,16 @@ def _quarantine_accept_verdict(results: int, players: int) -> tuple:
 # readmission lobbies, and write their moderator record through
 # _modlog_write in the same transaction as their effects.
 #
-# THE LOCK ORDER: the held row (FOR UPDATE), the identity keys of the report's reporter and
-# players (shared, one ordered pass by _ban_lock_and_gate, before any row the ban core locks),
-# the lobby (FOR NO KEY UPDATE), the participants' players rows in str(id) order (FOR NO KEY
-# UPDATE), then, under Accept only, their glicko_ratings_ffa rows in that order (FOR UPDATE).
-# Every other path that locks or writes a held row takes no lobby, player or rating lock while
-# holding it, and the ban core, which takes an identity key exclusive, locks no held row: the
-# discard route and the janitor's filing write the held row alone (the janitor with SKIP
-# LOCKED); the triage and digest reads take no row lock; the capture (_quarantine_report) reads
-# held rows with no row lock and inserts new ones, under an advisory lock on the group (outside
-# a journal window it first rolls the report's transaction back, releasing its lobby lock).
+# THE LOCK ORDER: the held row (FOR UPDATE), the identity keys of the report's reporter and players (shared,
+# one ordered pass by _ban_lock_and_gate, before any row the ban core locks), the lobby (FOR NO KEY UPDATE), the
+# players rows in str(id) order (FOR NO KEY UPDATE), then, under Accept only, their glicko_ratings_ffa rows in
+# that order (FOR UPDATE). What makes it safe is ONE invariant: NO transaction requests a lock on an EXISTING held
+# row (table match_report_quarantine) while it holds an identity key or a lock on a row the ban core locks, except
+# the two actions' own finishing UPDATE of the row they already hold (test_seam_f1's census). The paths: the
+# discard route, the janitor's filing (SKIP LOCKED) and the bot's digest acknowledgement lock or write held rows
+# with no key or other row lock before; the list, triage and digest reads lock none; the ban core locks none; the
+# capture (_quarantine_report) INSERTS new rows under the group's advisory lock (outside a journal window after a
+# rollback; inside one holding identity keys, the settle writer's ban read): ON CONFLICT DO NOTHING or no key.
 
 # The reason words both actions serve; every other word, a word added later
 # included, is refused and the row stays held.
@@ -76321,7 +76321,7 @@ def _qapply_held_check(row, body):
 async def _qapply_verdict(db, row, body) -> dict:
     """The list's and the digest's verdict for one held row: the READ form of the actions' checks (the
     receipt and the 168 bound as _qapply_held, the bans, the signature, the service accounts, _ffa_report_verify,
-    the record, the game's claim, a lobby a ban ended, Credit's lobby test and the gate), with no row lock or key;
+    the record, the game's claim, a lobby a ban ended, Credit's lobby test, the gate and the seat rules), with no row lock or key;
     advisory: Accept and Credit decide again under their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
     def no(key, credit=False, **kw):
         return {"can_accept": False, "accept_blocked_reason": _QAPPLY_TEXTS[key].format(**kw),
@@ -76379,14 +76379,14 @@ async def _qapply_verdict(db, row, body) -> dict:
                               locked=False)
     if not gate["clock_ok"]:
         return no("clock")
-    # Credit pays only a named game (_qapply_credit); a credited sibling is named in place of the reason.
-    credited =(await db.execute(text(_QAPPLY_SQL_CLAIMS_CREDITED), {
-        "lid": str(row["group_id"])})).scalars().all()
+    # Credit pays only a named game (_qapply_credit), a credited sibling named in place of the reason; F2b: the seat rules.
+    credited = (await db.execute(text(_QAPPLY_SQL_CLAIMS_CREDITED), {"lid": str(row["group_id"])})).scalars().all()
+    seat = await _qapply_reporter_refused(db, lobby, row["group_id"], expected if named is None else named, report)
 
     def blocked(reason: str) -> dict:
-        can_credit = named is not None and _qapply_same_lobby(report, row)  # R10: Credit's lobby test
+        can_credit = named is not None and _qapply_same_lobby(report, row) and not seat  # R10, F2b: Credit's tests
         if not can_credit:
-            reason = _QAPPLY_TEXTS["no_number" if named is None else "incomplete"]
+            reason = _QAPPLY_TEXTS["no_number" if named is None else "reporter" if _qapply_same_lobby(report, row) else "incomplete"]
         elif credited:
             reason = _QAPPLY_TEXTS["sibling_credited"].format(g=int(credited[-1]))
         return {"can_accept": False, "accept_blocked_reason": reason, "can_credit": can_credit}
@@ -76394,7 +76394,7 @@ async def _qapply_verdict(db, row, body) -> dict:
         return blocked(_qapply_gate_text(gate))
     if _ffa_game_number_refusal(tail, expected):
         return blocked(_qapply_number_text(tail, expected))
-    return {"can_accept": True, "accept_blocked_reason": "", "can_credit": False}
+    return no("reporter") if seat else {"can_accept": True, "accept_blocked_reason": "", "can_credit": False}
 
 
 async def _qapply_finish(db, ctx: dict, *, lobby_uuid, match_id, game: int, player_ids) -> None:
@@ -87208,3 +87208,30 @@ def _qapply_same_lobby(report, row) -> bool:
         return str(UUID(report.lobby_id)) == str(row["group_id"])
     except (ValueError, TypeError):
         return False
+
+
+# STACK-SEAM-1 R1-FIX (F2b): the seat rules' reporter refusals in the list's read form. The statement is
+# _asm_report_rules' own first statement, character for character (test_seam_f2b's static check).
+_QAPPLY_SQL_ASM_SEATS = (
+    "SELECT p.steam_id, s.slot, s.start_roster, s.late_admitted_at, s.late_game,"
+    "       s.late_body_game, s.gone_game, s.lag_games"
+    "  FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
+    " WHERE s.lobby_id = :lid ORDER BY s.slot")
+
+
+async def _qapply_reporter_refused(db, lobby, lobby_uuid, g, report) -> bool:
+    """Whether _asm_report_rules would refuse this report's reporter for game g of an assembly lobby
+    (late_reporter, left_reporter, lag_reporter: the "reporter" sentence under both actions), read from
+    the seat rows with no lock, for _qapply_verdict. Neither action passes a journal class to the seat
+    rules, so all three tests apply as they do there. A lobby that is not an assembly lobby: False."""
+    if not lobby.get("assembly_v1"):
+        return False
+    rows = (await db.execute(text(_QAPPLY_SQL_ASM_SEATS), {"lid": lobby_uuid})).mappings().all()
+    rep = {r["steam_id"]: r for r in rows}.get(report.reported_by_steam_id)
+    if rep is None:
+        return False
+    g = int(g)
+    short = lobby.get("short_started_at") is not None
+    return bool(rep["late_admitted_at"] is not None or (short and not rep["start_roster"])
+                or (rep["gone_game"] is not None and g > int(rep["gone_game"]))
+                or g in [int(x) for x in (rep["lag_games"] or [])])
