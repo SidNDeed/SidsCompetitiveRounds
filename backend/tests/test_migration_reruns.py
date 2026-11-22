@@ -305,6 +305,24 @@ def _mail_tables_prereq():
     return "\n".join(out)
 
 
+def _427_prereq():
+    """pending_channel_posts in 109's shape with 338's two revision columns,
+    holding FAQ message 1 as 338 wrote it (read from 338, never typed here)
+    and message 2, which 427 does not touch."""
+    s338 = (SQL_DIR / "338_faq_channel_post_revisions.sql").read_text(encoding="utf-8")
+    was = re.findall(r"\$faq1\$(.*?)\$faq1\$", s338, re.S)
+    channel = re.findall(r"WHERE p\.channel_id = '(\d+)'", s338)
+    assert len(was) == 1 and len(channel) == 1 and "$p427$" not in was[0]
+    return (
+        "CREATE TABLE pending_channel_posts ("
+        " id BIGSERIAL PRIMARY KEY, channel_id TEXT NOT NULL, content TEXT NOT NULL,"
+        " sort_order INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+        " posted_at TIMESTAMPTZ, revision INTEGER NOT NULL DEFAULT 1, posted_revision INTEGER);\n"
+        "INSERT INTO pending_channel_posts (channel_id, content, sort_order, revision, posted_revision)"
+        " VALUES ('%s', $p427$%s$p427$, 1, 2, 2), ('%s', 'message two', 2, 2, 2);"
+        % (channel[0], was[0], channel[0]))
+
+
 PREREQ = {
     "331": """
         CREATE TABLE players (
@@ -509,6 +527,9 @@ PREREQ = {
                     ('ffa', 'lobby_completed', 409, NULL, '{}'::jsonb, 'pending'),
                     ('ffa', 'ffa_game_contradiction', 409, NULL, '{}'::jsonb, 'filed');
     """),
+    # 427 creates steam_signin_facts, steam_family_shares and conn_markers
+    # and revises FAQ message 1 once (_427_prereq: the row as 338 wrote it).
+    "427": _427_prereq(),
 }
 
 # The tables whose CONTENT this file is responsible for. Fingerprinted
@@ -536,6 +557,7 @@ TABLES = {
     "419": ("match_report_quarantine",),
     "421": ("players", "gold_transactions", "admin_actions", "match_report_quarantine", "ffa_lobbies"),
     "426": ("ffa_game_claims", "match_report_quarantine"),
+    "427": ("steam_signin_facts", "steam_family_shares", "conn_markers", "pending_channel_posts"),
 }
 
 MIGRATION_FILES = {
@@ -559,6 +581,7 @@ MIGRATION_FILES = {
     "419": "419_quarantine_digest_posted.sql",
     "421": "421_oct3b_credit_held_ffa_games.sql",
     "426": "426_ffa_game_claims.sql",
+    "427": "427_alt_signals.sql",
 }
 
 
@@ -724,7 +747,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "415", "416", "419", "421", "426"])
+                                    "397", "398", "399", "401", "415", "416", "419", "421", "426", "427"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -737,7 +760,7 @@ def test_a_second_run_writes_no_row(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "415", "416", "419", "421", "426"])
+                                    "397", "398", "399", "401", "415", "416", "419", "421", "426", "427"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -751,7 +774,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410", "415", "416", "419", "421", "426"])
+                                    "397", "398", "399", "401", "410", "415", "416", "419", "421", "426", "427"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -771,7 +794,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
 
 
 @pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377", "391", "396",
-                                    "397", "398", "399", "401", "410", "415", "416", "419", "421", "426"])
+                                    "397", "398", "399", "401", "410", "415", "416", "419", "421", "426", "427"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 

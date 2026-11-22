@@ -17,6 +17,9 @@ from sqlalchemy.orm import DeclarativeBase, deferred, relationship
 # route that reaches a model (learning #537), and only MailSendReceipt and
 # InviteReceipt use it.
 from sqlalchemy import LargeBinary
+# Its own statement for the same reason: only the three alt-signal classes
+# (migration 427) use it.
+from sqlalchemy.dialects.postgresql import BYTEA
 
 
 class Base(DeclarativeBase):
@@ -1894,3 +1897,105 @@ class SeatEvidenceSeededKey(Base):
 
     key = Column(String(64), primary_key=True)
     seeded_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+# -- Alternate-account signals (migration 427) --------------------------------
+# Declared to match 427_alt_signals.sql column for column, constraints and
+# indexes included, as 416's tables are (test_alt_signals_migration_pg.py
+# holds the columns equal). The api reads and writes these tables with SQL
+# text only. Rows are keyed by the account's Steam id as text, with no
+# foreign key: a first sign-in can come before the players row, and account
+# deletion keeps the players row with its id replaced.
+
+class SteamSigninFacts(Base):
+    """One row per account: first and last recorded sign-in, the copy state
+    Steam last reported ('own', 'shared' or 'unknown') with the first and last
+    sign-in that read 'shared', the VAC and publisher ban flags with the first
+    and last sign-in that read each one true, and the count of days on which a
+    storage limit refused a row, with the last such day."""
+    __tablename__ = "steam_signin_facts"
+
+    steam_id = Column(Text, primary_key=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    copy_state = Column(String(8), nullable=False, server_default=text("'unknown'"))
+    shared_first_at = Column(DateTime(timezone=True), nullable=True)
+    shared_last_at = Column(DateTime(timezone=True), nullable=True)
+    vac_banned = Column(Boolean, nullable=True)
+    vac_banned_first_at = Column(DateTime(timezone=True), nullable=True)
+    vac_banned_last_at = Column(DateTime(timezone=True), nullable=True)
+    publisher_banned = Column(Boolean, nullable=True)
+    publisher_banned_first_at = Column(DateTime(timezone=True), nullable=True)
+    publisher_banned_last_at = Column(DateTime(timezone=True), nullable=True)
+    over_limit_days = Column(Integer, nullable=False, server_default=text("0"))
+    over_limit_day = Column(Date, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("steam_id ~ '^[0-9]{1,20}$'", name="ck_steam_signin_facts_steam_id"),
+        CheckConstraint("copy_state IN ('own', 'shared', 'unknown')", name="ck_steam_signin_facts_copy_state"),
+        CheckConstraint("last_seen_at >= first_seen_at", name="ck_steam_signin_facts_seen"),
+        CheckConstraint("(shared_first_at IS NULL) = (shared_last_at IS NULL) AND shared_last_at >= shared_first_at",
+                        name="ck_steam_signin_facts_shared"),
+        CheckConstraint("(vac_banned_first_at IS NULL) = (vac_banned_last_at IS NULL)"
+                        " AND vac_banned_last_at >= vac_banned_first_at", name="ck_steam_signin_facts_vac"),
+        CheckConstraint("(publisher_banned_first_at IS NULL) = (publisher_banned_last_at IS NULL)"
+                        " AND publisher_banned_last_at >= publisher_banned_first_at",
+                        name="ck_steam_signin_facts_publisher"),
+        CheckConstraint("over_limit_days >= 0 AND (over_limit_days = 0) = (over_limit_day IS NULL)",
+                        name="ck_steam_signin_facts_over_limit"),
+        Index("ix_steam_signin_facts_last_seen", "last_seen_at"),
+    )
+
+
+class SteamFamilyShare(Base):
+    """One row per account, key id and owner mark: a keyed code of the
+    account that lent a borrowed copy (never its id), with the first and last
+    sign-in that read it."""
+    __tablename__ = "steam_family_shares"
+
+    steam_id = Column(Text, primary_key=True)
+    key_id = Column(Text, primary_key=True)
+    owner_mark = Column(BYTEA, primary_key=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("steam_id ~ '^[0-9]{1,20}$'", name="ck_steam_family_shares_steam_id"),
+        CheckConstraint("key_id ~ '^[0-9a-f]{12}$'", name="ck_steam_family_shares_key_id"),
+        CheckConstraint("octet_length(owner_mark) = 32", name="ck_steam_family_shares_owner_mark"),
+        CheckConstraint("last_seen_at >= first_seen_at", name="ck_steam_family_shares_seen"),
+        Index("ix_steam_family_shares_owner", "key_id", "owner_mark"),
+        Index("ix_steam_family_shares_last_seen", "last_seen_at"),
+    )
+
+
+class ConnMarker(Base):
+    """One row per account, UTC day, key id and address code: keyed codes of
+    the address and of its network block (never the address), the family (4
+    or 6), the connection class word, and the first and last sign-in of that
+    day from it."""
+    __tablename__ = "conn_markers"
+
+    steam_id = Column(Text, primary_key=True)
+    day = Column(Date, primary_key=True, server_default=text("CAST((now() AT TIME ZONE 'UTC') AS date)"))
+    key_id = Column(Text, primary_key=True)
+    addr_mark = Column(BYTEA, primary_key=True)
+    block_mark = Column(BYTEA, nullable=False)
+    family = Column(SmallInteger, nullable=False)
+    conn_class = Column(String(8), nullable=False, server_default=text("'unknown'"))
+    first_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    last_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("steam_id ~ '^[0-9]{1,20}$'", name="ck_conn_markers_steam_id"),
+        CheckConstraint("key_id ~ '^[0-9a-f]{12}$'", name="ck_conn_markers_key_id"),
+        CheckConstraint("octet_length(addr_mark) = 32", name="ck_conn_markers_addr_mark"),
+        CheckConstraint("octet_length(block_mark) = 32", name="ck_conn_markers_block_mark"),
+        CheckConstraint("family IN (4, 6)", name="ck_conn_markers_family"),
+        CheckConstraint("conn_class IN ('none', 'hosting', 'vpn', 'relay', 'tor', 'unknown')",
+                        name="ck_conn_markers_conn_class"),
+        CheckConstraint("last_at >= first_at", name="ck_conn_markers_seen"),
+        Index("ix_conn_markers_addr", "key_id", "addr_mark", "day", "steam_id"),
+        Index("ix_conn_markers_block", "key_id", "block_mark", "day", "steam_id"),
+        Index("ix_conn_markers_last_at", "last_at"),
+    )

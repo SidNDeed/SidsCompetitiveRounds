@@ -34,7 +34,9 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # guard, the backfill cue's SELECT set_config() and the trigger's CREATE OR
 # REPLACE FUNCTION) likewise. 416 (lobby invites: two tables, their indexes
 # and mail_messages' kind check, every step inside a guard) likewise.
-# 421 (OCT3-B, a data migration with no code change) likewise.
+# 421 (OCT3-B, a data migration with no code change) likewise. 427 (alt
+# signals: three tables and their indexes, and FAQ message 1's revision,
+# every step inside a guard) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
@@ -45,7 +47,8 @@ OWNED = ("331_animal_title_ladders.sql",
          "416_lobby_invites.sql",
          "419_quarantine_digest_posted.sql",
          "421_oct3b_credit_held_ffa_games.sql",
-         "426_ffa_game_claims.sql")
+         "426_ffa_game_claims.sql",
+         "427_alt_signals.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
@@ -783,6 +786,16 @@ _EVERY_STATEMENT_GUARDED = {
         "mark, one block replacing mail_messages' kind check only while the wider "
         "check is absent, and a read-only post-check of that check, between "
         "BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no DDL",
+    "427_alt_signals.sql":
+        "one block that puts the session's temporary schema last in "
+        "search_path for the transaction, "
+        "one catalog-guarded block that creates steam_signin_facts, "
+        "steam_family_shares, conn_markers and their indexes and marks all "
+        "three, or else refuses unless all three carry the mark, one block "
+        "that revises FAQ message 1 only while it holds 338's text and refuses "
+        "unless exactly one such row or one already revised row stands, and a "
+        "read-only post-check of the three marks, between BEGIN, the four SET "
+        "LOCAL settings and COMMIT; a re-run issues no DDL and writes no row",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 
