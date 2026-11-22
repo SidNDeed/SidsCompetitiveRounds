@@ -1116,6 +1116,25 @@ def test_a_recording_prints_only_its_guarded_lines_and_the_admitted_ones(case, e
         assert not any(secret in ln for ln in said), secret
 
 
+def test_the_recordings_functions_print_only_through_the_guarded_logger():
+    """Finding R2-14 and claim C3, by the code: no function of the
+    recording, its abandon, its notice line, the retention pass or its loop
+    calls print() itself (a raising print inside the abandon's own guard
+    would change nothing the caller sees, so the runtime holders cannot
+    tell it from _alt_print); only _alt_print does."""
+    import ast
+    import inspect
+    import textwrap
+    for fn in (main._alt_record, main._alt_abandon, main._alt_notice_line,
+               main._alt_retention_pass, main.alt_signals_retention_loop):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        bare = [n.lineno for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "print"]
+        assert bare == [], (fn.__name__, bare)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main._alt_print)))
+    assert [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "print"]
+
+
 # -- the commands the driver sends under the production pool (finding R2-12) ------
 
 class _Wire(asyncpg.Connection):
