@@ -296,6 +296,35 @@ def test_iii_a_build_file_changed_needs_its_sha256_in_the_key(world, monkeypatch
     assert _predict(rt, tip, base) == base_word
 
 
+def test_iii_a_build_file_the_tip_deletes_is_refused_unless_the_build_part_names_it_absent(world, monkeypatch):
+    rt, scratch, base_word = world
+    base = scratch.commit({"Dockerfile": b"FROM x\nCOPY . .\n"}, "base with a Dockerfile")
+    tip = scratch.commit({"Dockerfile": None})
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", rt.closure_change_form("test", {"build": {}}))
+    with pytest.raises(rt.Fail) as exc:
+        _predict(rt, tip, base)
+    assert ("(iii) backend/api/Dockerfile differs at the test tree from the base %s and closure_change.build does not "
+            "name its sha256, or \"absent\" where the tree holds no such file" % base[:12]) in str(exc.value), str(
+                exc.value)
+    key = {"build": {"backend/api/Dockerfile": "absent"}}
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", rt.closure_change_form("test", key))
+    assert _predict(rt, tip, base) == base_word
+
+
+def test_the_ancestor_refusal_in_a_resumed_run_names_the_recorded_base_or_a_fresh_run(world, monkeypatch):
+    rt, scratch, base_word = world
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
+    lane = scratch.commit({"main.py": b"# lane\n"})
+    scratch.git("checkout", "-q", "main")
+    other = scratch.commit({"main.py": b"# main\n"}, "main moved")
+    scratch.git("checkout", "-q", "lane")
+    with pytest.raises(rt.Fail) as exc:
+        rt.closure_prediction(lane, lane, other, "the test tree", "record")
+    msg = str(exc.value)
+    assert ("it is the base this run recorded: give that base or leave the word out, or start a fresh run with "
+            "--boxes-head read on both boxes; refused") in msg and "read HEAD on both boxes again" not in msg, msg
+
+
 def test_iii_a_script_the_dockerfile_runs_joins_the_set_from_the_dockerfiles_own_lines(world, monkeypatch):
     rt, scratch, base_word = world
     base = scratch.commit({"Dockerfile": b"FROM x\nCOPY . .\nRUN python -B stamp_files.py /app\n",
@@ -318,7 +347,7 @@ def test_iv_a_store_on_the_evaluator_from_outside_is_refused(world, monkeypatch)
         tip = scratch.commit({"seat_mod.py": b"import review_rules as rr\n", "main.py": body})
         with pytest.raises(rt.Fail) as exc:
             _predict(rt, tip, scratch.base)
-        assert "(iv)" in str(exc.value), (body, str(exc.value))
+        assert "(iv)" in str(exc.value) and "outside the listed places" in str(exc.value), (body, str(exc.value))
 
 
 def test_iv_mains_backend_api_holds_no_form_the_census_refuses():
@@ -326,8 +355,8 @@ def test_iv_mains_backend_api_holds_no_form_the_census_refuses():
     paths = [p.relative_to(API).as_posix() for p in API.rglob("*.py")]
     count, hits, unfollowed = rt.closure_census(str(API), paths, list(EVALUATOR))
     assert count >= 30 and hits == [], hits[:5]
-    assert set(unfollowed) == set(rt.CLOSURE_UNFOLLOWED)
-    print("files read %d; uses not followed by form %s" % (count, unfollowed))
+    assert list(unfollowed) == ["call", "container", "return", "attribute", "loop"], unfollowed
+    print("files read %d; uses counted by place %s" % (count, unfollowed))
 
 
 def test_the_base_must_be_an_ancestor_of_the_judged_tree(world, monkeypatch):
@@ -380,6 +409,9 @@ ROWS = (
 )
 
 
+ROW_13_CELLS = 75
+
+
 def _first_row(c):
     return next(r for r in ROWS if r[1](c))
 
@@ -394,7 +426,7 @@ def _cell_world(monkeypatch, rt, c, saved):
     monkeypatch.setattr(rt, "CLOSURE_CHANGE", change)
     monkeypatch.setattr(rt, "HEALTH_EXPECT", _rows(new))
     words = {TIP: new, BASE: O_W, PRE: O_W, CODE: new}
-    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what, source="boxes-head": words[rev])
     monkeypatch.setattr(rt, "closure_base", lambda st: _taken(BASE))
     health = {PRIMARY: w[c["P"]], STANDBY: w[c["Sb"]]}
 
@@ -452,7 +484,11 @@ def test_the_table_walks_every_cell_against_its_oracle(monkeypatch, capsys):
         capsys.readouterr()
     assert wrong == [], (len(wrong), wrong[:3])
     assert reached == set(range(1, 14)), sorted(reached)
-    print("cells reaching row 13: %d" % len(last))
+    with capsys.disabled():
+        print("\ncells reaching row 13: %d" % len(last))
+        for c in last:
+            print("row 13 cell: " + " ".join("%s=%s" % (a, c[a]) for a, _v in AXES))
+    assert len(last) == ROW_13_CELLS, len(last)
 
 
 @pytest.mark.parametrize("row,cell", [
@@ -532,14 +568,66 @@ def test_the_standby_is_not_deployed_when_the_primary_publishes_another_word(mon
     assert "no further box is deployed" in msg and "the rollback point recorded" in msg and BASE[:12] in msg, msg
 
 
+def _parent_map(tree):
+    parent = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parent[c] = n
+    return parent
+
+
+def _place(parent, node):
+    p = parent.get(node)
+    field = next((f for f, v in ast.iter_fields(p) if v is node or (isinstance(v, list) and any(x is node for x in v))),
+                 None) if p is not None else None
+    x = node
+    while x in parent and not isinstance(parent[x], ast.Module):
+        x = parent[x]
+    owner = x.name if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else "<module>"
+    return owner, p, "%s.%s" % (type(p).__name__, field)
+
+
+PLAY_PLACES = {
+    ("zap", "_deploy_both", "Call.func", "deploy-scr-backend.yml"),
+    ("zap", "phase_snapshot", "Call.func", "snapshot-scr.yml"),
+    ("zap_argv", "zap", "Call.func", None),
+    ("zap_argv", "_reg_zap", "Call.func", None),
+    ("deploy-scr-backend.yml", "_deploy_both", "Call.args", "zap"),
+    ("deploy-scr-backend.yml", "_reg_zap", "Tuple.elts", None),
+    ("deploy-scr-backend.yml", "<module>", "Dict.keys", None),
+    ("deploy-bot", "phase_bot", "Call.args", "ssh_argv"),
+    ("deploy-bot", "phase_bot", "Call.args", "blocking_child"),
+}
+
+
+def _play_census(tree):
+    parent, hits = _parent_map(tree), []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and n.id in ("zap", "zap_argv"):
+            what = n.id
+        elif isinstance(n, ast.Attribute) and n.attr in ("zap", "zap_argv"):
+            what = "an attribute " + n.attr
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and (
+                "deploy-scr-backend" in n.value or n.value == "deploy-bot"):
+            what = "deploy-scr-backend.yml" if "deploy-scr-backend" in n.value else "deploy-bot"
+        else:
+            continue
+        owner, p, place = _place(parent, n)
+        extra = None
+        if place == "Call.func" and p.args and isinstance(p.args[0], ast.Constant):
+            extra = p.args[0].value
+        elif place == "Call.args" and isinstance(p.func, ast.Name):
+            extra = p.func.id
+        if (what, owner, place, extra) not in PLAY_PLACES:
+            hits.append((what, owner, getattr(n, "lineno", 0), place, extra))
+    return hits
+
+
 def test_every_deploy_play_is_followed_by_the_box_judge_before_the_next():
     rt = _release_train()
-    fns = {n.name: n for n in ast.parse(Path(rt.__file__).read_text(encoding="utf-8")).body
-           if isinstance(n, ast.FunctionDef)}
-    zaps = [(name, n) for name, fn in fns.items() for n in ast.walk(fn)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "zap"
-            and n.args and "deploy-scr-backend" in ast.unparse(n.args[0])]
-    assert [name for name, _n in zaps] == ["_deploy_both"], zaps
+    tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert _play_census(tree) == []
     loop = next(n for n in fns["_deploy_both"].body if isinstance(n, ast.For))
     assert ast.unparse(loop.body[-1]) == "closure_judge_box(st, role, host, sha, expect)", ast.unparse(loop.body[-1])
     first = [s for s in fns["_deploy_both"].body if not isinstance(s, ast.Expr) or not isinstance(s.value, ast.Constant)]
@@ -656,41 +744,169 @@ def test_only_the_first_pass_writes_the_record():
 
 
 _GUARD_READS = {"git_out", "_git_line", "health_json", "load_state", "save_state", "expected_merge_tree",
-                "ls_remote_main", "closure_routine", "_closure_state_files"}
+                "ls_remote_main", "closure_routine", "_closure_state_files", "open"}
+READ_CALLS = {"isinstance", "len", "set", "dict", "list", "tuple", "sorted", "any", "all", "str", "int", "bool",
+              "range", "zip", "next", "min", "max", "sum", "print", "type", "repr", "ClosureRefusal", "reads_as",
+              "_utc", "run_tags", "git_argv"}
+READ_METHODS = {"get", "items", "keys", "values", "split", "partition", "startswith", "endswith", "decode", "encode",
+                "join", "strip", "lstrip", "rstrip", "lower", "upper", "replace", "splitlines", "fullmatch", "match",
+                "group", "find", "index", "append", "extend", "add", "setdefault", "hexdigest", "isdigit", "fromkeys",
+                "count", "format", "sha256", "gettempdir"}
 
 
-def test_every_read_the_guard_depends_on_runs_inside_the_wrapper():
-    rt = _release_train()
-    import builtins
-    tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
-    names = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))} | set(dir(builtins))
-    bad = []
+def _in_reading(parent, node):
+    x = node
+    while x in parent:
+        p = parent[x]
+        if isinstance(p, ast.With) and any(x is s for s in p.body) and any(
+                isinstance(i.context_expr, ast.Call) and isinstance(i.context_expr.func, ast.Name)
+                and i.context_expr.func.id == "_closure_reading" for i in p.items):
+            return "the wrapper's body"
+        if (isinstance(p, ast.Try) and any(x is s for s in p.body) and _place(parent, p)[0] == "closure_load_state"
+                and [ast.unparse(h.type) for h in p.handlers] == ["Exception"]):
+            return "closure_load_state's try"
+        x = p
+    return None
+
+
+def _read_census(tree):
+    parent, hits = _parent_map(tree), []
+    fns = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    sites = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in fns:
+            sites.setdefault(n.func.id, []).append(n)
+    inner = set()
+    while True:
+        more = {f for f, calls in sites.items() if f not in inner and "closure" in f and all(
+            _in_reading(parent, c) or _place(parent, c)[0] in inner for c in calls)}
+        if not more:
+            break
+        inner |= more
     for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef) and "closure" in n.name]:
-        if fn.name in ("closure_export", "closure_routine", "closure_census", "_closure_state_files",
-                       "closure_load_state"):
-            continue
-        wrapped = set()
-        for w in ast.walk(fn):
-            if isinstance(w, ast.With) and any("_closure_reading" in ast.unparse(i.context_expr) for i in w.items):
-                wrapped |= {id(x) for s in w.body for x in ast.walk(s)}
         for n in ast.walk(fn):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _GUARD_READS \
-                    and id(n) not in wrapped:
-                bad.append((fn.name, n.lineno, n.func.id))
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id not in names:
-                bad.append((fn.name, n.lineno, "a call the census does not know: " + n.func.id))
+            if isinstance(n, ast.Name) and n.id in _GUARD_READS:
+                p = parent.get(n)
+                if not (isinstance(p, ast.Call) and p.func is n):
+                    hits.append((fn.name, getattr(n, "lineno", 0), "a read named outside a call: " + n.id))
+            if not isinstance(n, ast.Call) or _in_reading(parent, n) or fn.name in inner:
+                continue
+            f = n.func
+            if isinstance(f, ast.Name) and (f.id in READ_CALLS or ("closure" in f.id and f.id in fns)):
+                continue
+            if isinstance(f, ast.Attribute) and f.attr in READ_METHODS:
+                continue
+            hits.append((fn.name, getattr(n, "lineno", 0), "a call outside the wrapper: " + ast.unparse(f)))
+    return hits, sorted(inner)
+
+
+def test_every_call_of_a_closure_function_outside_the_wrapper_is_one_of_the_listed_pure_calls():
+    rt = _release_train()
+    tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
+    hits, inner = _read_census(tree)
+    assert hits == [] and inner == INNER_FUNCTIONS, (hits, inner)
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
     loads = [n for n in ast.walk(main) if isinstance(n, ast.Call) and ast.unparse(n.func) in ("load_state",)]
-    assert bad == [] and loads == [], (bad, loads)
+    assert loads == [], loads
+
+
+INNER_FUNCTIONS = ["_closure_bindings", "_closure_chain", "_closure_field", "_closure_module", "_closure_state_files",
+                   "_closure_uses", "closure_census", "closure_child_env", "closure_export", "closure_routine"]
+
+
+def _hand_built(fn_name, node):
+    tree = ast.Module(body=[ast.FunctionDef(name=fn_name, args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[],
+                                                                             kw_defaults=[], defaults=[]),
+                                            body=[ast.Expr(value=node)], decorator_list=[], returns=None,
+                                            type_params=[])], type_ignores=[])
+    return ast.fix_missing_locations(tree)
+
+
+READ_PLANTS = {
+    "builtin open outside the wrapper": "def closure_x(p):\n    return open(p).read()\n",
+    "open reached as an attribute": "import builtins\ndef closure_x(p):\n    return builtins.open(p)\n",
+    "an attribute read of a file outside the wrapper": "import os\ndef closure_x(p):\n    return os.stat(p)\n",
+    "a read bound to another name": "def closure_x(p):\n    r = load_state\n    return r()\n",
+    "a read handed to a call": "def closure_x(p):\n    return list(map(open, p))\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(READ_PLANTS))
+def test_the_read_census_hits_each_planted_form(form):
+    hits, _inner = _read_census(ast.parse(READ_PLANTS[form]))
+    assert hits, form
+
+
+def test_the_read_census_hits_a_read_under_a_node_type_its_code_never_names():
+    hits, _inner = _read_census(_hand_built("closure_x", ast.Await(value=ast.Name(id="open", ctx=ast.Load()))))
+    assert [h[2] for h in hits] == ["a read named outside a call: open"], hits
+
+
+PLAY_PLANTS = {
+    "a play named by a name": "def _deploy_both():\n    p = 'deploy-scr-backend.yml'\n    zap(p)\n",
+    "the runner bound to another name": "def _deploy_both():\n    z = zap\n",
+    "the runner reached as an attribute": "def _deploy_both():\n    rt.zap('deploy-scr-backend.yml')\n",
+    "the deploy play from another function": "def phase_other():\n    zap('deploy-scr-backend.yml')\n",
+    "the bot verb from another function": "def phase_other():\n    ssh_argv(P, 'deploy-bot')\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(PLAY_PLANTS))
+def test_the_play_census_hits_each_planted_form(form):
+    assert _play_census(ast.parse(PLAY_PLANTS[form])), form
+
+
+def test_the_play_census_hits_a_runner_under_a_node_type_its_code_never_names():
+    hits = _play_census(_hand_built("_deploy_both", ast.Await(value=ast.Name(id="zap", ctx=ast.Load()))))
+    assert [(h[0], h[1], h[3]) for h in hits] == [("zap", "_deploy_both", "Await.value")], hits
+
+
+def test_check_and_plan_reach_the_guard_before_any_token_and_without_the_preflight(monkeypatch, tmp_path, capsys):
+    rt = _release_train()
+    real_preflight, phases_real = rt.git_forms_preflight, list(rt.PHASES)
+    bad = []
+    for argv in (["check"], ["plan"], ["plan", "--only", "code"], ["plan", "--only", "precursor"], ["run"]):
+        events = []
+        _main_world(monkeypatch, rt, tmp_path, events, argv)
+        monkeypatch.setattr(rt, "PHASES", phases_real)
+        monkeypatch.setattr(rt, "ALL_SQL", ["999_closure_test.sql"] if "precursor" in argv else [])
+        monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "none.json"))
+        monkeypatch.setattr(rt, "git_forms_preflight", lambda *a, **kw: events.append("preflight") or real_preflight(
+            *a, **kw))
+        monkeypatch.setattr(rt, "REVIEWED_TIP", "a" * 40)
+        monkeypatch.setattr(rt, "measure_every_batch", lambda: ([], []))
+        monkeypatch.setattr(rt, "run", lambda cmd, *a, **kw: "a" * 40)
+        monkeypatch.setattr(rt, "PRIMARY", PRIMARY)
+        monkeypatch.setattr(rt, "STANDBY", STANDBY)
+        monkeypatch.setattr(rt, "mod_version_argv", lambda host: ["mod-version", host])
+        for name in ("EXPECT_TABLES", "EXPECT_COLUMNS", "EXPECT_INDEXES", "SCHEMA_SQL", "I18N_SQL", "BACKFILL_SQL"):
+            monkeypatch.setattr(rt, name, [])
+        monkeypatch.setattr(rt, "start_process", lambda *a, **kw: subprocess.CompletedProcess([], 0, b"", b""))
+        monkeypatch.setattr(rt, "precursor_files", lambda: ["999_closure_test.sql"])
+        monkeypatch.setattr(rt, "code_state", lambda host: (True, False, True, []))
+        monkeypatch.setattr(rt, "health_json", lambda host: {})
+        monkeypatch.setattr(rt, "schema_state", lambda host: ([], []))
+        monkeypatch.setattr(rt, "index_state", lambda host: [])
+        monkeypatch.setattr(rt, "require_rollback_point", lambda args, st, phase: None)
+
+        def guard(st, stage, **kw):
+            events.append("guard " + stage)
+            raise rt.ClosureRefusal("closure guard: stopped at the guard's call by the test")
+        monkeypatch.setattr(rt, "closure_guard", guard)
+        rt.main()
+        capsys.readouterr()
+        if not any(e.startswith("guard") for e in events) or "preflight" in events or any(
+                e.startswith("train_token") or e.startswith("controller") for e in events):
+            bad.append((argv, events))
+    assert bad == [], bad
 
 
 @pytest.mark.parametrize("sql", [[], ["999_closure_test.sql"]])
-def test_the_guard_runs_exactly_where_the_preflight_runs(monkeypatch, tmp_path, capsys, sql):
+def test_in_a_run_with_go_the_guard_runs_only_after_the_preflight(monkeypatch, tmp_path, capsys, sql):
     rt = _release_train()
     names = [p for p, _fn in rt.PHASES]
-    argvs = [[verb] + go + sel for verb in ("run", "plan") for go in ([], ["--go"])
-             for sel in [[]] + [["--from", p] for p in names] + [["--only", p] for p in names]]
-    bad = []
+    argvs = [["run", "--go"] + sel for sel in [[]] + [["--from", p] for p in names] + [["--only", p] for p in names]]
+    bad, reached = [], []
     for argv in argvs:
         events = []
         _main_world(monkeypatch, rt, tmp_path, events, argv)
@@ -700,9 +916,14 @@ def test_the_guard_runs_exactly_where_the_preflight_runs(monkeypatch, tmp_path, 
         monkeypatch.setattr(rt, "closure_guard", lambda *a, **kw: events.append("guard"))
         rt.main()
         capsys.readouterr()
-        if ("guard" in events or "origin" in events) and "preflight" not in events:
+        if "guard" in events:
+            reached.append(argv[2:])
+        if any(e in events for e in ("guard", "origin")) and (
+                "preflight" not in events or events.index("preflight") > min(
+                    events.index(e) for e in ("guard", "origin") if e in events)):
             bad.append((argv, events))
-    assert bad == [], bad
+    assert bad == [] and ["--only", "code"] in reached and ["--only", "precursor" if sql else "code"] in reached, (
+        bad, reached)
 
 
 def test_a_refused_check_returns_one_with_the_fixed_line(monkeypatch, tmp_path, capsys):
@@ -861,7 +1082,7 @@ def test_the_first_pass_refuses_a_main_or_a_merge_without_its_word(monkeypatch, 
     saved = []
     st = _cell_world(monkeypatch, rt, cell, saved)
     words = {TIP: N_W, BASE: O_W, MAIN: X_W if reach == "precursor" else O_W, MERGE: X_W}
-    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what, source="boxes-head": words[rev])
     monkeypatch.setattr(rt, "ALL_SQL", ["999_closure_test.sql"])
     monkeypatch.setattr(rt, "_closure_main_sha", lambda: MAIN)
     monkeypatch.setattr(rt, "expected_merge_tree", lambda main, tip: MERGE)
@@ -874,10 +1095,13 @@ def test_a_commit_tree_without_its_word_is_not_committed(monkeypatch):
     rt = _release_train()
     cell = dict(rec="valid", pre=False, code=False, P="O", Sb="O", key="valid", call="W")
     st = _cell_world(monkeypatch, rt, cell, [])
-    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: X_W)
+    seen = []
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what, source="boxes-head": seen.append(
+        source) or X_W)
     with pytest.raises(rt.ClosureRefusal) as exc:
         rt.closure_judge_tree(st, MERGE, MAIN, "old", "the precursor tree")
     assert "the precursor tree does not carry the word %s; nothing is committed" % O_W in str(exc.value)
+    assert seen == ["record"], seen
 
 
 def test_a_commit_to_deploy_without_the_approved_word_is_not_deployed(monkeypatch):
@@ -885,7 +1109,7 @@ def test_a_commit_to_deploy_without_the_approved_word_is_not_deployed(monkeypatc
     cell = dict(rec="valid", pre=False, code=True, P="O", Sb="O", key="valid", call="Jc")
     st = _cell_world(monkeypatch, rt, cell, [])
     words = {TIP: N_W, BASE: O_W, CODE: X_W}
-    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what, source="boxes-head": words[rev])
     plays = _fake_plays(monkeypatch, rt, {PRIMARY: N_W, STANDBY: N_W})
     with pytest.raises(rt.ClosureRefusal) as exc:
         rt._deploy_both(CODE, expect="new", st=st)
@@ -995,7 +1219,7 @@ def test_the_words_relation_to_the_newest_verified_record_is_printed_and_never_r
 
 def test_check_and_plan_take_the_word_when_it_is_given_and_carry_the_newest_records_numbers(line, monkeypatch):
     rt, scratch, c = line
-    numbers = {"call": 1, "container": 0, "return": 2, "attribute": 0}
+    numbers = {"call": 1, "container": 0, "return": 2, "attribute": 0, "loop": 3}
     _state_files(monkeypatch, rt, scratch, {"a": {"verified": True, "code_sha": c["m2"],
                                                   rt.CLOSURE_STATE_KEY: {"unfollowed": numbers}}})
     monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", c["m1"])
@@ -1045,9 +1269,10 @@ def _census(tmp_path, body):
     api = tmp_path / "api"
     api.mkdir(exist_ok=True)
     (api / "review_rules.py").write_text("TABLE = {}\nLIST = []\n", encoding="utf-8")
+    (api / "seat_mod.py").write_text("import review_rules as rr\nT = rr.TABLE\n", encoding="utf-8")
     (api / "main.py").write_text(body, encoding="utf-8")
     rt = _release_train()
-    return rt, rt.closure_census(str(api), ["review_rules.py", "main.py"], ["review_rules.py"])
+    return rt, rt.closure_census(str(api), ["review_rules.py", "seat_mod.py", "main.py"], ["review_rules.py"])
 
 
 RR = "import review_rules as rr\n"
@@ -1070,22 +1295,38 @@ WRITE_FORMS = {
     "a store through an import-as alias": "import review_rules as R\nR.TABLE = {}\n",
     "a delete through a from-import alias": "from review_rules import TABLE\ndel TABLE['k']\n",
     "an augmented store through a from-import-as alias": "from review_rules import LIST as L\nL += [1]\n",
+    "a call below depth 1 through an alias another module holds": "import seat_mod as s\ns.T.update({})\n",
+    "a star import": "from review_rules import *\n",
+    "a name bound again by an import": RR + "import os as rr\n",
+    "a parameter named as the evaluator": RR + "def f(rr):\n    pass\n",
 }
 UNKNOWN_FORMS = {
-    "a tuple target": RR + "a, b = rr.LIST\n",
-    "an annotated alias": RR + "W: dict = rr.TABLE\n",
-    "an assignment expression": RR + "if (W := rr.TABLE):\n    pass\n",
+    "a tuple target": (RR + "a, b = rr.LIST\n", "a name of the evaluator bound by a form the census does not know"),
+    "an alias of a module that holds the evaluator": (
+        "import seat_mod as s\nimport review_rules as rr\nS = s\n",
+        "a name of the evaluator bound by a form the census does not know"),
+    "an annotated alias": (RR + "W: dict = rr.TABLE\n", "(AnnAssign.value)"),
+    "an assignment expression": (RR + "if (W := rr.TABLE):\n    pass\n", "(NamedExpr.value)"),
+    "an or": (RR + "W = rr.TABLE or {}\nW['k'] = 1\n", "(BoolOp.values)"),
+    "an if-expression": (RR + "W = rr.TABLE if True else {}\nW['k'] = 1\n", "(IfExp.body)"),
+    "a with-as": (RR + "with rr.TABLE as W:\n    W['k'] = 1\n", "(withitem.context_expr)"),
+    "a lambda": (RR + "f = lambda: rr.TABLE\nf()['k'] = 1\n", "(Lambda.body)"),
+    "a loop target": (RR + "for rr.TABLE in [{}]:\n    pass\n", "a store or delete on the evaluator"),
+    "a default argument": (RR + "def f(t=rr.TABLE):\n    t['k'] = 1\n", "(arguments.defaults)"),
 }
 UNFOLLOWED_FORMS = (
     ("call", RR + "print(rr.TABLE)\n"),
     ("call", RR + "print(x=rr.TABLE)\n"),
+    ("call", RR + "print(*rr.LIST)\n"),
     ("container", RR + "L = [rr.TABLE]\n"),
     ("container", RR + "d = {}\nd['k'] = rr.TABLE\n"),
+    ("container", "import seat_mod as s\nimport review_rules as rr\nL = (s,)\n"),
     ("return", RR + "def f():\n    return rr.TABLE\n"),
     ("attribute", RR + "class O:\n    pass\nO.t = rr.TABLE\n"),
+    ("loop", RR + "for x in rr.LIST:\n    x.append(1)\n"),
+    ("loop", RR + "y = [x for x in rr.LIST]\n"),
 )
 UNCOUNTED_FORMS = {
-    "a loop's target": RR + "for x in rr.LIST:\n    x.append(1)\n",
     "the value a call through the evaluator returns": RR + "rr.review_eval()['k'] = 1\n",
 }
 
@@ -1093,19 +1334,43 @@ UNCOUNTED_FORMS = {
 @pytest.mark.parametrize("form", sorted(READ_FORMS))
 def test_iv_each_read_form_passes(tmp_path, form):
     rt, (count, hits, unfollowed) = _census(tmp_path, READ_FORMS[form])
-    assert count == 1 and hits == [] and sum(unfollowed.values()) == 0, (form, hits, unfollowed)
+    assert count == 2 and hits == [] and sum(unfollowed.values()) == 0, (form, hits, unfollowed)
 
 
 @pytest.mark.parametrize("form", sorted(WRITE_FORMS))
 def test_iv_each_write_form_is_refused(tmp_path, form):
     rt, (count, hits, unfollowed) = _census(tmp_path, WRITE_FORMS[form])
-    assert count == 1 and hits, form
+    want = next(t for words, t in WRITE_TEXTS if words in form)
+    assert count == 2 and want in [h[2] for h in hits], (form, hits)
+
+
+WRITE_TEXTS = (("call below depth", "a call through the evaluator at depth 2"),
+               ("setattr", "setattr or delattr on the evaluator"), ("delattr", "setattr or delattr on the evaluator"),
+               ("star import", "a star import"), ("bound again", "a name of the evaluator bound again by an import"),
+               ("parameter", "a name of the evaluator bound by a form the census does not know"),
+               ("", "a store or delete on the evaluator"))
 
 
 @pytest.mark.parametrize("form", sorted(UNKNOWN_FORMS))
-def test_iv_a_binding_form_the_census_does_not_know_is_a_hit(tmp_path, form):
-    rt, (count, hits, unfollowed) = _census(tmp_path, UNKNOWN_FORMS[form])
-    assert [h[2] for h in hits] == ["a name of the evaluator bound by a form the census does not know"], (form, hits)
+def test_iv_a_use_at_a_place_the_census_does_not_list_is_one_hit_naming_the_place(tmp_path, form):
+    body, want = UNKNOWN_FORMS[form]
+    rt, (count, hits, unfollowed) = _census(tmp_path, body)
+    assert len(hits) == 1 and hits[0][0] == "main.py" and want in hits[0][2], (form, hits)
+
+
+def test_iv_a_use_under_a_node_type_the_census_code_never_names_is_a_hit():
+    rt = _release_train()
+    tree = ast.parse(RR)
+    tree.body.append(ast.Expr(value=ast.Await(value=ast.Attribute(value=ast.Name(id="rr", ctx=ast.Load()),
+                                                                  attr="TABLE", ctx=ast.Load()))))
+    tree = ast.fix_missing_locations(tree)
+    tracked, carriers = rt._closure_bindings(tree, {"review_rules"}, {})
+    hits, counts = rt._closure_uses(tree, tracked, carriers, {}, {"review_rules"})
+    assert [h[1] for h in hits] == ["a use of the evaluator at a place the census does not list (Await.value)"], hits
+    code = [ast.unparse(n) for n in ast.parse(Path(rt.__file__).read_text(encoding="utf-8")).body
+            if getattr(n, "name", None) in ("closure_census", "_closure_bindings", "_closure_uses", "_closure_chain",
+                                            "_closure_field")]
+    assert len(code) == 5 and not any("Await" in c for c in code + [repr(rt.CLOSURE_PLACES)]), "Await is named"
 
 
 @pytest.mark.parametrize("form,body", UNFOLLOWED_FORMS)
@@ -1126,19 +1391,19 @@ def test_the_disclosure_line_shows_the_numbers_and_the_newest_records_and_never_
     cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="F")
     saved = []
     st = _cell_world(monkeypatch, rt, cell, saved)
-    counts = {"call": 3, "container": 2, "return": 1, "attribute": 0}
+    counts = {"call": 3, "container": 2, "return": 1, "attribute": 0, "loop": 1}
     rt.CLOSURE_SEEN[TIP] = {"differs": [], "unfollowed": dict(counts)}
     monkeypatch.setattr(rt, "closure_base", lambda st: _taken(BASE, dict(counts, call=2)))
     rt.closure_guard(st, "start", write=True, reach=())
     out = capsys.readouterr().out
-    assert ("6 use(s) of the evaluator not followed at the reviewed tip: 3 handed to a call, 2 put in a container, "
-            "1 returned, 0 bound as an attribute of another object; a disclosure, not a refusal; the newest verified "
-            "record holds call 2, container 2, return 1, attribute 0") in out, out
+    assert ("7 use(s) of the evaluator not followed at the reviewed tip: 3 handed to a call, 2 put in a container, "
+            "1 returned, 0 bound as an attribute of another object, 1 iterated; a disclosure, not a refusal; the "
+            "newest verified record holds call 2, container 2, return 1, attribute 0, loop 1") in out, out
     assert saved[0][rt.CLOSURE_STATE_KEY]["unfollowed"] == counts
     monkeypatch.setattr(rt, "closure_base", lambda st: _taken(BASE, dict(counts)))
     rt.closure_guard({}, "check")
     out = capsys.readouterr().out
-    assert "6 use(s) of the evaluator not followed" in out and "newest verified record holds" not in out, out
+    assert "7 use(s) of the evaluator not followed" in out and "newest verified record holds" not in out, out
 
 
 def test_the_disclosure_counts_the_census_of_the_reviewed_tip(world, monkeypatch, tmp_path, capsys):
