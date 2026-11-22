@@ -3261,11 +3261,11 @@ async def _seam_hold_key(env, lob, key, act, qid, *, release):
 
 
 def test_seam_r4_an_identity_key_held_past_the_bound_ends_each_action_busy(monkeypatch):
-    """R1's order (the identity keys before the lobby's row lock; the held row's
-    own lock comes first, test_seam_f1's census), R4 and R7's busy line. With a
-    listed player's identity key held EXCLUSIVE in another session (as the ban
-    core holds it), each action waits on that key before it takes the lobby's
-    row (the row stays free to
+    """R1's order (the identity keys before the lobby's row lock; the held row's own lock
+    comes first, test_seam_f1_no_held_row_lock_after_an_identity_key_or_a_ban_core_row_lock),
+    R4 and R7's busy line. With a listed player's identity key held EXCLUSIVE in another
+    session (as the ban core holds it), each action waits on that key before it takes the
+    lobby's row (the row stays free to
     a NOWAIT lock while it waits), and the lock bound, well inside the
     deadline, ends the wait: 503 with the busy sentence, nothing written (every
     table compared whole), the row pending, and exactly one [QAPPLY] busy
@@ -4008,10 +4008,10 @@ async def _seam_hold_shared(env, key, act, qid):
 
 
 def test_seam_f1d_a_shared_holder_of_the_same_key_stops_neither_action(monkeypatch):
-    """F1d (the second half of B8). Another session holds a listed player's identity key SHARED while each
-    action runs. Each action takes the same key shared in its ordered pass, so it completes inside its
-    bounds: 200, in less than the lock bound. (test_seam_r4 holds the key EXCLUSIVE, the ban core's mode,
-    and each action waits and answers busy; this check tells the two modes apart.)"""
+    """F1d (the second half of B8). Another session holds a listed player's identity key SHARED while each action
+    runs. Each action takes the same key shared in its ordered pass, so it completes inside its bounds: 200, in
+    less than the lock bound. (test_seam_r4_an_identity_key_held_past_the_bound_ends_each_action_busy holds the key
+    EXCLUSIVE, the ban core's mode, and each action waits and answers busy; this check tells the two modes apart.)"""
     async def body(env):
         bound = main._QAPPLY_LOCK_TIMEOUT_MS / 1000.0
         lob, qid = await closed_held(env)
