@@ -8177,7 +8177,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
-                              qapply_build=_QAPPLY_BUILD,
+                              qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
                               ban_sweep_build=_BAN_SWEEP_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -8255,7 +8255,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
-                              qapply_build=_QAPPLY_BUILD,
+                              qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
                               ban_sweep_build=_BAN_SWEEP_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -87238,6 +87238,20 @@ def _lfp_declares_casual(kinds) -> bool:
     place in the LIMIT and holds back no later row; it stays pending until a
     declaring poller reads it or it expires."""
     return "casual" in {k.strip().lower() for k in (kinds or "").split(",")}
+
+
+# Release-train verification plumbing, not a design mechanism: the build marker
+# of LFP-CASUAL-1, reported on /health as `lfp_casual_build`. 1 = this build
+# admits a casual-only looking-for-players request of a player with ranked off,
+# keeps one cooldown over both kinds behind the admission lock, and answers
+# rows naming casual only to a poller that declares the casual kind. It names
+# build identity only: a stale box answers the same keys on every GET the train
+# reads, so without it the train could not tell a refreshed box from a stale
+# one (learnings 780, 794, 1186). A code constant, equal on both boxes by
+# construction, probed by the release train and read by nothing else (#306).
+# Absent on any build before it. Defined here, at the end of the module, so no
+# line-keyed catalog of main.py moves; the health route reads it at request time.
+_LFP_CASUAL_BUILD = 1
 # ── end of LFP-CASUAL-1 helpers ──────────────────────────────────────────────
 
 # ── STACK-SEAM-1: helpers of the held-report actions where they meet the ban sweep ──

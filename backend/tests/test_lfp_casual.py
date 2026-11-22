@@ -960,3 +960,99 @@ def test_the_base_fixture_is_main_at_base_commit():
     text = out.stdout.decode("utf-8")
     assert base_span("lfp_ping") == _segment(text)
     assert base_span("internal_lfp_pings") == pending_segment(text)
+
+
+# -- H1: the build marker on /health (release train) -----------------------------------------------
+# In the form of test_qapply_pg.py's test_h1_health_carries_qapply_build_in_both_forms, with no database:
+# both arms of health_check name _LFP_CASUAL_BUILD, its value is 1, HealthResponse declares it as a
+# required int, and the degraded answer carries it. The mutants run the same check on edited texts.
+
+API = os.path.join(BACKEND, "api")
+SCHEMAS = os.path.join(API, "schemas.py")
+H1_ARM = "qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,\n"
+H1_FIELD = "    lfp_casual_build: int\n"
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().replace("\r\n", "\n")
+
+
+def _schemas_from(src):
+    """schemas.py's text as a module of its own (a fresh name), so an edited copy can be checked."""
+    import importlib.util
+    import sys
+    if API not in sys.path:
+        sys.path.insert(0, API)
+    name = "lfp_h1_schemas_%d" % abs(hash(src))
+    spec = importlib.util.spec_from_loader(name, loader=None)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        exec(compile(src, SCHEMAS, "exec"), mod.__dict__)
+    finally:
+        sys.modules.pop(name, None)
+    return mod
+
+
+def check_h1(main_src, schemas_mod, answer=None):
+    import ast
+    tree = ast.parse(main_src)
+    (health,) = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check"]
+    (tried,) = [n for n in ast.walk(health) if isinstance(n, ast.Try)]
+    connected = [ast.unparse(k.value) for s in tried.body for k in ast.walk(s)
+                 if isinstance(k, ast.keyword) and k.arg == "lfp_casual_build"]
+    degraded = [ast.unparse(k.value) for h in tried.handlers for k in ast.walk(h)
+                if isinstance(k, ast.keyword) and k.arg == "lfp_casual_build"]
+    assert (connected, degraded) == (["_LFP_CASUAL_BUILD"], ["_LFP_CASUAL_BUILD"]), \
+        "health arms: connected %r, degraded %r" % (connected, degraded)
+    values = [ast.unparse(n.value) for n in tree.body if isinstance(n, ast.Assign)
+              and [ast.unparse(t) for t in n.targets] == ["_LFP_CASUAL_BUILD"]]
+    assert values == ["1"], "_LFP_CASUAL_BUILD assigned %r" % values
+    field = schemas_mod.HealthResponse.model_fields.get("lfp_casual_build")
+    assert field is not None and field.annotation is int and field.is_required(), \
+        "HealthResponse.lfp_casual_build: %r" % field
+    if answer is not None:
+        assert answer["status"] == "degraded" and answer["lfp_casual_build"] == 1, answer
+
+
+class _DownSession:
+    async def execute(self, *a, **k):
+        raise OSError("lfp_casual_build: the database is down")
+
+    async def rollback(self):
+        pass
+
+
+def test_h1_health_carries_lfp_casual_build_in_both_forms():
+    import sys
+    if API not in sys.path:
+        sys.path.insert(0, API)
+    import main
+    import schemas
+    assert main._LFP_CASUAL_BUILD == 1
+    answer = asyncio.run(main.health_check(db=_DownSession())).model_dump()
+    check_h1(_read(MAIN), schemas, answer)
+
+
+def test_h1_control_and_mutants():
+    main_src, schemas_src = _read(MAIN), _read(SCHEMAS)
+    check_h1(main_src, _schemas_from(schemas_src))                     # control: the texts as they stand
+    assert main_src.count(H1_ARM) == 2 and schemas_src.count(H1_FIELD) == 1
+    i = main_src.rindex(H1_ARM)                                        # the degraded arm without the keyword
+    arm_cut = main_src[:i] + "qapply_build=_QAPPLY_BUILD,\n" + main_src[i + len(H1_ARM):]
+    try:
+        check_h1(arm_cut, _schemas_from(schemas_src))
+    except AssertionError as ex:
+        red = str(ex)
+    else:
+        raise AssertionError("the arm mutant left H1 green")
+    # the first line is the check's own message (pytest appends its rewrite below it)
+    assert red.splitlines()[0] == "health arms: connected ['_LFP_CASUAL_BUILD'], degraded []", red
+    try:                                                               # the model field missing
+        check_h1(main_src, _schemas_from(schemas_src.replace(H1_FIELD, "", 1)))
+    except AssertionError as ex:
+        red = str(ex)
+    else:
+        raise AssertionError("the field mutant left H1 green")
+    assert red.splitlines()[0] == "HealthResponse.lfp_casual_build: None", red
