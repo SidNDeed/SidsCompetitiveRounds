@@ -1257,7 +1257,7 @@ def _path_calls(src):
     return out
 
 
-def test_the_drivers_environment_list_holds_every_variable_and_file_its_connect_parser_reads():
+def test_the_drivers_environment_list_holds_every_variable_its_connect_parser_reads():
     """[5] (ORDER-R3-FIX-2 F7b, ORDER-R3-FIX-3 G4), held against the INSTALLED
     driver's own source: every environment variable asyncpg's
     connect-parameter parser reads is in _DRIVER_ENV, and every environment
@@ -1292,7 +1292,7 @@ def test_the_drivers_environment_list_holds_every_variable_and_file_its_connect_
     assert "A DECLARED LIMIT" in doc and "_DRIVER_HOME_FILES" in doc
     for f in rc._DRIVER_HOME_FILES:
         assert f in doc, f
-    print("DRIVER-ENV asyncpg %s: %d variables read, all in _DRIVER_ENV; home files %s"
+    print("DRIVER-ENV asyncpg %s: %d variables read, all in _DRIVER_ENV; files %s"
           % (asyncpg.__version__, len(names), sorted(files)))
 
 
@@ -1407,7 +1407,7 @@ class _FirstSession(Exception):
 
 
 @pytest.mark.parametrize("mode", ["count", "cohort", "check"])
-def test_every_run_kind_builds_its_session_factory_once_with_the_seconds_left_before_its_first_connection(
+def test_every_run_kind_builds_its_session_factory_with_the_seconds_left(
         planted, monkeypatch, mode):
     """[9] (ORDER-R3-FIX-3 G6): in the count run, the cohort run and the check
     run, the session factory is built with the whole seconds left of
