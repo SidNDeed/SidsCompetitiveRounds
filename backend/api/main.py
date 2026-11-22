@@ -50178,12 +50178,12 @@ async def _ban_gate_or_raise(db: AsyncSession, steam_id: str, request=None) -> N
         raise HTTPException(status_code=409, detail=_ban_gate_detail(reason))
 
 
-async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=None) -> None:
+async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=None, log=True) -> None:
     """Refuse a report when its reporter (`actor`) or any account it names
     (`others`: the opponent, the named leaver, every roster member) is under
     an active ban (BAN-R5). One read of every id. The reporter's own ban
-    answers with its own reason; another account's ban answers
-    "Banned: participant" and never carries that account's reason."""
+    answers with its own reason; another's answers "Banned: participant".
+    log=False (the held-report list's read form) writes no [BAN-GATE] line."""
     ids = sorted({str(s) for s in [actor, *(others or ())] if s})
     if not ids:
         return
@@ -50193,7 +50193,7 @@ async def _ban_gate_any_or_raise(db: AsyncSession, actor: str, others, request=N
     ), {"sids": ids})).all()
     if not rows:
         return
-    _ban_gate_refused(request)
+    if log: _ban_gate_refused(request)  # noqa: E701 (one line: main.py's line keys stay put)
     own = [r for r in rows if actor and r[0] == str(actor)]
     if own:
         raise HTTPException(status_code=409, detail=_ban_gate_detail(own[0][1]))
@@ -50250,10 +50250,10 @@ async def _ban_lock_and_gate(db: AsyncSession, steam_ids, request=None, actor=No
 
 
 # Bans part 2a (F1 b): the ONE place that says which records no writer may pay.
-# A record the ban void ended carries one of these invalidation reasons
-# (_ban_void_apply writes them); it stays ended for every writer -- a report,
-# a journaled window, a horizon settle, a replay, an admin completion -- also
-# after the ban has run out.
+# A series or an unstarted FFA lobby the ban void ended carries one of these
+# reasons (_ban_void_apply); a played FFA lobby it completed carries its close
+# record instead. Series writers read the reason; the held-report actions read
+# both (_ffa_lobby_ended_by_ban, test_seam_r2), also after the ban has run out.
 BAN_VOID_REASONS = frozenset({"member_banned", "member_banned_played"})
 
 
@@ -70298,17 +70298,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
-    # QAPPLY-1 (F1): under the replay, the game's claim is the first check
-    # below the lobby lock, read for the game the report is of
-    # (_qapply_game_of): a game that a Credit paid from a sibling held row is
-    # refused as credited, and one an Accept applied as recorded, before any
-    # check that a later write to the lobby moves (the game number, the
-    # gate's pace anchor, the game limit).
+    # QAPPLY-1 (F1): under the replay, the game's claim (_qapply_game_of) is the first check below
+    # the lobby lock (credited from a sibling row, or recorded by an Accept), then a lobby the ban
+    # void ended (STACK-SEAM-1 R2), before any check a later write to the lobby moves (the game
+    # number, the gate's pace anchor, the game limit).
     if _qapply is not None:
         _claim = await _qapply_claim_of(db, lobby_uuid, _qapply_game_of(report, _expected_game))
         if _claim is not None:
             raise _QapplyRefused(409, _QAPPLY_TEXTS[
                 "game_credited" if _claim == "credit" else "recorded"], {})
+        if _ffa_lobby_ended_by_ban(lobby):
+            raise _QapplyRefused(409, _QAPPLY_TEXTS["ban_ended"], {})
     # The early lookup preserves validation order, but it cannot authorize a
     # journal or settlement after waiting for this lobby lock.  Rebuild the
     # complete participant map from live identities below the lock so account
@@ -75833,16 +75833,16 @@ def _quarantine_accept_verdict(results: int, players: int) -> tuple:
 # readmission lobbies, and write their moderator record through
 # _modlog_write in the same transaction as their effects.
 #
-# THE LOCK ORDER: the held row (FOR UPDATE), the lobby (FOR NO KEY UPDATE),
-# the participants' players rows in str(id) order (FOR NO KEY UPDATE), then,
-# under Accept only, their glicko_ratings_ffa rows in that order (FOR UPDATE).
-# Every other path that locks or writes a held row takes no lobby, player or
-# rating lock while holding it: the discard route and the janitor's filing
-# write the held row alone (the janitor with SKIP LOCKED); the triage and
-# digest reads take no row lock; the capture (_quarantine_report) reads held
-# rows with no row lock and inserts new ones, under an advisory lock on the
-# group (outside a journal window it first rolls the report's transaction
-# back, releasing its lobby lock).
+# THE LOCK ORDER: the held row (FOR UPDATE), the identity keys of the report's reporter and
+# players (shared, one ordered pass by _ban_lock_and_gate, before any row the ban core locks),
+# the lobby (FOR NO KEY UPDATE), the participants' players rows in str(id) order (FOR NO KEY
+# UPDATE), then, under Accept only, their glicko_ratings_ffa rows in that order (FOR UPDATE).
+# Every other path that locks or writes a held row takes no lobby, player or rating lock while
+# holding it, and the ban core, which takes an identity key exclusive, locks no held row: the
+# discard route and the janitor's filing write the held row alone (the janitor with SKIP
+# LOCKED); the triage and digest reads take no row lock; the capture (_quarantine_report) reads
+# held rows with no row lock and inserts new ones, under an advisory lock on the group (outside
+# a journal window it first rolls the report's transaction back, releasing its lobby lock).
 
 # The reason words both actions serve; every other word, a word added later
 # included, is refused and the row stays held.
@@ -75855,10 +75855,10 @@ _QAPPLY_SERVABLE_REASONS = frozenset({"lobby_completed", "lobby_canceled", "ffa_
 # a real settle wrote; the comparison allows that and a little float error.
 _QAPPLY_RATING_TOLERANCE = 0.051
 
-# Every sentence an admin can receive from the list, Accept and Credit of
-# this lane: plain words and numbers, at most 180 characters with the widest
-# numbers the code formats into them (the released client cuts there).
+# Every admin sentence of the list, Accept and Credit: plain words, <= 180 characters at the widest numbers.
 _QAPPLY_TEXTS = {
+    "banned": "A player of this report is under an active ban, so it cannot be applied or credited; it stays held.",
+    "ban_ended": "A ban ended this report's lobby, so its game cannot be applied or credited; discard this report.",
     "not_found": "This held report was not found.",
     "reviewed": "This held report was already reviewed.",
     "held_credited": "This held report was already credited.",
@@ -75940,9 +75940,9 @@ _QAPPLY_WORD_TEXT = {
     "lag_reporter": "reporter",
 }
 
-# The body's own refusals (HTTPException detail -> sentence), for the route's
-# answer. A detail outside this table answers "refused" (a 5xx "retry").
+# The body's own refusals (detail -> sentence); any other detail answers "refused" (a 5xx "retry").
 _QAPPLY_BODY_TEXT = {
+    "Banned: participant": "banned",
     "Invalid FFA match signature": "unsigned",
     "Invalid lobby_id format": "incomplete",
     "Need at least two distinct players": "incomplete",
@@ -75985,15 +75985,15 @@ def _qapply_refusal_text(reason: str, report, progress) -> str:
 
 
 def _qapply_answer(ex: HTTPException) -> HTTPException:
-    """The route's answer for a refusal out of the body or the credit path:
-    the same status, with an admin's sentence. The service-policy wait of
-    _qapply_service_ready is answered as raised, with its Retry-After."""
+    """A refusal's answer: its status, an admin's sentence (a service wait as raised, with Retry-After)."""
     if isinstance(ex, _QapplyServiceWait):
         return ex
     if isinstance(ex, _QapplyRefused):
         return HTTPException(ex.status_code, str(ex.detail))
     d = str(ex.detail)
     key = _QAPPLY_BODY_TEXT.get(d)
+    if key is None and d.startswith("Banned: "):   # the reporter's own ban (_ban_gate_detail)
+        key = "banned"
     if key is None and d.startswith("Slot mismatch for "):
         key = "roster"
     if key is None and d.startswith("game_points_at_leave is required"):
@@ -76114,14 +76114,14 @@ _QAPPLY_SQL_CLAIMS_CREDITED = """
 # The bounds of Accept's and Credit's one transaction (FIX-1). In the
 # database: a lock wait ends at lock_timeout and a statement, its lock waits
 # included, at statement_timeout, both set transaction-local (is_local true)
-# as the transaction's first statement, before the admin check's read and the
-# held row's lock. In the
+# by the unit's first statement (_qapply_bound), before the admin check's reads and every
+# lock; the transaction may have begun before it (_qapply_service_ready's cache fill). In the
 # process: the whole unit, the COMMIT included (which neither database bound
 # covers), ends at _QAPPLY_DEADLINE_S. Either end rolls back and answers the
-# "busy" sentence with nothing written, also when a best-effort block of the
-# body caught the database bound's error (F6: the unit's mark, read before
-# each commit the unit reaches). A player's report that waits on a row
-# one of these actions holds therefore waits at most the deadline.
+# "busy" sentence with nothing written and one [QAPPLY] busy line (_qapply_busy),
+# also when a best-effort block of the body caught the bound's error (F6: the
+# unit's mark, read before each commit the unit reaches). A player's report that
+# waits on a row one of these actions holds therefore waits at most the deadline.
 _QAPPLY_LOCK_TIMEOUT_MS = 2000
 _QAPPLY_STATEMENT_TIMEOUT_MS = 5000
 _QAPPLY_DEADLINE_S = 8.0
@@ -76136,9 +76136,9 @@ async def _qapply_bound(db) -> None:
 
 
 async def _qapply_admin(db, req, action: str, qid: str) -> None:
-    """The admin check of Accept and Credit, inside their bounded unit (after
-    _qapply_bound): its read is the transaction's second statement. A
-    refusal answers the admin sentence with the check's own status."""
+    """The admin check of Accept and Credit, inside their bounded unit, after
+    _qapply_bound: its reads (the roster, then a roster member's ban) run under
+    the bounds. A refusal answers the admin sentence with the check's own status."""
     try:
         await _require_admin(db, req.admin_steam_id, action, qid, req.hmac_signature)
     except HTTPException as ex:
@@ -76319,11 +76319,10 @@ def _qapply_held_check(row, body):
 
 
 async def _qapply_verdict(db, row, body) -> dict:
-    """The list's and the digest's verdict for one held row, from the READ
-    form of the checks the actions make (the signature, the service
-    accounts, _ffa_report_verify, the record, the game's claim and the
-    gate), with no row lock; advisory: Accept and Credit decide again under
-    their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
+    """The list's and the digest's verdict for one held row, from the READ form of the checks the
+    actions make (the bans, the signature, the service accounts, _ffa_report_verify, the record,
+    the game's claim, a lobby a ban ended and the gate), with no row lock or key; advisory: Accept
+    and Credit decide again under their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
     def no(key, credit=False, **kw):
         return {"can_accept": False, "accept_blocked_reason": _QAPPLY_TEXTS[key].format(**kw),
                 "can_credit": credit}
@@ -76337,9 +76336,11 @@ async def _qapply_verdict(db, row, body) -> dict:
                               {"lid": str(row["group_id"])})).mappings().first()
     if lobby is None:
         return no("no_lobby")
-    # The game's state first, as Accept reads it below the lobby lock (F1):
-    # recorded, or claimed (for the game the report names, or the lobby's
-    # next game when it names none), in Accept's sentences.
+    # The actions' ban read in its read form (no key, no line), then the game's state as Accept reads it (F1).
+    try:
+        await _ban_gate_any_or_raise(db, report.reported_by_steam_id, [p.steam_id for p in report.players], None, log=False)
+    except HTTPException:
+        return no("banned")
     expected = max(int(lobby["games_played"] or 0), int(lobby["highest"] or 0)) + 1
     room = (report.photon_room_id or "")[:64]
     tail = _ffa_room_game_no(room)
@@ -76351,14 +76352,15 @@ async def _qapply_verdict(db, row, body) -> dict:
     claim = await _qapply_claim_of(db, row["group_id"], _qapply_game_of(report, expected))
     if claim is not None:
         return no("game_credited" if claim == "credit" else "recorded")
+    if _ffa_lobby_ended_by_ban(lobby):
+        return no("ban_ended")
     if lobby["readmit_v1"]:
         return no("readmit")
     if lobby["status"] == "active":
         return no("lobby_open")
     if f"lobby_{lobby['status']}" not in _QAPPLY_SERVABLE_REASONS:
         return no("lobby_state")
-    # The verifications Credit makes, in their read form: the signature, the
-    # service accounts, then _ffa_report_verify on the live accounts.
+    # Credit's verifications, read form: the signature, the service accounts, _ffa_report_verify.
     canonical = _verify_ffa_hmac(report)
     if not canonical:
         return no("unsigned")
@@ -76377,10 +76379,8 @@ async def _qapply_verdict(db, row, body) -> dict:
                               locked=False)
     if not gate["clock_ok"]:
         return no("clock")
-    # Credit pays only a report that names its game (see _qapply_credit). A
-    # credited sibling of this lobby under another number is named to the
-    # admin in place of the reason, since the two may be one game.
-    credited = (await db.execute(text(_QAPPLY_SQL_CLAIMS_CREDITED), {
+    # Credit pays only a named game (_qapply_credit); a credited sibling is named in place of the reason.
+    credited =(await db.execute(text(_QAPPLY_SQL_CLAIMS_CREDITED), {
         "lid": str(row["group_id"])})).scalars().all()
 
     def blocked(reason: str) -> dict:
@@ -76457,14 +76457,17 @@ async def _qapply_held(db, qid_uuid):
 
 
 async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
-    """Credit's work, under the replay variable (kind "credit"), so the seat
-    rules it shares with the body refuse without a capture. Locks in the
-    order of _qapply_gate's comment; writes deltas only (#326); commits
-    nothing (the route commits)."""
+    """Credit's work, under the replay variable (kind "credit"), so the seat rules it shares with
+    the body refuse without a capture. Locks in THE LOCK ORDER above; writes deltas only (#326);
+    commits nothing (the route commits)."""
     qid = str(row["id"])
     canonical = _verify_ffa_hmac(report)
     if not canonical:
         raise _QapplyRefused(409, _QAPPLY_TEXTS["unsigned"], {})
+    # STACK-SEAM-1 (R1): the report route's own ban read, the body's call: the reporter's and every
+    # listed player's identity key, shared, in one ordered pass, before the lobby lock and the first
+    # write. An active ban refuses 409 (the "banned" sentence) and nothing is written.
+    await _ban_lock_and_gate(db, [p.steam_id for p in report.players], None, actor=report.reported_by_steam_id)
     try:
         lobby_uuid = UUID(report.lobby_id)
     except (ValueError, TypeError):
@@ -76474,10 +76477,8 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
     lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL), {"lid": lobby_uuid})).mappings().first()
     if lobby is None:
         raise _QapplyRefused(409, _QAPPLY_TEXTS["no_lobby"], {})
-    # The game's state first below the lobby lock (F1): a game an Accept
-    # recorded, or one a Credit or an Accept claimed, is refused with the
-    # sentence of that state before any check that a later write to the
-    # lobby moves (the game limit, the number, the gate).
+    # The game's state first below the lobby lock (F1): recorded or claimed is refused with its
+    # sentence before any check a later write to the lobby moves (the game limit, the number, the gate).
     room = (report.photon_room_id or "")[:64]
     tail = _ffa_room_game_no(room)
     named = _ffa_named_game_number(room)
@@ -76489,6 +76490,8 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
         claim = await _qapply_claim_of(db, lobby_uuid, named)
         if claim is not None:
             raise _QapplyRefused(409, _QAPPLY_TEXTS["game_paid" if claim == "credit" else "game_applied"], {})
+    if _ffa_lobby_ended_by_ban(lobby):   # R2: a lobby the ban void ended, read under its lock
+        raise _QapplyRefused(409, _QAPPLY_TEXTS["ban_ended"], {})
     if lobby.get("readmit_v1"):
         raise _QapplyRefused(409, _QAPPLY_TEXTS["readmit"], {})
     if lobby["status"] == "active":
@@ -76505,16 +76508,13 @@ async def _qapply_credit(db, row, report, *, actor: str, note: str) -> dict:
         raise _QapplyRefused(ex.status_code, _QAPPLY_TEXTS["service" if ex.status_code == 403 else "retry"], {})
     prows = (await db.execute(text(_QAPPLY_SQL_LIVE_PLAYERS), {"sids": steams})).all()
     id_by_steam = {r.steam_id: r.id for r in prows}
-    # Every verification the body makes of the report, in the body's order,
-    # under the lobby lock taken above (_ffa_report_verify; no copy here).
+    # Every verification the body makes, in its order, under the lobby lock (_ffa_report_verify).
     word = _ffa_report_verify(report, canonical_form=canonical, lobby=lobby, id_by_steam=id_by_steam)
     if word is not None:
         raise _QapplyRefused(409, _QAPPLY_TEXTS[_QAPPLY_CHECK_TEXT[word]], {})
     reported_ids = set(id_by_steam.values())
     _cfg = _ffa_lobby_config(lobby)
-    # The game a Credit pays is the number the report names: a report that
-    # names none cannot be told apart from its siblings, so it is not paid.
-    # Its claim was read under the lobby lock above.
+    # Credit pays the game the report names (its claim read above); one naming none is not paid.
     if named is None:
         raise _QapplyRefused(409, _QAPPLY_TEXTS["no_number"], {})
     for pid in sorted(reported_ids, key=str):
@@ -76802,7 +76802,7 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     except BaseException as ex:
         await _asm_rollback(db)
         if _qapply_out_of_time(ex):
-            raise HTTPException(503, _QAPPLY_TEXTS["busy"])
+            raise _qapply_busy("/api/v1/admin/quarantine/{qid}/accept")
         raise
     if ctx.get("applied") is None:
         # The body answered without recording a game (an echo of a game
@@ -76854,7 +76854,7 @@ async def admin_credit_quarantine(qid: str, req: _AdminQuarantineReq,
     except BaseException as ex:
         await _asm_rollback(db)
         if _qapply_out_of_time(ex):
-            raise HTTPException(503, _QAPPLY_TEXTS["busy"])
+            raise _qapply_busy("/api/v1/admin/quarantine/{qid}/credit")
         raise
     print(f"[QUARANTINE] {qid} credited by {req.admin_steam_id}: {len(paid)} player(s)")
     return {"status": "credited",
@@ -87171,3 +87171,31 @@ async def read_gate_probe(request: Request):
         {"node": "standby" if IS_REPLICA else "primary", "boot_id": read_gate.BOOT_ID,
          "mode": read_gate.mode_word(), "credential_class": cred[0], "key_id": cred[1]},
         headers={"Cache-Control": read_gate.NO_STORE})
+
+# ── STACK-SEAM-1: helpers of the held-report actions where they meet the ban sweep ──
+# Kept at the end of the module so that no line-keyed catalog of main.py moves;
+# each is called at request time, after the module has loaded.
+
+def _ffa_lobby_ended_by_ban(lobby) -> bool:
+    """Whether the ban void ended this FFA lobby row (_ban_void_apply): an
+    unstarted lobby by its invalidation reason (BAN_VOID_REASONS), a played
+    one, which the void completes with no invalidation reason, by its close
+    record's dissolve_path (member_banned_played, written through
+    _FFA_CLOSE_RECORD_SET). It reads the record, not the ban, so it answers
+    the same after the ban has run out or been lifted. Limit: a lobby with no
+    seat rows (one locked before migration 355) gets no close record from
+    _FFA_CLOSE_RECORD_SET, so a played lobby of that kind is not told apart."""
+    if _record_ended_by_ban(lobby):
+        return True
+    try:
+        return lobby["dissolve_path"] in BAN_VOID_REASONS
+    except (KeyError, TypeError):
+        return False
+
+
+def _qapply_busy(route: str) -> HTTPException:
+    """The busy answer of Accept and Credit (QAPPLY-BUSY-LOG-1): one log line
+    that names the route template and no account id, then 503 with the busy
+    sentence. Each route hands its own template."""
+    print(f"[QAPPLY] busy route={route}")
+    return HTTPException(503, _QAPPLY_TEXTS["busy"])

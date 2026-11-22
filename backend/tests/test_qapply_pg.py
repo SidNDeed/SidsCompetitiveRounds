@@ -1446,7 +1446,18 @@ async def _pair_rows(env, lob, one, two, *, release=True):
             await _lock_waiters(env, 2)
             if release:
                 await s.rollback()
-            got = await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            try:
+                got = await asyncio.wait_for(asyncio.gather(t1, t2), main._QAPPLY_DEADLINE_S + 2.0)
+            except TimeoutError:
+                # QAPPLY-PAIRROWS-STOP-1: an answer outlasted this wait. The
+                # case's teardown would wait without a bound on the sessions
+                # the cancelled actions left open, so they are ended here,
+                # within a bound, and the test fails at this line (the
+                # holder's own session first lets the lobby's row go).
+                await s.rollback()
+                ended = await _end_open_sessions(env)
+                pytest.fail("M2 an action outlasted the helper's wait of %.1f s (%d open session(s) ended)"
+                            % (main._QAPPLY_DEADLINE_S + 2.0, ended))
             await _f5_invariant(env)
             return got
         finally:
@@ -1454,6 +1465,18 @@ async def _pair_rows(env, lob, one, two, *, release=True):
             for t in (t1, t2):
                 if t is not None and not t.done():
                     t.cancel()
+
+
+async def _end_open_sessions(env):
+    """QAPPLY-PAIRROWS-STOP-1: the bound on what the case's teardown waits
+    for. Ends every other session of this database that is in a transaction
+    or running a statement (the cancelled actions' sessions, the holder's),
+    never the test connection itself; the read is bounded at 10 s. Returns
+    how many it ended."""
+    return int(await asyncio.wait_for(env.conn.fetchval(
+        "SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity"
+        " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+        "   AND (xact_start IS NOT NULL OR state = 'active')"), 10.0) or 0)
 
 
 async def _m2_state(env, lob, rows):
@@ -3068,3 +3091,268 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
             print("F6 BAD", row)
         assert bad == [], bad
     run_env(monkeypatch, body)
+
+# ── STACK-SEAM-1: where the held-report actions meet the ban sweep ─────────
+# Each check's id leads its test's name (test_seam_rN, the order's requirement
+# N); its mutants and controls are recorded in the lane's notes (MUTANTS.md).
+
+async def seam_ban(env, sid, reason="seam-test"):
+    """An active ban of `sid`, written directly: the row the gates read."""
+    await env.conn.execute(
+        "INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+        " VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour')", sid, reason, ADMIN)
+
+
+async def seam_lift(env, sid):
+    """Every active ban of `sid` lifted, as the unban route marks it."""
+    await env.conn.execute("UPDATE player_bans SET unbanned_at = NOW()"
+                           " WHERE steam_id = $1 AND unbanned_at IS NULL", sid)
+
+
+async def seam_ban_core(env, sid):
+    """The ban route's own core and its commit: the ban and its void."""
+    async with env.sm() as db:
+        await main._apply_ban_core(db, admin_steam_id=ADMIN, target_steam_id=sid,
+                                   reason="seam-test", duration_minutes=60)
+        await db.commit()
+
+
+async def seam_held_row(env, lob, g):
+    return str(await env.conn.fetchval(
+        "SELECT id FROM match_report_quarantine WHERE group_id = $1"
+        "   AND COALESCE(photon_room_id, payload->>'photon_room_id') LIKE $2 AND status = 'pending'",
+        lob.lid, "%%_r%d" % g))
+
+
+def test_seam_r1_credit_reads_every_named_accounts_ban_before_it_writes(monkeypatch):
+    """R1 and R3. Credit makes the report route's own ban read over the
+    reporter and every listed player, a seat it would not pay (a ghost)
+    included: an actively banned one refuses 409 with the "banned" sentence,
+    writes nothing (every table both actions can write, compared whole) and
+    leaves the row pending; the [BAN-GATE] line is written. Accept answers
+    the same sentence for the same ban, from its body's read. The list says
+    the same in its read form. The control in each arm: the ban lifted, the
+    list allows the Credit and the same Credit pays (200)."""
+    async def body(env):
+        for arm in ("reporter", "player", "ghost"):
+            lob = await played(env)
+            await close(env, lob)
+            results, kw = dict(res(lob)), {}
+            if arm == "ghost":
+                results[lob.sids[3]] = (0, 0)
+                kw = C6_ARMS["ghost"](lob)
+            a = await env.report(lob, 2, results, **kw)
+            assert a.status != 200, ("R1 fixture: game 2 held", arm, a)
+            qid = await seam_held_row(env, lob, 2)
+            rep = await env.conn.fetchval(
+                "SELECT payload->>'reported_by_steam_id' FROM match_report_quarantine WHERE id = $1",
+                uuid.UUID(qid))
+            who = {"reporter": rep, "player": next(s for s in lob.sids[:3] if s != rep),
+                   "ghost": lob.sids[3]}[arm]
+            await seam_ban(env, who)
+            # Accept, while its gate is open: the body's read, the same sentence.
+            before = await tables(env)
+            ans = await accept(env, qid)
+            assert (ans.status, ans.body) == (409, T["banned"]), ("R1 accept answers the ban sentence", arm, ans)
+            assert await tables(env) == before, ("R1 accept wrote nothing", arm)
+            # Credit's case: a later game of a participant blocks Accept.
+            await later_for(env, lob)
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["banned"], False), ("R3 the list reads the ban", arm, v)
+            before = await tables(env)
+            n_lines = len(env.lines)
+            ans = await credit(env, qid)
+            assert (ans.status, ans.body) == (409, T["banned"]), ("R1 credit refuses a banned account", arm, ans)
+            assert await tables(env) == before, ("R1 credit wrote nothing", arm)
+            assert await status_of(env, qid) == "pending", ("R1 the row stays pending", arm)
+            assert [x for x in env.lines[n_lines:] if x.startswith("[BAN-GATE] refused")], (
+                "R1 the gate's line", arm, env.lines[n_lines:])
+            # The control: the ban lifted, the list allows it and Credit pays.
+            await seam_lift(env, who)
+            v = (await listing(env))[qid]
+            assert v["can_credit"] is True, ("R3 control: lifted, the list allows the credit", arm, v)
+            ans = await credit(env, qid)
+            assert ans.status == 200, ("R1 control: lifted, the credit pays", arm, ans)
+    run_env(monkeypatch, body)
+
+
+async def _seam_key_waiters(env):
+    """Sessions of this database waiting on an advisory (identity) lock."""
+    return await env.conn.fetchval(
+        "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database"
+        " WHERE d.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted")
+
+
+async def _seam_lobby_free(env, lob):
+    """Whether the lobby's row can be locked at once (NOWAIT) by the test
+    connection; the lock is let go at once."""
+    try:
+        async with env.conn.transaction():
+            await env.conn.fetchval("SELECT 1 FROM ffa_lobbies WHERE id = $1 FOR NO KEY UPDATE NOWAIT", lob.lid)
+        return True
+    except Exception as ex:
+        if type(ex).__name__ == "LockNotAvailableError":
+            return False
+        raise
+
+
+async def _seam_hold_key(env, lob, key, act, qid, *, release):
+    """Hold `key`'s identity lock EXCLUSIVE in a session of its own (the ban
+    core's mode); start the action; go on once the database shows a session
+    waiting on an advisory lock; note whether the lobby's row is free then;
+    release the key at once (release=True) or hold it until the action
+    answers. Returns (answer, elapsed, lobby_free_while_waiting)."""
+    async with env.sm() as s:
+        await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:s AS text)))"), {"s": key})
+        task = asyncio.create_task(_timed(act, env, qid))
+        try:
+            loop = asyncio.get_running_loop()
+            end = loop.time() + 5.0
+            while not await _seam_key_waiters(env):
+                assert loop.time() < end, ("R1 the action waits on the identity key", act.__name__)
+                await asyncio.sleep(0.02)
+            free = await _seam_lobby_free(env, lob)
+            if release:
+                await s.rollback()
+            ans, took = await asyncio.wait_for(task, main._QAPPLY_DEADLINE_S + 4.0)
+            return ans, took, free
+        finally:
+            await s.rollback()
+            if not task.done():
+                task.cancel()
+
+
+def test_seam_r4_an_identity_key_held_past_the_bound_ends_each_action_busy(monkeypatch):
+    """R1's order, R4 and R7's busy line. With a listed player's identity key
+    held EXCLUSIVE in another session (as the ban core holds it), each action
+    waits on that key before it takes the lobby's row (the row stays free to
+    a NOWAIT lock while it waits), and the lock bound, well inside the
+    deadline, ends the wait: 503 with the busy sentence, nothing written (every
+    table compared whole), the row pending, and exactly one [QAPPLY] busy
+    line, naming the route's template. The control: the key released while
+    Credit waits, Credit goes on and pays."""
+    async def body(env):
+        lob, qid = await closed_held(env)
+        await later_for(env, lob)
+        key = lob.sids[1]
+        bound = main._QAPPLY_LOCK_TIMEOUT_MS / 1000.0
+        for act, route in ((credit, "/api/v1/admin/quarantine/{qid}/credit"),
+                           (accept, "/api/v1/admin/quarantine/{qid}/accept")):
+            before = await tables(env)
+            n_lines = len(env.lines)
+            ans, took, free = await _seam_hold_key(env, lob, key, act, qid, release=False)
+            print("SEAM R4", act.__name__, ans.status, "%.3f s" % took, "lobby free", free)
+            assert free, ("R1 the identity keys come before the lobby's row lock", act.__name__)
+            assert (ans.status, ans.body) == (503, T["busy"]), ("R4 busy at the bound", act.__name__, ans)
+            assert bound - 0.2 <= took < bound + 2.0, ("R4 the lock bound ends the wait", act.__name__, took)
+            assert await tables(env) == before, ("R4 nothing written", act.__name__)
+            assert await status_of(env, qid) == "pending"
+            busy = [x for x in env.lines[n_lines:] if x.startswith("[QAPPLY] busy")]
+            assert busy == ["[QAPPLY] busy route=" + route], ("R7 one busy line with the template", busy)
+        ans, took, free = await _seam_hold_key(env, lob, key, credit, qid, release=True)
+        assert free and ans.status == 200, ("R4 control: the key released, Credit pays", ans, free)
+    run_env(monkeypatch, body)
+
+
+def test_seam_r2_both_actions_refuse_a_lobby_the_ban_void_ended(monkeypatch):
+    """R2 and R3, and the proof the comment above BAN_VOID_REASONS names (R6).
+    The ban route's core voids a lobby one member sits in: a played one is
+    completed with its close record member_banned_played and no invalidation
+    reason, an unstarted one canceled with invalidation reason member_banned.
+    The ban is then lifted and a report of the lobby's next game is held. The
+    list, Accept and Credit each answer the "ban_ended" sentence (409), nothing
+    is written and the row stays pending. The control: a lobby closed by no
+    ban is served (Accept applies its held game)."""
+    async def body(env):
+        for arm in ("played", "unstarted"):
+            if arm == "played":
+                lob, g = await played(env), 2
+            else:
+                lob, g = await env.lobby(4, gated=False), 1
+                await env.conn.execute("UPDATE ffa_lobbies SET start_granted_at = NULL WHERE id = $1", lob.lid)
+            await seam_ban_core(env, lob.sids[3])
+            row = dict(await env.conn.fetchrow(
+                "SELECT status, invalidation_reason, dissolve_path FROM ffa_lobbies WHERE id = $1", lob.lid))
+            if arm == "played":
+                assert (row["status"], row["invalidation_reason"], row["dissolve_path"]) == (
+                    "completed", None, "member_banned_played"), ("R2 fixture: the void completed it", row)
+            else:
+                assert (row["status"], row["invalidation_reason"]) == ("canceled", "member_banned"), (
+                    "R2 fixture: the void canceled it", row)
+            await seam_lift(env, lob.sids[3])
+            qid = await held(env, lob, g)
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["ban_ended"], False), ("R3 the list names the ban's end", arm, v)
+            before = await tables(env)
+            for act in (accept, credit):
+                ans = await act(env, qid)
+                assert (ans.status, ans.body) == (409, T["ban_ended"]), ("R2 refused", arm, act.__name__, ans)
+            assert await tables(env) == before, ("R2 nothing written", arm)
+            assert await status_of(env, qid) == "pending", ("R2 the row stays pending", arm)
+        lob, qid = await closed_held(env)
+        ans = await accept(env, qid)
+        assert ans.status == 200, ("R2 control: a lobby closed by no ban is served", ans)
+    run_env(monkeypatch, body)
+
+
+def _seam_route_fn(name):
+    (fn,) = [n for n in ast.walk(_tree()) if isinstance(n, ast.AsyncFunctionDef) and n.name == name]
+    return fn
+
+
+def test_seam_r6_the_ban_void_comment_names_its_proof_and_says_what_the_void_writes():
+    """R6: the comment above BAN_VOID_REASONS names the held-report actions'
+    read and its test, which exists in this file; what it says of a played
+    FFA lobby is what the void writes (its completing statement sets the
+    close record member_banned_played and no invalidation reason)."""
+    import inspect
+    src = open(MAIN_SRC, encoding="utf-8").read()
+    i = src.index("BAN_VOID_REASONS = frozenset(")
+    block = src[src.rindex("# Bans part 2a (F1 b)", 0, i):i]
+    assert "_ffa_lobby_ended_by_ban" in block and "test_seam_r2" in block, block
+    assert "test_seam_r2_both_actions_refuse_a_lobby_the_ban_void_ended" in globals()
+    void = inspect.getsource(main._ban_void_apply)
+    completing = void[void.index("status='completed'"):]
+    completing = completing[:completing.index("RETURNING")]
+    assert "invalidation_reason" not in completing, completing
+    assert '"rec_path": "member_banned_played"' in void
+    assert "member_banned_played" in main.BAN_VOID_REASONS
+    for name in ("submit_ffa_match", "_qapply_credit", "_qapply_verdict"):
+        assert "_ffa_lobby_ended_by_ban" in {n.func.id for n in ast.walk(_seam_route_fn(name))
+                                             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}, name
+
+
+def test_seam_r7_the_bounds_comments_and_the_busy_line_say_what_the_code_does():
+    """R7 (QAPPLY-COMMENT-FIRST-STATEMENT-1, QAPPLY-BUSY-LOG-1). In both
+    routes the service check runs before the unit, the unit's first statement
+    is _qapply_bound and its second the admin check, and that check reads the
+    roster, then the ban; the two comments say so and no longer call the
+    bounds the transaction's first statement or the admin read its second.
+    Each route's busy answer is _qapply_busy with the route's own template."""
+    import inspect
+    src = open(MAIN_SRC, encoding="utf-8").read()
+    i = src.index("_QAPPLY_LOCK_TIMEOUT_MS = 2000")
+    comment = src[src.rindex("# The bounds of Accept's and Credit's one transaction", 0, i):i]
+    assert "transaction's first statement" not in comment, comment
+    assert "unit's first statement (_qapply_bound)" in comment and "_qapply_service_ready" in comment, comment
+    doc = main._qapply_admin.__doc__
+    assert "second statement" not in doc and "the roster, then a roster member's ban" in doc, doc
+    calls = [n.func.id for n in sorted((n for n in ast.walk(_seam_route_fn("_is_admin"))
+                                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)),
+                                       key=lambda n: (n.lineno, n.col_offset))]
+    assert calls[:2] == ["_is_admin_roster", "_is_banned"], calls
+    for name, kind in (("admin_accept_quarantine", "accept"), ("admin_credit_quarantine", "credit")):
+        fn = _seam_route_fn(name)
+        (tr,) = [n for n in fn.body if isinstance(n, ast.Try) and any(isinstance(s, ast.AsyncWith) for s in n.body)]
+        assert ast.unparse(tr.body[0]) == "await _qapply_service_ready(db)", name
+        unit = tr.body[1]
+        assert isinstance(unit, ast.AsyncWith) and "_qapply_unit(%r)" % kind in ast.unparse(unit.items[1].context_expr), name
+        assert ast.unparse(unit.body[0]) == "await _qapply_bound(db)", name
+        assert ast.unparse(unit.body[1]).startswith("await _qapply_admin(db, req"), name
+        (path,) = [r.path for r in main.app.routes if getattr(r, "endpoint", None) is getattr(main, name)]
+        busy = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_qapply_busy"]
+        assert [b.args[0].value for b in busy] == [path], (name, path)
+    assert "[QAPPLY] busy route={route}" in inspect.getsource(main._qapply_busy)
