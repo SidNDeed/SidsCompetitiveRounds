@@ -22,7 +22,17 @@ module SKIPS with that reason. When it is set, REVIEW_EQUIV_TEST_PG_DSN must
 name a throwaway PostgreSQL database for the sitting half, or those cases
 FAIL (a skipped live case reports success for coverage that did not run).
 
-What is asserted, for every rule of the revision:
+SCOPE. This file covers the revision's GAME and SITTING rules only: the
+rules the old worker had, which a revision carries unchanged. Their map to
+the old kinds, their posting and their mutations are asserted here. A
+revision may also hold card, identity and combat rules; this file does not
+judge them, and their holders are elsewhere: the revision's own private
+self-tests (every case's complete firing set, run by every build, validate
+and load) and the private build preflight and mutants in the private store,
+for those rules' firing and posting; test_review_calibrate.py, for the
+counting tool that evaluates them over recorded evidence.
+
+What is asserted, for every game and sitting rule of the revision:
   * games: the same rules fire on the same games with the same stored
     details (exact JSON equality, after each side's own bounding) and the same
     rendered text as the bound oracle;
@@ -31,9 +41,11 @@ What is asserted, for every rule of the revision:
   * posting: a rule is armed exactly when its old kind was, as the old
     migration seeded its per-kind posting switch (the old setting default
     otherwise);
-  * every rule has at least one mutation, and every mutation changes the
+  * every game and sitting rule has at least one mutation, and every mutation changes the
     finding IDENTITY set exactly as its frozen `expect` states, only on its
-    own rule, and every rule keeps its scope and posting. A mutation's
+    own rule, and every rule of the revision, of any scope, keeps its scope
+    and posting under it (the mutations themselves touch game and sitting
+    rules only). A mutation's
     frozen metadata names ONLY its expected gains and losses: every retained
     identity keeps exactly the same stored details and line, with no key
     exempt. A moved-VALUE mutation flips only that rule's labelled boundary
