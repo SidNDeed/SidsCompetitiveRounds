@@ -41,13 +41,21 @@ def run(coro):
 
 # ── main's process caches: every test puts back what it changed ──────────
 
-# Every value of the main module that a test here assigns, directly or through
-# a helper such as _warm_podium, or that main itself assigns when a test here
-# faults a refresh. They are process-wide caches, so a value left behind is
-# read by whatever test runs next in the same process: a faulted 1v2 podium
-# refresh leaves `refresh_failed` True, and a later test that drives the 1v2
-# report sink is then refused with 503 podium_unavailable.
-# test_every_main_value_this_file_writes_is_restored keeps this list whole.
+# main's caches are process-wide, so a value a test leaves behind is read by
+# whatever test runs next in the same process: a faulted 1v2 podium refresh
+# left `refresh_failed` True, and a later test that drove the 1v2 report sink
+# was refused with 503 podium_unavailable.
+#
+# _MAIN_STATE lists the values the fixture below saves before each test and
+# puts back after it. Two guards hold the list:
+# - at run time, after every test of this file, the fixture compares every
+#   attribute of main whose name holds `_cache` with the value it had before
+#   the test, by value, whatever made the change; an unlisted one that
+#   changed is reported as an error at that test's teardown, naming it. It
+#   sees no name without `_cache`, and no change a monkeypatch made (that is
+#   undone after this fixture's check; no test here monkeypatches a cache);
+# - test_every_main_value_this_file_writes_is_restored reads this file's
+#   source for the write forms its docstring names, `_cache` or not.
 _MAIN_STATE = (
     "_podium_cache",
     "_ovt_podium_cache",
@@ -58,24 +66,96 @@ _MAIN_STATE = (
 )
 
 
+# Compared by a fingerprint of their fields, because a deep copy of them
+# fails (each holds a lock). A new name here means a new kind of cache value
+# whose comparison should be looked at; see test_every_main_cache_is_compared.
+_COMPARED_BY_FIELDS = {"_pc_face_cache", "_pc_motion_cache"}
+
+
+def _main_cache_names():
+    return {name for name in vars(main) if "_cache" in name}
+
+
+def _fingerprint(value, depth=0):
+    """A value that compares equal exactly when `value` is unchanged.
+
+    A deep copy when one can be made and compares equal to the value. Else,
+    for a dict or an object with fields, the same taken key by key (with the
+    container's identity), three levels deep. Else the value's identity --
+    for a lock or a future, which is all that can be compared of them."""
+    try:
+        snap = copy.deepcopy(value)
+        if snap == value:
+            return ("value", snap)
+    except Exception:
+        pass
+    if depth < 3:
+        if isinstance(value, dict):
+            return ("dict", id(value),
+                    {k: _fingerprint(v, depth + 1) for k, v in value.items()})
+        fields = getattr(value, "__dict__", None)
+        if isinstance(fields, dict):
+            return ("object", type(value), id(value),
+                    _fingerprint(fields, depth + 1))
+    return ("identity", id(value))
+
+
 @pytest.fixture(autouse=True)
 def _main_state_restored():
-    """Save each value whole before the test and put it back after it. A
-    dict is restored in place, so the object main's functions name stays the
-    one they read; any other value is rebound."""
+    """Save each listed value whole before the test and put it back after it.
+    A dict is restored in place, so the object main's functions name stays
+    the one they read; any other value is rebound. Then every `_cache`
+    attribute of main must equal what it was before the test."""
     objects = {name: getattr(main, name) for name in _MAIN_STATE}
     saved = {name: copy.deepcopy(value) for name, value in objects.items()}
+    names = _main_cache_names()
+    before = {name: _fingerprint(getattr(main, name)) for name in names}
     try:
         yield
     finally:
         for name in _MAIN_STATE:
-            obj, before = objects[name], saved[name]
+            obj, value = objects[name], saved[name]
             if isinstance(obj, dict):
                 obj.clear()
-                obj.update(before)
+                obj.update(value)
                 setattr(main, name, obj)
             else:
-                setattr(main, name, before)
+                setattr(main, name, value)
+    changed = sorted(name for name in names
+                     if not hasattr(main, name)
+                     or _fingerprint(getattr(main, name)) != before[name])
+    added = sorted(_main_cache_names() - names)
+    if changed or added:
+        pytest.fail("main caches this test left changed and _MAIN_STATE does "
+                    "not restore: %r; added: %r" % (changed, added),
+                    pytrace=False)
+
+
+def test_every_main_cache_is_compared():
+    """The run-time guard compares nothing it can only see by identity, and
+    the values it compares field by field are the named ones. Negative
+    control: a change made through an alias, to a plain dict and to an
+    object holding a lock, moves the fingerprint."""
+    kinds = {name: _fingerprint(getattr(main, name))[0]
+             for name in _main_cache_names()}
+    assert not {n for n, k in kinds.items() if k == "identity"}, kinds
+    assert {n for n, k in kinds.items() if k == "object"} <= _COMPARED_BY_FIELDS, kinds
+
+    import threading
+
+    class _Held:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.sizes = {}
+
+    plain, held = {"k": [1]}, _Held()
+    fp_plain, fp_held = _fingerprint(plain), _fingerprint(held)
+    alias_plain, alias_held = plain["k"], held.sizes
+    alias_plain.append(2)
+    alias_held["x"] = 1
+    assert _fingerprint(plain) != fp_plain
+    assert _fingerprint(held) != fp_held
+    assert fp_held[0] == "object"
 
 
 _MUTATING_METHODS = {"clear", "update", "pop", "popitem", "setdefault",
@@ -121,18 +201,27 @@ def _main_values_written(source):
 
 
 def test_every_main_value_this_file_writes_is_restored():
-    """A test added here that writes another main value must add it to
-    _MAIN_STATE, or this fails. Negative control: the scanner finds a write
-    in a sample that has one, and none in a sample that only reads."""
+    """Reads this file's source, and only these forms, where the target is
+    `main.X` written directly, optionally subscripted: an assignment
+    (plain or chained, augmented or annotated), a `del`, a call of one
+    of _MUTATING_METHODS on it, and the target passed POSITIONALLY to a
+    function defined at this file's top level. Every X so written must be in
+    _MAIN_STATE. It does not see a write through an alias, a tuple target, a
+    keyword argument, setattr with a name, or a write main's own code makes;
+    the run-time guard in _main_state_restored covers those for `_cache`
+    names. Negative control: the scanner finds each form in a sample, and
+    nothing in a read."""
     assert _main_values_written(
         "def h(c):\n    c['k'] = 1\n"
         "def t():\n    main._a = 1\n    main._b['k'] = 2\n"
         "    main._c.clear()\n    h(main._d)\n    x = main._e['k']\n"
-    ) == {"_a", "_b", "_c", "_d"}
+        "    del main._f['k']\n    main._g += 1\n"
+    ) == {"_a", "_b", "_c", "_d", "_f", "_g"}
     written = _main_values_written(Path(__file__).read_text(encoding="utf-8"))
-    assert written == set(_MAIN_STATE), (
-        "main values written here but not restored, or listed but no longer "
-        "written: %r" % (written ^ set(_MAIN_STATE)))
+    assert written <= set(_MAIN_STATE), (
+        "main values written here but not restored: %r"
+        % (written - set(_MAIN_STATE)))
+    assert "_ovt_podium_cache" in written   # the scan reads this file at all
 
 
 # ── the emulated session ─────────────────────────────────────────────────
