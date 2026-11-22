@@ -16999,6 +16999,15 @@ class _AltNotRecorded(Exception):
         self.word = word
 
 
+class _AltOutcomeUnknown(Exception):
+    """The recording's commit failed or its answer never came: the commit
+    may stand on the server. `word` is the failure's class name."""
+
+    def __init__(self, word: str):
+        super().__init__(word)
+        self.word = word
+
+
 def _alt_print(msg: str) -> None:
     """print() that cannot raise (the form of _janitor_print): the recording's
     lines are printed on paths that must return the sign-in's answer."""
@@ -17137,28 +17146,41 @@ async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
         " ELSE f.over_limit_day END"),
         {"sid": steam_id, "cs": facts.copy_state, "vac": facts.vac_banned,
          "pub": facts.publisher_banned, "over": over})
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as ex:
+        # The COMMIT may have reached the server and stood while its answer
+        # was lost: the outcome is not known (finding R2-2).
+        raise _AltOutcomeUnknown(type(ex).__name__) from ex
 
 
 async def _alt_abandon(db: AsyncSession, ex: Exception) -> None:
     """End a refused or failed recording: roll back (the rollback guarded),
-    record nothing, say one line through _alt_print. Lets no Exception out.
-    The line carries a word only: `deleted`, `refused` (the ban read), or
-    the exception's class name; a closed notice says the hourly line."""
+    say one line through _alt_print. Lets no Exception out. The line carries
+    a word only: `deleted`, `refused` (the ban read), or the exception's
+    class name. `not recorded` is said only where the rollback was confirmed
+    and no commit was sent; after a failed or unanswered commit, or a
+    rollback that raised, the line says `outcome unknown`. A closed notice
+    whose rollback was confirmed says the hourly line."""
+    rolled = False
     try:
         await db.rollback()
+        rolled = True
     except Exception:
         pass
     try:
-        if isinstance(ex, _AltNotRecorded) and ex.word == "notice":
-            _alt_notice_line()
-            return
-        if isinstance(ex, _AltNotRecorded):
+        if isinstance(ex, (_AltNotRecorded, _AltOutcomeUnknown)):
             word = ex.word
         elif isinstance(ex, HTTPException) and ex.status_code == 409:
             word = "refused"
         else:
             word = type(ex).__name__
+        if isinstance(ex, _AltOutcomeUnknown) or not rolled:
+            _alt_print("[ALT-SIGNALS] outcome unknown: %s" % word)
+            return
+        if isinstance(ex, _AltNotRecorded) and ex.word == "notice":
+            _alt_notice_line()
+            return
         _alt_print("[ALT-SIGNALS] not recorded: %s" % word)
     except Exception:
         pass
@@ -17215,19 +17237,20 @@ async def _alt_limits(db: AsyncSession, lock_ms: int, statement_ms: int) -> None
     await db.execute(text(_ALT_LIMITS_SQL), {"lt": "%dms" % lock_ms, "st": "%dms" % statement_ms})
 
 
-async def _alt_retention_batch(db: AsyncSession, table: str) -> int:
+async def _alt_retention_batch(db: AsyncSession, table: str, at=None) -> int:
     """One batch of the pass on one table ('markers', 'shares' or 'facts'),
     as its own transaction: the pass's limits, then up to PASS_BATCH due rows
     deleted, oldest first, rows another transaction holds skipped; commit.
+    `at` is the instant a row's age is counted to (None: the server's now()).
     Returns the number of rows deleted."""
     await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
-    bind = {"days": _alt_signals.DUE_DAYS, "batch": _alt_signals.PASS_BATCH}
+    bind = {"days": _alt_signals.DUE_DAYS, "batch": _alt_signals.PASS_BATCH, "at": at}
     if table == "markers":
         res = await db.execute(text(
             "DELETE FROM conn_markers"
             " WHERE (steam_id, day, key_id, addr_mark) IN ("
             " SELECT x.steam_id, x.day, x.key_id, x.addr_mark FROM conn_markers x"
-            " WHERE x.last_at < now() - make_interval(days => CAST(:days AS integer))"
+            " WHERE x.last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
             " ORDER BY x.last_at LIMIT CAST(:batch AS integer)"
             " FOR UPDATE SKIP LOCKED)"
             " RETURNING 1"), bind)
@@ -17236,7 +17259,7 @@ async def _alt_retention_batch(db: AsyncSession, table: str) -> int:
             "DELETE FROM steam_family_shares"
             " WHERE (steam_id, key_id, owner_mark) IN ("
             " SELECT x.steam_id, x.key_id, x.owner_mark FROM steam_family_shares x"
-            " WHERE x.last_seen_at < now() - make_interval(days => CAST(:days AS integer))"
+            " WHERE x.last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
             " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer)"
             " FOR UPDATE SKIP LOCKED)"
             " RETURNING 1"), bind)
@@ -17245,7 +17268,7 @@ async def _alt_retention_batch(db: AsyncSession, table: str) -> int:
             "DELETE FROM steam_signin_facts"
             " WHERE steam_id IN ("
             " SELECT x.steam_id FROM steam_signin_facts x"
-            " WHERE x.last_seen_at < now() - make_interval(days => CAST(:days AS integer))"
+            " WHERE x.last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
             " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer)"
             " FOR UPDATE SKIP LOCKED)"
             " RETURNING 1"), bind)
@@ -17256,24 +17279,29 @@ async def _alt_retention_batch(db: AsyncSession, table: str) -> int:
     return n
 
 
-async def _alt_retention_left(db: AsyncSession) -> dict:
-    """The due rows left in each table, read under the pass's limits."""
+async def _alt_retention_left(db: AsyncSession, at=None) -> dict:
+    """The due rows left in each table at `at` (None: now()), read in its own
+    transaction under the pass's limits."""
     await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
     row = (await db.execute(text(
         "SELECT (SELECT count(*) FROM conn_markers"
-        " WHERE last_at < now() - make_interval(days => CAST(:days AS integer))),"
+        " WHERE last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))),"
         " (SELECT count(*) FROM steam_family_shares"
-        " WHERE last_seen_at < now() - make_interval(days => CAST(:days AS integer))),"
+        " WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))),"
         " (SELECT count(*) FROM steam_signin_facts"
-        " WHERE last_seen_at < now() - make_interval(days => CAST(:days AS integer)))"),
-        {"days": _alt_signals.DUE_DAYS})).one()
+        " WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer)))"),
+        {"days": _alt_signals.DUE_DAYS, "at": at})).one()
     return {"markers": int(row[0]), "shares": int(row[1]), "facts": int(row[2])}
 
 
-async def _alt_retention_pass(session_factory=None) -> dict:
+async def _alt_retention_pass(session_factory=None, at=None) -> dict:
     """One pass (design 6.3). Each batch runs in its own session from
-    `session_factory` (the app's sessions by default). A batch that fails
-    ends the pass with its exception. Says what it deleted on every pass,
+    `session_factory` (the app's sessions by default); `at` is the instant
+    ages are counted to (None: the server's now(), as in production). A
+    batch that fails ends the batches; the pass still says what it deleted
+    per table up to the failure, then counts the due rows left in a session
+    and under limits of their own (or says the count could not be had), and
+    then raises the batch's exception. Says what it deleted on every pass,
     and the due rows left when any are."""
     if session_factory is None:
         from database import async_session as session_factory
@@ -17281,40 +17309,63 @@ async def _alt_retention_pass(session_factory=None) -> dict:
     deleted = {"markers": 0, "shares": 0, "facts": 0}
     todo = ["markers", "shares", "facts"]
     batches = 0
-    while todo:
-        for table in tuple(todo):
-            async with session_factory() as db:
-                n = await _alt_retention_batch(db, table)
-            batches += 1
-            deleted[table] += n
-            if n < _alt_signals.PASS_BATCH:
-                todo.remove(table)
-            if time.monotonic() - t0 >= _alt_signals.PASS_BUDGET_S:
-                todo.clear()
-                break
-    async with session_factory() as db:
-        left = await _alt_retention_left(db)
-    _alt_print("[ALT-RETENTION] pass: deleted markers %d, shares %d, facts %d in %d batch(es)"
-               % (deleted["markers"], deleted["shares"], deleted["facts"], batches))
-    if any(left.values()):
+    failed = None
+    try:
+        while todo:
+            for table in tuple(todo):
+                async with session_factory() as db:
+                    n = await _alt_retention_batch(db, table, at)
+                batches += 1
+                deleted[table] += n
+                if n < _alt_signals.PASS_BATCH:
+                    todo.remove(table)
+                if time.monotonic() - t0 >= _alt_signals.PASS_BUDGET_S:
+                    todo.clear()
+                    break
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        failed = ex
+    left, left_failed = None, None
+    try:
+        async with session_factory() as db:
+            left = await _alt_retention_left(db, at)
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        left_failed = type(ex).__name__
+    head = ("[ALT-RETENTION] pass ended by a failed batch (%s): deleted" % type(failed).__name__
+            if failed is not None else "[ALT-RETENTION] pass: deleted")
+    _alt_print("%s markers %d, shares %d, facts %d in %d batch(es)"
+               % (head, deleted["markers"], deleted["shares"], deleted["facts"], batches))
+    if left is None:
+        _alt_print("[ALT-RETENTION] due rows left: not counted (%s)" % left_failed)
+    elif any(left.values()):
         _alt_print("[ALT-RETENTION] due rows left: markers %d, shares %d, facts %d"
                    % (left["markers"], left["shares"], left["facts"]))
+    if failed is not None:
+        raise failed
     return {"deleted": deleted, "left": left, "batches": batches,
             "seconds": round(time.monotonic() - t0, 3)}
 
 
-async def alt_signals_retention_loop() -> None:
+async def alt_signals_retention_loop(clock=None) -> None:
     """The pass's own loop, started from lifespan on the PRIMARY only (every
     pass DELETEs). One `[ALT-RETENTION] pass armed` line at boot; the first
-    pass PASS_FIRST_DELAY_S after start, then one every PASS_PERIOD_S. A pass
-    that fails is caught here, counted and said (`pass FAILED (<n> in a
-    row)`), and the next runs on schedule; `pass recovered` says when one gets
-    through. _supervised is the backstop for what escapes the loop."""
+    pass PASS_FIRST_DELAY_S after start; each later pass starts PASS_PERIOD_S
+    after the previous pass STARTED, on `clock` (time.monotonic unless a test
+    gives one). A pass that ran past the period is followed at once, and the
+    loop says so (`pass overran`). A pass that fails is caught here, counted
+    and said (`pass FAILED (<n> in a row)`), and the next runs on schedule;
+    `pass recovered` says when one gets through. _supervised is the backstop
+    for what escapes the loop."""
+    clock = clock or time.monotonic
     _alt_print("[ALT-RETENTION] pass armed: every %ds, rows past %d days, first pass in %ds"
                % (_alt_signals.PASS_PERIOD_S, _alt_signals.DUE_DAYS, _alt_signals.PASS_FIRST_DELAY_S))
     await asyncio.sleep(_alt_signals.PASS_FIRST_DELAY_S)
     failures = 0
     while True:
+        started = clock()
         try:
             await _alt_retention_pass()
             if failures:
@@ -17325,7 +17376,11 @@ async def alt_signals_retention_loop() -> None:
         except Exception as ex:
             failures += 1
             _alt_print("[ALT-RETENTION] pass FAILED (%d in a row): %s" % (failures, type(ex).__name__))
-        await asyncio.sleep(_alt_signals.PASS_PERIOD_S)
+        wait = started + _alt_signals.PASS_PERIOD_S - clock()
+        if wait <= 0:
+            _alt_print("[ALT-RETENTION] pass overran its period by %ds: the next starts now" % int(-wait))
+            wait = 0
+        await asyncio.sleep(wait)
 
 
 # -- Alternate-account signals: the read (CHEAT-ALT-1, design 8 and 9) --------

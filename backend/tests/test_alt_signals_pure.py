@@ -150,25 +150,31 @@ def test_every_lan_range_is_refused_by_the_lan_rule_itself():
 
 def test_observe_marks_the_masked_address_and_block():
     k = _key()
+    # The expected networks are derived from the fixtures by the standard
+    # library (finding R2-13): no network literal of its own.
+    def masked(host, bits):
+        return ipaddress.ip_network("%s/%d" % (host, bits), strict=False)
     o4 = A.observe(V4, k, _classify("none"), LAN)
-    assert o4 == (4, A.net_mark(k.secret, _net("1.1.1.1/32")), A.net_mark(k.secret, _net("1.1.1.0/24")), "none")
+    assert o4 == (4, A.net_mark(k.secret, masked(V4, 32)), A.net_mark(k.secret, masked(V4, 24)), "none")
     o6 = A.observe(V6, k, _classify("hosting"), LAN)
-    assert o6 == (6, A.net_mark(k.secret, _net("2606:4700:4700::/64")),
-                  A.net_mark(k.secret, _net("2606:4700:4700::/48")), "hosting")
+    assert o6 == (6, A.net_mark(k.secret, masked(V6, 64)), A.net_mark(k.secret, masked(V6, 48)), "hosting")
 
 
 def test_one_slash_64_is_one_address_mark_and_one_slash_48_one_block_mark():
     k = _key()
     c = _classify("none")
     same64 = A.observe("2606:4700:4700::1001", k, c, LAN)
-    other64 = A.observe("2606:4700:4700:1::1", k, c, LAN)
+    # No published resolver address lies in V6's /48 outside its /64, so the
+    # neighbour is derived from V6 by the standard library: the next /64.
+    other64 = A.observe(str(ipaddress.ip_address(V6) + (1 << 64)), k, c, LAN)
     base = A.observe(V6, k, c, LAN)
     assert same64.addr_mark == base.addr_mark
     assert other64.addr_mark != base.addr_mark and other64.block_mark == base.block_mark
-    # IPv4: one /24 is one block; a neighbour in the same /16 is another.
+    # IPv4: one /24 is one block; an address of another /24 (a second
+    # published resolver address) is another block.
     assert A.observe("1.1.1.2", k, c, LAN).block_mark == base4(k).block_mark
     assert A.observe("1.1.1.2", k, c, LAN).addr_mark != base4(k).addr_mark
-    assert A.observe("1.1.2.1", k, c, LAN).block_mark != base4(k).block_mark
+    assert A.observe("1.0.0.1", k, c, LAN).block_mark != base4(k).block_mark
 
 
 def base4(k):
@@ -331,3 +337,91 @@ def test_the_spelling_check_finds_a_plain_import_and_a_shared_name():
     others = {"x.py": _spelled_names("import re\nimport hashlib\n\ndef install(a):\n    return re.sub('a', '', a)\n")}
     mine = _module_level_names("import re\nimport hashlib as _h\nLIST = 1\n\ndef install(raw):\n    return raw\n")
     assert _clashes(mine, others) == {"install": ["x.py"], "re": ["x.py"]}
+
+
+# -- every address literal of the lane (finding R2-13) ---------------------------
+
+BACKEND = Path(__file__).resolve().parents[1]
+# Published resolver service addresses the lane's tests use (Cloudflare,
+# Google Public DNS, Quad9); every other literal must lie in a
+# special-purpose range (not global) or be multicast.
+RESOLVERS = frozenset({"1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
+                       "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112",
+                       "2606:4700:4700::1111", "2606:4700:4700::1001"})
+_V4_TOKEN = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(/\d{1,2})?(?![\w.])")
+
+
+def _lane_files():
+    files = sorted((BACKEND / "tests").glob("test_alt_signals_*.py"))
+    files += [BACKEND / "api" / "alt_signals.py", BACKEND / "sql" / "427_alt_signals.sql",
+              BACKEND / "sql" / "rollback_427_alt_signals.sql",
+              BACKEND / "tests" / "fixtures" / "alt_signals_disclosure.json"]
+    return files
+
+
+def _literal_class(tok):
+    """The admitted class of one address or network literal, or None."""
+    host = tok.strip().split("%")[0]
+    net = ipaddress.ip_network(host, strict=False)
+    addr = net.network_address
+    if net.version == 6 and addr.ipv4_mapped is not None and net.prefixlen == 128:
+        net = ipaddress.ip_network(addr.ipv4_mapped)
+        addr = net.network_address
+    if net.prefixlen == net.max_prefixlen and str(addr) in RESOLVERS:
+        return "published resolver"
+    if net.is_multicast:
+        return "multicast"
+    if not addr.is_global and not net.broadcast_address.is_global:
+        return "special-purpose"
+    return None
+
+
+def _literals(name, src):
+    """Every address or network literal in `src`: each IPv4 token of every
+    line (comments included), and each Python string constant that parses
+    whole as an IPv6 address or network. A token that looks like an IPv4
+    address and does not parse is refused by name (an unknown form)."""
+    out = []
+    for i, line in enumerate(src.splitlines(), 1):
+        for m in _V4_TOKEN.finditer(line):
+            tok = m.group(1) + (m.group(2) or "")
+            try:
+                cls = _literal_class(tok)
+            except ValueError:
+                cls = "UNKNOWN FORM"
+            out.append(("%s:%d" % (name, i), tok, cls))
+    if name.endswith(".py"):
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and ":" in node.value:
+                s = node.value.strip()
+                if not re.fullmatch(r"[0-9A-Fa-f:.]+(%\w+)?(/\d{1,3})?", s) or s.count(":") < 2:
+                    continue
+                try:
+                    cls = _literal_class(s)
+                except ValueError:
+                    continue
+                if ipaddress.ip_network(s.split("%")[0], strict=False).version == 6:
+                    out.append(("%s:%d" % (name, node.lineno), s, cls))
+    return out
+
+
+def test_every_address_literal_of_the_lane_is_special_purpose_or_a_published_resolver():
+    found = []
+    for f in _lane_files():
+        found += _literals(f.name, f.read_text(encoding="utf-8"))
+    refused = [x for x in found if x[2] in (None, "UNKNOWN FORM")]
+    assert refused == [], refused
+    assert len(found) >= 20, found
+
+
+def test_the_literal_scan_refuses_an_unlisted_public_address_a_public_network_and_an_unknown_form():
+    # The planted literals are built from parts, so this file holds none.
+    v4 = ".".join(("1", "1", "2", "1"))
+    net = ".".join(("1", "1", "1", "0")) + "/24"
+    bad = ".".join(("300", "1", "1", "1"))
+    v6 = ":".join(("2606", "4700", "4700", "1", "", "1"))
+    doc = ".".join(("192", "0", "2", "7"))
+    planted = 'A = "%s"\nB = "%s"\n# %s\nC = "%s"\nD = "%s"\n' % (v4, net, bad, v6, doc)
+    got = {(tok, cls) for _where, tok, cls in _literals("plant.py", planted)}
+    assert got == {(v4, None), (net, None), (bad, "UNKNOWN FORM"), (v6, None),
+                   (doc, "special-purpose")}, got

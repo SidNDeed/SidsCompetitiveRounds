@@ -80,9 +80,24 @@ def _ddl_columns(sql):
     return {name: _COLUMN.findall(body) for name, body in _CREATE.findall(sql)}
 
 
+def _ddl_unknown(sql):
+    """Every line of a CREATE TABLE body of `sql` that is neither a column of
+    a type the reader knows nor a CONSTRAINT line, as "table: line" (M2: a
+    form the reader does not know turns the check red and is named)."""
+    sql = re.sub(r"--[^\n]*", "", sql)
+    out = []
+    for name, body in _CREATE.findall(sql):
+        for line in body.split("\n"):
+            if not line.strip() or line.strip().startswith("CONSTRAINT "):
+                continue
+            if not _COLUMN.match(" " + line.lstrip()):
+                out.append("%s: %s" % (name, line.strip()))
+    return out
+
+
 def _disclosure_problems(sql, fixture, sentence):
     """Everything wrong between 427's DDL, the table and the sentence."""
-    problems = []
+    problems = ["a CREATE TABLE line the reader does not know: %s" % u for u in _ddl_unknown(sql)]
     tables = _ddl_columns(sql)
     if set(tables) != set(TABLES):
         problems.append("the DDL creates %s, not the three tables" % sorted(tables))
@@ -137,6 +152,13 @@ def test_the_disclosure_check_fails_on_each_of_its_classes():
     assert grown != sql
     assert any("conn_markers.port" in p and "does not map" in p
                for p in _disclosure_problems(grown, fixture, sentence))
+    # A column of a type the reader does not know (finding R2-5, M2): named.
+    big = sql.replace("  conn_class  VARCHAR(8)  NOT NULL DEFAULT 'unknown',\n",
+                      "  conn_class  VARCHAR(8)  NOT NULL DEFAULT 'unknown',\n"
+                      "      port        BIGINT      NULL,\n", 1)
+    assert big != sql
+    assert "a CREATE TABLE line the reader does not know: conn_markers: port        BIGINT      NULL," in \
+        _disclosure_problems(big, fixture, sentence)
     # A column called bookkeeping outside the closed list.
     moved = json.loads(json.dumps(fixture))
     moved["categories"]["copy"]["columns"].remove("steam_signin_facts.copy_state")
@@ -406,6 +428,17 @@ def _namers(rel, src):
     docstring) or one of their ORM classes."""
     tree = ast.parse(src)
     docs = _docstrings(tree)
+    # Finding R2-6: a class imported under another name is resolved (its
+    # alias is matched as the class), and an import the census cannot
+    # resolve (a star import of the models module) is refused by name.
+    aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] == "models" \
+                and any(a.name == "*" for a in node.names):
+            raise AssertionError("%s:%d: a star import of models the reader census cannot resolve"
+                                 % (rel, node.lineno))
+        if isinstance(node, ast.alias) and node.name.split(".")[-1] in _ORM_CLASSES and node.asname:
+            aliases.add(node.asname)
     found = set()
     for top in tree.body:
         if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -418,8 +451,10 @@ def _namers(rel, src):
         for node in ast.walk(top):
             hit = (isinstance(node, ast.Constant) and isinstance(node.value, str)
                    and id(node) not in docs and _TABLE_WORD.search(node.value)) \
-                or (isinstance(node, ast.Name) and node.id in _ORM_CLASSES) \
-                or (isinstance(node, ast.Attribute) and node.attr in _ORM_CLASSES)
+                or (isinstance(node, ast.Constant) and node.value in _ORM_CLASSES) \
+                or (isinstance(node, ast.Name) and (node.id in _ORM_CLASSES or node.id in aliases)) \
+                or (isinstance(node, ast.Attribute) and node.attr in _ORM_CLASSES) \
+                or (isinstance(node, ast.alias) and node.name.split(".")[-1] in _ORM_CLASSES)
             if hit:
                 found.update((rel, n) for n in names)
                 break
@@ -447,3 +482,25 @@ def test_the_census_sees_a_reader_anywhere_else():
     assert _namers("main.py", "def other():\n    return select(ConnMarker)\n") == {("main.py", "other")}
     assert _namers("main.py", "def other():\n    '''Reads conn_markers.'''\n    return 1\n") == set()
     assert _namers("main.py", "X = 'DELETE FROM steam_family_shares'\n") == {("main.py", "X")}
+
+
+@pytest.mark.parametrize("src, want", [
+    ("from models import ConnMarker as CM\n\ndef decide():\n    return select(CM)\n",
+     {("main.py", "<line 1>"), ("main.py", "decide")}),
+    ("def decide():\n    from models import ConnMarker as CM\n    return select(CM)\n",
+     {("main.py", "decide")}),
+    ("import models as m\n\ndef decide():\n    return select(m.ConnMarker)\n",
+     {("main.py", "decide")}),
+    ("import api\n\ndef decide():\n    return select(api.models.ConnMarker)\n",
+     {("main.py", "decide")}),
+    ("import models\n\ndef decide():\n    return select(getattr(models, 'ConnMarker'))\n",
+     {("main.py", "decide")}),
+], ids=["from-import as", "from-import as inside", "module import as", "attribute chain", "getattr by name"])
+def test_the_census_resolves_a_model_imported_under_another_name(src, want):
+    """Finding R2-6: one plant per form, each inside a decision function."""
+    assert _namers("main.py", src) == want
+
+
+def test_the_census_refuses_an_import_it_cannot_resolve():
+    with pytest.raises(AssertionError, match="star import of models"):
+        _namers("main.py", "from models import *\n\ndef decide():\n    return select(ConnMarker)\n")

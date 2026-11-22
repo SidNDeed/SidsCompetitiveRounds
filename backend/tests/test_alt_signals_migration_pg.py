@@ -154,23 +154,58 @@ def _ddl_columns(text):
             current.append((m.group(1), m.group(2), m.group(3) == "NULL"))
         elif line.strip().startswith(");"):
             current = None
+        elif line.strip() and not line.strip().startswith(("CONSTRAINT ", "--")):
+            # M2: a line of a CREATE TABLE body the reader does not know.
+            raise AssertionError("a CREATE TABLE line the DDL reader does not know: %r" % line.strip())
     return out
 
 
-def _orm_columns():
+_ORM_TYPES = frozenset({"TEXT", "TIMESTAMPTZ", "VARCHAR(8)", "BOOLEAN", "INTEGER", "DATE", "BYTEA", "SMALLINT"})
+
+
+def _orm_columns(metadata=None):
+    """{table: [(column, type, nullable)]} of models.py's three tables (or of
+    `metadata`'s); a column of a type the reader does not know is refused
+    by name (M2)."""
     import sys
     api = str(Path(__file__).resolve().parents[1] / "api")
     if api not in sys.path:
         sys.path.insert(0, api)
     import models
     from sqlalchemy.dialects import postgresql
+    metadata = metadata if metadata is not None else models.Base.metadata
     names = {"TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ"}
     out = {}
     for t in TABLES:
-        out[t] = [(c.name, names.get(c.type.compile(dialect=postgresql.dialect()),
-                                     c.type.compile(dialect=postgresql.dialect())), c.nullable)
-                  for c in models.Base.metadata.tables[t].columns]
+        out[t] = []
+        for c in metadata.tables[t].columns:
+            typ = c.type.compile(dialect=postgresql.dialect())
+            typ = names.get(typ, typ)
+            if typ not in _ORM_TYPES:
+                raise AssertionError("a model column of a type the reader does not know: %s.%s %s"
+                                     % (t, c.name, typ))
+            out[t].append((c.name, typ, c.nullable))
     return out
+
+
+def test_each_reader_refuses_a_column_of_a_type_it_does_not_know():
+    """Finding R2-5 (M2), both readers. A BIGINT column added to a copy of
+    427's text, and one added to a copy of models.py's table, are each
+    refused by name."""
+    import models
+    from sqlalchemy import BigInteger, Column, MetaData
+    t = _text(F427)
+    old = "      family      SMALLINT    NOT NULL,\n"
+    assert t.count(old) == 1
+    grown = t.replace(old, old + "      port        BIGINT      NULL,\n")
+    with pytest.raises(AssertionError, match=r"DDL reader does not know: 'port +BIGINT +NULL,'"):
+        _ddl_columns(grown)
+    md = MetaData()
+    for name in TABLES:
+        models.Base.metadata.tables[name].to_metadata(md)
+    md.tables["conn_markers"].append_column(Column("port", BigInteger, nullable=True))
+    with pytest.raises(AssertionError, match=r"conn_markers\.port BIGINT"):
+        _orm_columns(md)
 
 
 def test_the_orm_classes_match_427_column_for_column():
@@ -258,10 +293,91 @@ def _hold_problems(text):
     return out
 
 
+_DOLLAR = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$")
+
+
+def _statements(text):
+    """The top-level statements of `text`, in order, each stripped: split at
+    a semicolon outside a line comment, a quoted string and a dollar-quoted
+    body. A text left after the last semicolon is returned as a statement
+    (and is refused by the closed list below)."""
+    out, cur, i, n = [], [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            while j >= 0 and text.startswith("''", j):
+                j = text.find("'", j + 2)
+            j = n if j < 0 else j + 1
+            cur.append(text[i:j])
+            i = j
+            continue
+        m = _DOLLAR.match(text, i) if c == "$" else None
+        if m:
+            j = text.find(m.group(0), m.end())
+            j = n if j < 0 else j + len(m.group(0))
+            cur.append(text[i:j])
+            i = j
+            continue
+        if c == ";":
+            out.append(("".join(cur) + ";").strip())
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    rest = "".join(cur).strip()
+    if rest:
+        out.append(rest)
+    return out
+
+
+# The closed list of guarded top-level forms (finding R2-8): the house's
+# BEGIN, its four SET LOCAL lines, DO blocks (each step's body is read by
+# its own holders), and COMMIT. Anything else is refused by name.
+_GUARDED_FORMS = (re.compile(r"^BEGIN;$"),
+                  re.compile(r"^SET LOCAL (lock_timeout|idle_in_transaction_session_timeout|statement_timeout)"
+                             r" = '\d+s';$"),
+                  re.compile(r"^SET LOCAL synchronous_commit = local;$"),
+                  re.compile(r"^DO (\$[A-Za-z_][A-Za-z0-9_]*\$).*\1;$", re.S),
+                  re.compile(r"^COMMIT;$"))
+
+
+def _unguarded(text):
+    """Every top-level statement of `text` outside the closed list."""
+    return [s for s in _statements(text) if not any(p.match(s) for p in _GUARDED_FORMS)]
+
+
+def test_every_top_level_statement_is_a_guarded_form():
+    """Finding R2-8 (M2). Every top-level statement of 427 and of its
+    rollback is on the closed list; the count of statements the house
+    bound covers is stated beside finding 15's sentence. Plants: an
+    unguarded statement before COMMIT, one after it, a bare DDL statement
+    and an unterminated tail are each refused by name."""
+    counts = {}
+    for path in (F427, R427):
+        t = _text(path)
+        assert _unguarded(t) == [], (path.name, _unguarded(t))
+        stmts = _statements(t)
+        assert stmts[0] == "BEGIN;" and stmts[-1] == "COMMIT;", (path.name, stmts[:1], stmts[-1:])
+        counts[path.name] = sum(1 for s in stmts if s.startswith("DO "))
+    assert counts == {F427.name: 4, R427.name: 3}, counts
+    t = _text(F427)
+    for planted, want in ((t.replace("\nCOMMIT;", "\nSELECT pg_sleep(24);\nCOMMIT;"), "SELECT pg_sleep(24);"),
+                          (t.replace("\nCOMMIT;", "\nCOMMIT;\nSELECT 1;"), "SELECT 1;"),
+                          (t.replace("\nCOMMIT;", "\nDROP TABLE conn_markers;\nCOMMIT;"), "DROP TABLE conn_markers;"),
+                          (t + "\nSELECT 2", "SELECT 2")):
+        assert _unguarded(planted) == [want], _unguarded(planted)
+
+
 def test_427_and_its_rollback_hold_the_house_bound():
     for path in (F427, R427):
         t = _text(path)
         assert _hold_problems(t) == [], (path.name, _hold_problems(t))
+        assert _unguarded(t) == [], (path.name, _unguarded(t))
         for line in _SETS:
             assert t.count(line) == 1, (path.name, line)
     # Negative control: each defect is refused.
@@ -494,4 +610,77 @@ def test_rollback_427_refuses_what_is_not_427s_and_changes_nothing(live, name, e
             refused = await c.apply(_text(R427))
             assert refused and refused.startswith("rollback 427:"), (name, refused)
             assert await c.state() == before
+    _run(go())
+
+
+def _rollback_without_commit():
+    text_ = _text(R427)
+    assert text_.rstrip().endswith("\nCOMMIT;")
+    return text_.rstrip()[:-len("COMMIT;")]
+
+
+_RB_LOCK = ("  PERFORM 1 FROM pending_channel_posts p\n"
+            "   WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1\n"
+            "     FOR NO KEY UPDATE;\n")
+
+
+@pytest.mark.parametrize("first", ["the other writer", "the rollback", "the other writer, lock stripped"])
+def test_rollback_427_and_a_concurrent_faq_writer_in_both_orders(live, first):
+    """Finding R2-1: two sessions on message 1 after 427. The other writer
+    appends to message 1's text.
+    - The other writer first: its change is uncommitted when the rollback
+      starts; the rollback waits on the row (locked before it is read),
+      then reads the committed third text and refuses WHOLE: the three
+      tables stand, message 1 keeps the third text.
+    - The rollback first: it has restored 338's text and holds the row,
+      uncommitted; the other writer waits, and once the rollback commits it
+      meets the restored text (its append lands on 338's text), and the
+      three tables are gone.
+    - The other writer first against a copy of the rollback with its lock
+      stripped (derived in the test): the count reads 427's text, the
+      UPDATE then changes no row, and the one-row requirement refuses whole.
+    The refusal's words tell the two guards apart: with the lock the count
+    refuses ("is not exactly one row"); without it the one-row requirement
+    does ("rows changed, not one")."""
+    real = _text(R427)
+    if first.endswith("stripped"):
+        assert real.count(_RB_LOCK) == 1
+    sql = real.replace(_RB_LOCK, "") if first.endswith("stripped") else real
+
+    async def go():
+        async with _Case([(1, _was(), 2, 2)]) as c:
+            assert await c.apply(_text(F427)) is None
+            other = await asyncpg.connect(DSN)
+            try:
+                await other.execute('SET search_path TO "%s"' % c.schema)
+                await other.execute("SET lock_timeout = '20s'")
+                if first.startswith("the other writer"):
+                    await other.execute("BEGIN")
+                    await other.execute("UPDATE pending_channel_posts SET content = content || ' (third)'"
+                                        " WHERE sort_order = 1")
+                    rb = asyncio.create_task(c.apply(sql))
+                    await asyncio.sleep(1.0)
+                    waited = not rb.done()
+                    await other.execute("COMMIT")
+                    refused = await asyncio.wait_for(rb, 30)
+                    assert waited, "the rollback did not wait on the held row"
+                    assert refused and refused.startswith("rollback 427:"), refused
+                    want = "rows changed, not one" if first.endswith("stripped") else "is not exactly one row"
+                    assert want in refused, refused
+                    assert await c.tables() == {t: ("r", _mark_text()) for t in TABLES}
+                    assert (await c.msg(1))["content"] == _new() + " (third)"
+                else:
+                    await c.conn.execute(_rollback_without_commit())
+                    writer = asyncio.create_task(other.fetchval(
+                        "UPDATE pending_channel_posts SET content = content || ' (third)'"
+                        " WHERE sort_order = 1 RETURNING content"))
+                    await asyncio.sleep(1.0)
+                    waited = not writer.done()
+                    await c.conn.execute("COMMIT")
+                    got = await asyncio.wait_for(writer, 30)
+                    assert waited, "the other writer did not wait on the rollback's row"
+                    assert got == _was() + " (third)", got[-80:]
+                    assert await c.tables() == {}
+            finally:
+                await other.close()
     _run(go())

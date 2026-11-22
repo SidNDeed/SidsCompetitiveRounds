@@ -3891,3 +3891,18 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
                 + BOT_TEXT_ESCAPE_COUNT + QAPPLY_COUNT + BAN_SWEEP_COUNT)
+# CHEAT-ALT-1 (22 Nov 2026, finding R2-7): api/alt_signals.py joins
+# CENSUS_FILES (main.py imports it). Its forms, reviewed by hand: none in
+# either layer (it imports hashlib, hmac, ipaddress, re and
+# collections.namedtuple under private names, and no driver, engine,
+# session, URL or opener form). The
+# derivation: 873 + 0 + 0 = 873. Frozen by hand as two empty entries, so a
+# form that appears in it later is a '+' row of the diff.
+ALT_SIGNALS_FROZEN = {'api/alt_signals.py': [], 'api/alt_signals.py#complete': []}
+ALT_SIGNALS_COUNT = 0
+for _k, _v in ALT_SIGNALS_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = FROZEN_COUNT + ALT_SIGNALS_COUNT
+# The complete layer's two keyed tables cover every CENSUS_FILES entry too.
+COMPLETE_FROZEN.setdefault('api/alt_signals.py#complete', [])
+R10_FROZEN.setdefault('api/alt_signals.py#complete', [])

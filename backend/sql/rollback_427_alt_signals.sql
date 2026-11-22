@@ -13,8 +13,12 @@
 -- What this loses: every row the three tables hold. Nothing else refers to
 -- them.
 --
--- HOLDING BOUND. As 427: statement_timeout (25 s) plus
--- idle_in_transaction_session_timeout (5 s), so the sum is 30 s, plus the
+-- HOLDING BOUND. As 427, per statement and per pause: each statement's own
+-- statement_timeout (25 s) and each pause's
+-- idle_in_transaction_session_timeout (5 s); PostgreSQL 16 has no limit for
+-- a whole transaction, and none is claimed. Over this file's counted
+-- statements (three DO blocks, four pauses from the last SET line to
+-- COMMIT) the sum enforced is 3 x 25 s + 4 x 5 s = 95 s, plus the
 -- COMMIT's own flush, which no timeout covers; synchronous_commit = local
 -- keeps that flush on this server.
 --
@@ -122,7 +126,14 @@ Press **F5** in-game to open the competitive menu. That's the hub for everything
   rows_all integer;
   rows_was integer;
   rows_now integer;
+  rows_set integer;
+  final_text text;
 BEGIN
+  -- The row is locked before it is read (finding R2-1): a writer that
+  -- comes first makes this wait and then read what it committed.
+  PERFORM 1 FROM pending_channel_posts p
+   WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1
+     FOR NO KEY UPDATE;
   SELECT count(*), count(*) FILTER (WHERE p.content = now_text), count(*) FILTER (WHERE p.content = was)
     INTO rows_all, rows_now, rows_was
     FROM pending_channel_posts p
@@ -132,9 +143,21 @@ BEGIN
        SET content = was,
            revision = p.revision + 1
      WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1 AND p.content = now_text;
+    GET DIAGNOSTICS rows_set = ROW_COUNT;
+    IF rows_set <> 1 THEN
+      RAISE EXCEPTION 'rollback 427: FAQ message 1: % rows changed, not one', rows_set;
+    END IF;
   ELSIF NOT (rows_all = 1 AND rows_was = 1) THEN
     RAISE EXCEPTION 'rollback 427: FAQ message 1 is not exactly one row holding 427''s text or 338''s text (rows %, holding 427''s text %, holding 338''s text %)',
       rows_all, rows_now, rows_was;
+  END IF;
+  -- The final text, read back in the same transaction.
+  SELECT min(p.content), count(*) INTO final_text, rows_all
+    FROM pending_channel_posts p
+   WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1;
+  IF rows_all <> 1 OR final_text IS DISTINCT FROM was THEN
+    RAISE EXCEPTION 'rollback 427: post-check: FAQ message 1 rows %, holding 338''s text %',
+      rows_all, (final_text IS NOT DISTINCT FROM was);
   END IF;
 END $r427faq$;
 

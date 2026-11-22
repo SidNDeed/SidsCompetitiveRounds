@@ -86,7 +86,12 @@ FULL_AFTER = ("set_config('lock_timeout'", "pg_advisory_xact_lock(", "FROM playe
               "FROM deleted_steam_ids", "FROM pending_channel_posts", "INSERT INTO steam_family_shares",
               "INSERT INTO conn_markers", "INSERT INTO steam_signin_facts")
 NOTICE_LINE = "[ALT-SIGNALS] notice not up: nothing recorded"
-_LINE = re.compile(r"^\[ALT-SIGNALS\] (not recorded: [A-Za-z_][A-Za-z0-9_]*|notice not up: nothing recorded)$")
+_LINE = re.compile(r"^\[ALT-SIGNALS\] ((not recorded|outcome unknown): [A-Za-z_][A-Za-z0-9_]*"
+                   r"|notice not up: nothing recorded)$")
+# The closed list of lines that are not the recording's own and may be
+# printed on its path (finding R2-14): the ban helper's refusal line, which
+# names the route template (or "-") and nothing else.
+ADMITTED = (re.compile(r"^\[BAN-GATE\] refused route=(-|/[A-Za-z0-9_/{}.-]*)$"),)
 
 _FAULTS_DDL = """
 CREATE TABLE alt_test_faults (tbl text PRIMARY KEY, what text NOT NULL);
@@ -169,10 +174,14 @@ class _Plan:
     """The statements the route's session issues, each with the number of
     commits before it, and the faults to raise after the sign-in's commit."""
 
-    def __init__(self, fault_at=None, fault=None, commit_fault=None, rollback_fault=None):
+    def __init__(self, fault_at=None, fault=None, commit_fault=None, rollback_fault=None,
+                 after_commit_fault=None):
         self.log, self.commits, self.rollbacks = [], 0, 0
         self.fault_at, self.fault = fault_at, fault
         self.commit_fault, self.rollback_fault = commit_fault, rollback_fault
+        # raised AFTER the recording's commit has been carried out (its
+        # acknowledgement lost): the rows stand on the server
+        self.after_commit_fault = after_commit_fault
         self.open_after = None
 
     def before(self):
@@ -203,6 +212,8 @@ class _ProbeSession(AsyncSession):
         await super().commit()
         if p is not None:
             p.commits += 1
+            if p.commits >= 2 and p.after_commit_fault is not None:
+                raise p.after_commit_fault
 
     async def rollback(self):
         p = self.plan
@@ -662,59 +673,109 @@ def test_an_upsert_that_raises_records_nothing(case, env, capsys, table, what):
     assert len(lines) == 1 and lines[0].startswith("[ALT-SIGNALS] not recorded: ") and _LINE.match(lines[0])
 
 
+def _segment(env):
+    """Time the recording's own segment (from _alt_record's call to its end)
+    on the monotonic clock and keep the exception _alt_abandon is given."""
+    seg = {}
+    real_record, real_abandon = main._alt_record, main._alt_abandon
+
+    async def record(*a, **kw):
+        t0 = time.monotonic()
+        try:
+            return await real_record(*a, **kw)
+        finally:
+            seg["took"] = time.monotonic() - t0
+
+    async def abandon(db, ex):
+        seg["ex"] = ex
+        return await real_abandon(db, ex)
+    env.setattr(main, "_alt_record", record)
+    env.setattr(main, "_alt_abandon", abandon)
+    return seg
+
+
+def _sqlstate(ex):
+    """The first SQLSTATE on `ex` or on what it wraps (.orig, __cause__)."""
+    todo, seen = [ex], set()
+    while todo:
+        e = todo.pop(0)
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        for code in (getattr(e, "sqlstate", None), getattr(e, "pgcode", None)):
+            if isinstance(code, str) and code:
+                return code
+        todo += [getattr(e, "orig", None), getattr(e, "__cause__", None)]
+    return None
+
+
 def test_a_statement_past_its_time_limit_is_cancelled_and_records_nothing(case, env, capsys):
-    """The facts upsert sleeps six seconds: the statement limit ends it."""
+    """Finding R2-9, the statement limit ALONE: no lock is held; the facts
+    upsert sleeps six seconds. First discriminator: the SQLSTATE is 57014
+    (query_canceled), not 55P03. Second: the recording's segment ends at
+    least RECORD_STATEMENT_TIMEOUT_MS (1.5 s, less 0.05 s of clock grain)
+    and under 2.5 s after it began: a doubled limit (3.0 s) cannot meet that
+    bound (margin 0.5 s), and the 1.0 s above the limit covers the segment's
+    six earlier statements on the test server. The clock is the server's
+    own timer and cannot be given."""
     sid = _sid()
+    seg = _segment(env)
 
     async def body(sm, rsm):
         await _fault(sm, "steam_signin_facts", "sleep")
         try:
-            t0 = time.monotonic()
             status, ans, plan = await _sign_in(rsm, sid, owner=_sid())
-            took = time.monotonic() - t0
         finally:
             await _fault(sm, "steam_signin_facts", None)
         await _nothing_recorded(sm, sid, status, ans)
-        return took
 
-    took = _with(case, body)
-    assert took < 4.5, took
+    _with(case, body)
+    assert _sqlstate(seg.get("ex")) == "57014", repr(seg.get("ex"))
+    limit = A.RECORD_STATEMENT_TIMEOUT_MS / 1000.0
+    assert limit - 0.05 <= seg["took"] < 2.5, seg["took"]
     assert len(_lines(capsys)) == 1
 
 
 @pytest.mark.parametrize("table", TABLES)
 def test_the_lock_limit_ends_the_wait_on_a_row_another_transaction_holds(case, env, capsys, table):
-    """The account's rows exist; another transaction holds the row of `table`
-    FOR UPDATE (as the retention pass does) for up to six seconds; the
-    second sign-in's upsert of that row stops within the lock limit and
-    nothing changes."""
+    """Finding R2-9, the lock limit ALONE. The account's rows exist; another
+    transaction holds the row of `table` FOR UPDATE (as the retention pass
+    does) for up to six seconds; the second sign-in's upsert of that row
+    stops and nothing changes. First discriminator: the SQLSTATE is 55P03
+    (lock_not_available), which the statement limit never raises. Second:
+    the recording's segment ends at least RECORD_LOCK_TIMEOUT_MS (0.5 s, less
+    0.05 s of clock grain) and under 1.2 s after it began, a bound the
+    statement limit (1.5 s) cannot explain (margin 0.3 s). The clock is the
+    server's own timer and cannot be given."""
     sid, owner = _sid(), _sid()
+    seg = _segment(env)
 
     async def body(sm, rsm):
         status, ans, _plan = await _sign_in(rsm, sid, owner=owner)
         _like_baseline(status, ans)
         before = await _digest(sm, sid)
+        seg.clear()
         holder = sm()
         try:
             await holder.execute(text("SELECT 1 FROM %s WHERE steam_id = :s FOR UPDATE" % table), {"s": sid})
-            t0 = time.monotonic()
             task = asyncio.create_task(_sign_in(rsm, sid, owner=owner))
             for _ in range(120):
                 if task.done():
                     break
                 await asyncio.sleep(0.05)
-            took = time.monotonic() - t0
             await holder.rollback()
         finally:
             await holder.close()
         status, ans, plan = await task
         _like_baseline(status, ans)
         assert await _session_committed(sm, ans["session_token"])
-        return took, before, await _digest(sm, sid), plan
+        return before, await _digest(sm, sid), plan
 
-    took, before, after, plan = _with(case, body)
+    before, after, plan = _with(case, body)
     assert after == before, "a row changed"
-    assert took < 4.0, took
+    assert _sqlstate(seg.get("ex")) == "55P03", repr(seg.get("ex"))
+    limit = A.RECORD_LOCK_TIMEOUT_MS / 1000.0
+    assert limit - 0.05 <= seg["took"] < 1.2, seg["took"]
     assert ("INSERT INTO " + table) in plan.after()[-1] and plan.rollbacks == 1, plan.after()
     lines = _lines(capsys)
     assert len(lines) == 1 and _LINE.match(lines[0]) and lines[0] != NOTICE_LINE, lines
@@ -734,11 +795,17 @@ def test_the_connection_reported_lost_records_nothing(case, env, capsys, at):
 
     _with(case, body)
     assert len(plan.after()) == (8 if at == "commit" else at) and plan.rollbacks == 1, plan.after()
-    want = NOTICE_LINE if at == 5 else "[ALT-SIGNALS] not recorded: ConnectionDoesNotExistError"
+    # A failed commit is an outcome not known (finding R2-2), even here,
+    # where the planted fault is raised before the COMMIT is sent.
+    want = (NOTICE_LINE if at == 5 else
+            "[ALT-SIGNALS] outcome unknown: ConnectionDoesNotExistError" if at == "commit" else
+            "[ALT-SIGNALS] not recorded: ConnectionDoesNotExistError")
     assert _lines(capsys) == [want]
 
 
 def test_a_rollback_that_raises_changes_nothing_the_caller_sees(case, env, capsys):
+    """The rollback is not confirmed, so the line says the outcome is not
+    known (finding R2-2)."""
     sid = _sid()
     plan = _Plan(fault_at=8, fault=LOST, rollback_fault=LOST)
 
@@ -748,7 +815,46 @@ def test_a_rollback_that_raises_changes_nothing_the_caller_sees(case, env, capsy
 
     _with(case, body)
     assert plan.rollbacks == 1 and plan.open_after is True
-    assert _lines(capsys) == ["[ALT-SIGNALS] not recorded: ConnectionDoesNotExistError"]
+    assert _lines(capsys) == ["[ALT-SIGNALS] outcome unknown: ConnectionDoesNotExistError"]
+
+
+def test_a_commit_that_stands_while_its_answer_is_lost_says_outcome_unknown_and_doubles_nothing(
+        case, env, capsys, monkeypatch):
+    """Finding R2-2 (c). The route's session comes from the api's own
+    dependency (database.get_db over the probe's sessions). The recording's
+    COMMIT is carried out, and THEN the lost-connection fault is raised, as
+    when the server committed and its answer never came. The guard returns
+    the built answer; the dependency's teardown closes the session. The
+    rows stand; the line is the unknown word, never "not recorded"; the
+    account's next sign-in leaves one row per key, nothing doubled."""
+    import database
+    sid, owner = _sid(), _sid()
+
+    async def body(sm, rsm):
+        monkeypatch.setattr(database, "async_session", rsm)
+        STEAM["params"] = _params(sid, owner=owner)
+        plan = _Plan(after_commit_fault=LOST)
+        dep = database.get_db()
+        db = await dep.__anext__()
+        db.plan = plan
+        req = main.SteamAuthRequest(steam_id=sid, ticket_hex="abcd", mod_version="1.41.0")
+        try:
+            ans = await main.steam_auth(req=req, db=db, request=_request(V4))
+        finally:
+            await dep.aclose()
+        _like_baseline(200, ans)
+        assert await _session_committed(sm, ans["session_token"])
+        first = await _rows(sm, sid)
+        lines = _lines(capsys)
+        status, ans2, _p = await _sign_in(rsm, sid, owner=owner)
+        _like_baseline(status, ans2)
+        return plan, first, lines, await _rows(sm, sid)
+
+    plan, first, lines, second = _with(case, body)
+    assert plan.commits == 2, plan.commits
+    assert first == [1, 1, 1], first
+    assert lines == ["[ALT-SIGNALS] outcome unknown: ConnectionDoesNotExistError"], lines
+    assert second == [1, 1, 1], second
 
 
 @pytest.mark.parametrize("path", ["not-recorded line", "notice line"])
@@ -934,3 +1040,168 @@ def test_a_missing_report_keeps_the_stored_values_and_a_new_one_replaces_them(ca
     assert (last["copy_state"], last["vac_banned"], last["publisher_banned"]) == ("own", False, False)
     assert (last["shared_first_at"], last["vac_banned_first_at"]) == (first["shared_first_at"],
                                                                      first["vac_banned_first_at"])
+
+
+# -- everything a recording prints (finding R2-14) -------------------------------
+
+def test_a_recording_prints_only_its_guarded_lines_and_the_admitted_ones(case, env, monkeypatch):
+    """Every print() made while the recording or its abandon runs is caught
+    (the real print still runs): a full recording, a closed notice, an upsert
+    fault and a ban committed between the two transactions (the taking
+    call's refusal reaches the ban helper's own line). Each caught line is
+    one of the recording's own (_LINE) or on the closed list ADMITTED, and
+    none names the account, the owner, the address, the key or a mark."""
+    real = builtins.print
+    said, on = [], [False]
+
+    def spy(*a, **kw):
+        if on[0]:
+            said.append(" ".join(str(x) for x in a))
+        return real(*a, **kw)
+
+    real_record, real_abandon = main._alt_record, main._alt_abandon
+
+    async def record(*a, **kw):
+        on[0] = True
+        try:
+            return await real_record(*a, **kw)
+        finally:
+            on[0] = False
+
+    async def abandon(db, ex):
+        on[0] = True
+        try:
+            return await real_abandon(db, ex)
+        finally:
+            on[0] = False
+    monkeypatch.setattr(builtins, "print", spy)
+    monkeypatch.setattr(main, "_alt_record", record)
+    monkeypatch.setattr(main, "_alt_abandon", abandon)
+    sid, owner, banned = _sid(), _sid(), _sid()
+
+    async def body(sm, rsm):
+        await _sign_in(rsm, sid, owner=owner)
+        fid = await _close(sm, "never posted")
+        try:
+            await _sign_in(rsm, sid, owner=owner)
+        finally:
+            await _reopen(sm, fid)
+        await _fault(sm, "conn_markers", "P0001")
+        try:
+            await _sign_in(rsm, sid, owner=owner)
+        finally:
+            await _fault(sm, "conn_markers", None)
+
+        async def plant():
+            async with sm() as db:
+                admin = _sid()
+                await lh._insert(db, "admin_users", {"steam_id": admin})
+                await lh._insert(db, "players", {"id": uuid.uuid4(), "steam_id": banned,
+                                                 "display_name": "ap-" + banned[-4:]})
+                await db.execute(text(
+                    "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+                    " VALUES (:id, :s, 'alt-print', :a, NOW(), NOW() + INTERVAL '1 hour')"),
+                    {"id": uuid.uuid4(), "s": banned, "a": admin})
+                await db.commit()
+        _between_the_transactions(env, plant)
+        await _sign_in(rsm, banned, owner=owner)
+
+    _with(case, body)
+    stray = [ln for ln in said if not (_LINE.match(ln) or any(p.match(ln) for p in ADMITTED))]
+    assert stray == [], stray
+    assert any(ADMITTED[0].match(ln) for ln in said), said
+    k = A.loaded_key()
+    seen = A.observe(V4, k, conn_ranges.classify_address, conn_ranges.CR_LAN_NETS)
+    for secret in (sid, owner, banned, V4, KEY_HEX, seen.addr_mark.hex(), A.account_mark(k.secret, owner).hex()):
+        assert not any(secret in ln for ln in said), secret
+
+
+# -- the commands the driver sends under the production pool (finding R2-12) ------
+
+class _Wire(asyncpg.Connection):
+    """An asyncpg connection that logs, while `log` is a list, every command
+    the driver sends on it: simple-protocol commands (execute: BEGIN,
+    COMMIT, ROLLBACK), the pool's ping (fetchrow), each preparation
+    (prepare) and, through the patch below, each bound execution of a
+    prepared statement (bind)."""
+
+    log = None
+
+    async def execute(self, query, *args, timeout=None):
+        if _Wire.log is not None:
+            _Wire.log.append(("execute", query))
+        return await super().execute(query, *args, timeout=timeout)
+
+    async def fetchrow(self, query, *args, timeout=None, record_class=None):
+        if _Wire.log is not None:
+            _Wire.log.append(("fetchrow", query))
+        return await super().fetchrow(query, *args, timeout=timeout, record_class=record_class)
+
+    async def prepare(self, query, *, name=None, timeout=None, record_class=None):
+        if _Wire.log is not None:
+            _Wire.log.append(("prepare", query))
+        return await super().prepare(query, name=name, timeout=timeout, record_class=record_class)
+
+
+def test_the_commands_the_driver_sends_for_one_recording_under_the_production_pool(case, env, monkeypatch):
+    """The engine is built as the api's database module builds its engine:
+    its own create_async_engine and the pool settings read from
+    database.engine itself (QueuePool, pool_size 20, max_overflow 10,
+    pool_timeout 30, pool_pre_ping, pool_recycle 1800); the test adds only
+    the case schema's search path and the logging connection class. After
+    the sign-in's COMMIT the driver sends, in order: the pool's pre-ping on
+    checkout (BEGIN, the empty query, ROLLBACK), the recording's BEGIN, then
+    its eight statements, the first of them its limits, and its COMMIT. Each
+    statement may be preceded by its preparation. The pre-ping, the BEGIN
+    and the limits statement's own preparation and execution come before
+    the lane's limits are in force (a residual of claim C30)."""
+    import asyncpg.prepared_stmt as ps
+    import database
+    from sqlalchemy.pool import QueuePool
+    pool = database.engine.pool
+    settings = {"pool_size": pool.size(), "max_overflow": pool._max_overflow, "pool_timeout": pool._timeout,
+                "pool_pre_ping": pool._pre_ping, "pool_recycle": pool._recycle}
+    assert isinstance(pool, QueuePool), type(pool)
+    assert settings == {"pool_size": 20, "max_overflow": 10, "pool_timeout": 30,
+                        "pool_pre_ping": True, "pool_recycle": 1800}, settings
+    real_fetch = ps.PreparedStatement.fetch
+
+    async def fetch(self, *args, timeout=None):
+        if _Wire.log is not None and isinstance(self._connection, _Wire):
+            _Wire.log.append(("bind", self.get_query()))
+        return await real_fetch(self, *args, timeout=timeout)
+    monkeypatch.setattr(ps.PreparedStatement, "fetch", fetch)
+    sid = _sid()
+
+    async def go():
+        engine = database.create_async_engine(
+            harness.async_dsn(lh.DSN), echo=False, **settings,
+            connect_args={"connection_class": _Wire,
+                          "server_settings": {"search_path": harness.quoted(case), **BOUNDS}})
+        try:
+            rsm = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async with rsm() as warm:   # one connection in the pool, as on a running box
+                await warm.execute(text("SELECT 1"))
+            _Wire.log = []
+            status, ans, _p = await _sign_in(rsm, sid, owner=_sid())
+            log, _Wire.log = _Wire.log, None
+            return status, ans, log
+        finally:
+            _Wire.log = None
+            await engine.dispose()
+
+    status, ans, log = _run(go())
+    _like_baseline(status, ans)
+    commits = [i for i, (k, q) in enumerate(log) if k == "execute" and q.strip().upper().startswith("COMMIT")]
+    assert len(commits) == 2, log
+    after = log[commits[0] + 1:commits[1] + 1]
+    sent = [(k, q) for k, q in after if k != "prepare"]
+    head = [(k, q.strip().upper()) for k, q in sent[:4]]
+    assert [k for k, _q in head] == ["execute", "fetchrow", "execute", "execute"], after
+    assert head[0][1].startswith("BEGIN") and head[1][1] == ";" and head[2][1].startswith("ROLLBACK"), after
+    assert head[3][1].startswith("BEGIN"), after
+    binds = sent[4:-1]
+    assert all(k == "bind" for k, _q in binds) and _kinds([q for _k, q in binds], FULL_AFTER), after
+    assert sent[-1][0] == "execute" and sent[-1][1].strip().upper().startswith("COMMIT"), after
+    prepared = [q for k, q in after if k == "prepare"]
+    assert all(any(q == b for _k, b in binds) for q in prepared), after

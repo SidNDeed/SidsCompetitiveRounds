@@ -66,9 +66,13 @@
 --
 -- HOLDING BOUND. lock_timeout bounds how long each step waits to start
 -- behind a transaction already in flight. How long this file holds what it
--- took is bounded by the other settings: every statement by statement_timeout
--- (25 s) and any pause between statements by
--- idle_in_transaction_session_timeout (5 s), so the sum is 30 s, plus the
+-- took is bounded by the other settings, each per statement or per pause:
+-- every statement by its own statement_timeout (25 s) and every pause between
+-- two statements by idle_in_transaction_session_timeout (5 s). PostgreSQL 16
+-- has no limit for a whole transaction, and none is claimed. Over this
+-- file's counted statements (the four DO blocks after the SET lines, and the
+-- five pauses from the last SET line to COMMIT) the sum enforced is
+-- 4 x 25 s + 5 x 5 s = 125 s, plus the
 -- COMMIT's own flush, which no timeout covers; synchronous_commit = local
 -- keeps that flush on this server, waiting for no standby. If a setting
 -- expires the whole file rolls back with nothing changed and is re-applied.
@@ -114,8 +118,10 @@
 --     did commits.
 --
 -- RE-RUNS. A second run finds the three tables marked and the row already
--- revised: it issues no DDL, writes no row and takes no lock on any table;
--- it reads the catalogue and the one row. The only statements outside a
+-- revised: it issues no DDL, writes no row, takes no lock on the three new
+-- tables and no row lock on the FAQ row; its read of the FAQ table takes
+-- the ordinary read lock (ACCESS SHARE) that every SELECT takes. It reads
+-- the catalogue and the one row. The only statements outside a
 -- guard are BEGIN, the four SET LOCAL lines, the guard blocks themselves and
 -- COMMIT.
 --
@@ -304,16 +310,34 @@ Press **F5** in-game to open the competitive menu. That's the hub for everything
   rows_all integer;
   rows_was integer;
   rows_want integer;
+  rows_set integer;
 BEGIN
   SELECT count(*), count(*) FILTER (WHERE p.content = was), count(*) FILTER (WHERE p.content = want)
     INTO rows_all, rows_was, rows_want
     FROM pending_channel_posts p
    WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1;
   IF rows_all = 1 AND rows_was = 1 THEN
+    -- The write path only (a rerun takes no row lock): lock the row, read
+    -- it again under the lock, write it, require exactly one row changed.
+    PERFORM 1 FROM pending_channel_posts p
+     WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1
+       FOR NO KEY UPDATE;
+    SELECT count(*), count(*) FILTER (WHERE p.content = was)
+      INTO rows_all, rows_was
+      FROM pending_channel_posts p
+     WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1;
+    IF rows_all <> 1 OR rows_was <> 1 THEN
+      RAISE EXCEPTION '427: FAQ message 1 changed before it was locked (rows %, holding 338''s text %)',
+        rows_all, rows_was;
+    END IF;
     UPDATE pending_channel_posts p
        SET content = want,
            revision = p.revision + 1
      WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1 AND p.content = was;
+    GET DIAGNOSTICS rows_set = ROW_COUNT;
+    IF rows_set <> 1 THEN
+      RAISE EXCEPTION '427: FAQ message 1: % rows changed, not one', rows_set;
+    END IF;
   ELSIF NOT (rows_all = 1 AND rows_want = 1) THEN
     RAISE EXCEPTION '427: FAQ message 1 is not exactly one row holding the text 338 wrote or the text this file writes (rows %, holding 338''s text %, holding this file''s text %)',
       rows_all, rows_was, rows_want;

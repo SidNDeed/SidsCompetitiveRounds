@@ -1184,7 +1184,7 @@ def test_prior_finding_program_writes_under_admin(plain, fid):
 # transitively (the closure computed once by RF/r7/ro/import_closure.py and
 # frozen here). Paths relative to backend/.
 CENSUS_FILES = (
-    "api/admin_evidence.py", "api/auto_logs.py", "api/build_manifest.py",
+    "api/admin_evidence.py", "api/alt_signals.py", "api/auto_logs.py", "api/build_manifest.py",
     "api/card_evidence.py", "api/card_measures.py", "api/combat_evidence.py",
     "api/combat_measures.py", "api/conn_ranges.py", "api/database.py",
     "api/flag_evidence.py", "api/glicko2.py", "api/identity_clock_evidence.py",
@@ -1223,6 +1223,23 @@ def test_dsn_census_is_closed():
     # No identity-changing SQL text anywhere in the closure, frozen or not.
     assert not [f for v in ro_census_frozen.FROZEN.values() for f in v
                 if f[0] == "identity"]
+
+
+def test_dsn_census_reads_the_alt_signals_module():
+    """CHEAT-ALT-1 finding R2-7: the new api module is in the fixed file set,
+    and a connection opener planted in its text is refused by the census."""
+    assert "api/alt_signals.py" in CENSUS_FILES
+    path = os.path.join(BACKEND, "api", "alt_signals.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    assert ro_census.file_forms("api/alt_signals.py", src) == {
+        "api/alt_signals.py": [], "api/alt_signals.py" + ro_census.COMPLETE: []}
+    planted = src + "\n\nasync def _planted(dsn):\n    import asyncpg\n    return await asyncpg.connect(dsn)\n"
+    got = dict(ro_census_frozen.FROZEN)
+    got.update(ro_census.file_forms("api/alt_signals.py", planted))
+    plus = [d for d in ro_census.diff(got, ro_census_frozen.FROZEN) if d[0].startswith("api/alt_signals.py")]
+    assert plus and all(d[1] == "+" for d in plus), plus
+    assert any(d[2] == "opener" for d in plus), plus
 
 
 # Each census refusal rule, with the program that exercises it planted into a

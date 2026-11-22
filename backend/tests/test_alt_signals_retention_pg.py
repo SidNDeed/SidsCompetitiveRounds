@@ -269,6 +269,110 @@ def test_due_rows_above_one_batch_all_go_in_one_pass(clean, monkeypatch, capsys)
     assert _pass_line(_alt_lines(capsys)) == (20, 20, 20, 9)
 
 
+@pytest.mark.parametrize("count", ["counted", "not counted"])
+def test_a_pass_that_fails_in_batch_two_of_three_says_what_it_did_and_what_is_left(
+        clean, monkeypatch, capsys, count):
+    """Finding R2-3. One due row in each table: a pass of three batches
+    (markers, shares, facts). The second batch raises after the first has
+    committed: the pass says it ended by a failed batch, what it deleted per
+    table up to there, and the due rows left, counted in a session of their
+    own (or, when that count fails too, that they were not counted); then it
+    raises the batch's exception for the loop to count."""
+    sids = {k: _sid() for k in TABLES}
+    real = main._alt_retention_batch
+    calls = []
+
+    async def second_fails(db, table, at=None):
+        calls.append(table)
+        if len(calls) == 2:
+            raise RuntimeError("planted")
+        return await real(db, table, at)
+
+    async def left_fails(db, at=None):
+        raise OSError("planted")
+
+    monkeypatch.setattr(main, "_alt_retention_batch", second_fails)
+    if count == "not counted":
+        monkeypatch.setattr(main, "_alt_retention_left", left_fails)
+
+    async def body(sm, _rsm):
+        for k, s in sids.items():
+            await _plant(sm, k, s, 3600)
+        with pytest.raises(RuntimeError):
+            await main._alt_retention_pass(sm)
+        return {k: await _count(sm, k, s) for k, s in sids.items()}
+
+    counts = rec._with(clean, body)
+    assert calls == ["markers", "shares"], calls
+    assert counts == {"markers": 0, "shares": 1, "facts": 1}, counts
+    lines = _alt_lines(capsys)
+    left = ("[ALT-RETENTION] due rows left: markers 0, shares 1, facts 1" if count == "counted"
+            else "[ALT-RETENTION] due rows left: not counted (OSError)")
+    assert lines == ["[ALT-RETENTION] pass ended by a failed batch (RuntimeError): deleted markers 1,"
+                     " shares 0, facts 0 in 1 batch(es)", left], lines
+
+
+_PLANT_AT = {
+    "facts": ("INSERT INTO steam_signin_facts (steam_id, first_seen_at, last_seen_at)"
+              " VALUES (CAST(:s AS text) || '0001', CAST(:t AS timestamptz) - interval '10 days',"
+              " CAST(:t AS timestamptz))"),
+    "shares": ("INSERT INTO steam_family_shares (steam_id, key_id, owner_mark, first_seen_at, last_seen_at)"
+               " VALUES (CAST(:s AS text), 'aaaaaaaaaaaa', sha256(convert_to(CAST(:s AS text), 'UTF8')),"
+               " CAST(:t AS timestamptz) - interval '10 days', CAST(:t AS timestamptz))"),
+    "markers": ("INSERT INTO conn_markers (steam_id, day, key_id, addr_mark, block_mark, family, conn_class,"
+                " first_at, last_at)"
+                " VALUES (CAST(:s AS text), CAST((CAST(:t AS timestamptz) AT TIME ZONE 'UTC') AS date),"
+                " 'aaaaaaaaaaaa', sha256(convert_to(CAST(:s AS text), 'UTF8')),"
+                " sha256(convert_to(CAST(:s AS text) || '-b', 'UTF8')), 4, 'none',"
+                " CAST(:t AS timestamptz), CAST(:t AS timestamptz))"),
+}
+
+
+@pytest.mark.parametrize("hm", [(0, 1), (12, 0)], ids=["a minute after midnight UTC", "noon UTC"])
+def test_ages_count_to_the_given_instant_by_last_sight_never_by_day(clean, hm):
+    """Finding R2-10 (M3). The pass is GIVEN its instant `at` (a day in 2026's
+    first quarter, at 00:01 or at 12:00 UTC); rows are planted relative to
+    it, in sessions whose time zone is UTC. For each table one row a minute
+    past due goes and one a minute short of due stays. The marker row short
+    of due lies on the same UTC day as the due instant, so aging by DAY
+    (the day's midnight before the due instant) disagrees with aging by last
+    sight: the first discriminator. The second: every planted row is months
+    past due by the server's own clock, so a pass that ignored `at` would
+    take the rows that must stay. Margins: one minute either side of due."""
+    from datetime import datetime, timedelta, timezone
+    at = datetime(2026, 3, 10, hm[0], hm[1], tzinfo=timezone.utc)
+    due = at - timedelta(days=A.DUE_DAYS)
+    sids = {k: (_sid(), _sid()) for k in TABLES}
+
+    async def body(sm, _rsm):
+        async with sm() as db:
+            await db.execute(text("SET TIME ZONE 'UTC'"))
+            for k, (go, stay) in sids.items():
+                await db.execute(text(_PLANT_AT[k]), {"s": go, "t": due - timedelta(minutes=1)})
+                await db.execute(text(_PLANT_AT[k]), {"s": stay, "t": due + timedelta(minutes=1)})
+            await db.commit()
+
+        def utc_sessions():
+            db = sm()
+            real_execute = db.execute
+            state = {"set": False}
+
+            async def execute(stmt, *a, **kw):
+                if not state["set"]:
+                    state["set"] = True
+                    await real_execute(text("SET TIME ZONE 'UTC'"))
+                return await real_execute(stmt, *a, **kw)
+            db.execute = execute
+            return db
+
+        res = await main._alt_retention_pass(utc_sessions, at=at)
+        return res, {k: (await _count(sm, k, go), await _count(sm, k, stay)) for k, (go, stay) in sids.items()}
+
+    res, counts = rec._with(clean, body)
+    assert counts == {k: (0, 1) for k in TABLES}, counts
+    assert res["deleted"] == {k: 1 for k in TABLES} and res["left"] == {k: 0 for k in TABLES}, res
+
+
 def test_a_batch_of_the_real_size_is_measured_inside_its_limits(clean, capsys):
     """PASS_BATCH as shipped (2,000): a batch on each table is timed on this
     database, and the figure is printed for the hand-back. The design's
@@ -466,29 +570,36 @@ class _Stop(BaseException):
     pass
 
 
-def _drive_loop(monkeypatch, outcomes):
-    """Run the loop with its pass and its sleeps replaced: each pass takes the
-    next outcome (an exception to raise, or a result); the sleep after the
-    last pass ends the loop. Returns the sleeps asked for and the passes run."""
+def _drive_loop(monkeypatch, outcomes, durations=None, start=0.0):
+    """Run the loop with its pass, its sleeps and its clock given: the clock
+    starts at `start`; each pass takes the next outcome (an exception to
+    raise, or a result) and moves the clock by its duration (0 unless
+    `durations` gives one); each sleep moves the clock by what it asked for;
+    the sleep after the last pass ends the loop. Returns the sleeps asked for
+    and the clock reading at each pass's start."""
     sleeps, passes = [], []
     todo = list(outcomes)
+    took = list(durations or [0.0] * len(outcomes))
+    now = [float(start)]
 
     async def fake_pass(*a, **kw):
-        passes.append(a)
+        passes.append(now[0])
         out = todo.pop(0)
+        now[0] += took.pop(0)
         if isinstance(out, BaseException):
             raise out
         return out
 
     async def fake_sleep(s, *a, **kw):
         sleeps.append(s)
+        now[0] += s
         if len(sleeps) > len(outcomes):
             raise _Stop()
 
     monkeypatch.setattr(main, "_alt_retention_pass", fake_pass)
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
     with pytest.raises(_Stop):
-        asyncio.run(main.alt_signals_retention_loop())
+        asyncio.run(main.alt_signals_retention_loop(clock=lambda: now[0]))
     return sleeps, passes
 
 
@@ -500,6 +611,23 @@ def test_the_loop_says_it_is_armed_and_keeps_its_schedule(monkeypatch, capsys):
     lines = _alt_lines(capsys)
     assert lines[0] == ("[ALT-RETENTION] pass armed: every %ds, rows past %d days, first pass in %ds"
                         % (A.PASS_PERIOD_S, A.DUE_DAYS, A.PASS_FIRST_DELAY_S)), lines
+
+
+@pytest.mark.parametrize("start", [0.0, 987654.25])
+def test_each_pass_starts_one_period_after_the_previous_start_and_an_overrun_is_followed_at_once(
+        monkeypatch, capsys, start):
+    """Finding R2-4, on a given clock at two starting readings. Passes of
+    600 s, 1,800 s and 4,000 s (the third longer than the period): the waits
+    after them are 3,000 s, 1,800 s and 0, and each pass starts exactly one
+    period after the one before while it has not overrun. The discriminator
+    is the wait itself: counted from a pass's END the waits would be 3,600 s
+    each (a 600 s margin at the first pass, the smallest)."""
+    ok = {"deleted": {}, "left": {}, "batches": 0}
+    sleeps, passes = _drive_loop(monkeypatch, [ok, ok, ok], durations=[600.0, 1800.0, 4000.0], start=start)
+    assert sleeps == [A.PASS_FIRST_DELAY_S, 3000.0, 1800.0, 0], sleeps
+    assert [p - passes[0] for p in passes] == [0.0, A.PASS_PERIOD_S, 2 * A.PASS_PERIOD_S], passes
+    lines = _alt_lines(capsys)
+    assert lines[1:] == ["[ALT-RETENTION] pass overran its period by 400s: the next starts now"], lines
 
 
 def test_a_failing_pass_is_counted_said_and_the_loop_goes_on(monkeypatch, capsys):

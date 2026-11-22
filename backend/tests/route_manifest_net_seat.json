@@ -1507,7 +1507,7 @@
           ],
           "main",
           "steam_auth",
-          "62edad089bc12a8e498c06c9bfc0e81078aba78a"
+          "97349c53820fdb0d7e1e17023cfbd9076d780266"
         ],
         [
           "/api/v1/bets",
@@ -4121,7 +4121,7 @@
       [
         "main",
         "lifespan",
-        "a6d523eb5645e2ce994ee560f373ffafb2b069ad"
+        "b85b7c5a1b69d21470dd785c66819615bc425d81"
       ]
     ]
   },

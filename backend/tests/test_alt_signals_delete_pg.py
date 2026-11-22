@@ -228,6 +228,44 @@ def test_a_deleted_player_loses_its_rows_and_another_account_keeps_its_own(case,
     assert rows == [0, 0, 0] and other_rows == [1, 1, 1]
 
 
+def test_another_accounts_share_that_names_the_deleted_account_as_lender_stays(case, secret):
+    """Finding R2-11 (design section 7): deletion removes the deleted
+    account's OWN rows only. With the signal key loaded, another account's
+    share row whose owner mark is the deleted account's own mark under that
+    key (the deleted account lent it the copy) stays, byte for byte; so does
+    that account's every other row."""
+    import alt_signals as A
+    import test_alt_signals_record_pg as rec
+    sid, other = _sid(), _sid()
+    A.install_key(rec.KEY_HEX)
+    try:
+        k = A.loaded_key()
+        lender = A.account_mark(k.secret, sid)
+
+        async def body(sm):
+            await _player(sm, sid)
+            await _plant(sm, sid)
+            await _plant(sm, other)
+            async with sm() as db:
+                await db.execute(text("INSERT INTO steam_family_shares (steam_id, key_id, owner_mark)"
+                                      " VALUES (:s, :k, :m)"), {"s": other, "k": k.key_id, "m": lender})
+                await db.commit()
+            ans = await _delete(sm, sid)
+            async with sm() as db:
+                kept = (await db.execute(text(
+                    "SELECT count(*) FROM steam_family_shares WHERE steam_id = :s AND key_id = :k"
+                    " AND owner_mark = :m"), {"s": other, "k": k.key_id, "m": lender})).scalar()
+            return ans, await _rows(sm, sid), await _rows(sm, other), kept
+
+        ans, rows, other_rows, kept = _with(case, body)
+    finally:
+        A.install_key(None)
+    assert ans["status"] == "anonymized", ans
+    assert rows == [0, 0, 0], rows
+    assert kept == 1, "the other account's share naming the deleted lender was removed"
+    assert other_rows == [1, 2, 1], other_rows
+
+
 def test_deletion_waits_for_the_holder_of_the_identity_key_and_then_takes_its_row(case, secret):
     """A transaction that takes the account's key as the recording does
     (_ban_lock_and_gate, the key exclusive) and writes a facts row makes the
