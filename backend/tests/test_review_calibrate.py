@@ -1407,12 +1407,12 @@ class _FirstSession(Exception):
 
 
 @pytest.mark.parametrize("mode", ["count", "cohort", "check"])
-def test_every_run_kind_builds_its_session_factory_with_the_seconds_left(
+def test_every_run_kind_builds_its_session_factory_with_at_most_the_deadline(
         planted, monkeypatch, mode):
     """[9] (ORDER-R3-FIX-3 G6): in the count run, the cohort run and the check
-    run, the session factory is built with the whole seconds left of
-    the deadline at that moment
-    (rounded up, never more than the deadline)."""
+    run, the session factory is built with a value that is not above
+    the deadline given on the command line
+    (the upper bound of the last assertion)."""
     path, _rs = planted
     events = []
 
