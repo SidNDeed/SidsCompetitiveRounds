@@ -692,13 +692,47 @@ def _closing(toks, i):
     return None
 
 
-def _declares_cte(toks, i):
-    """toks[i] is a CTE's name AT ITS DECLARATION: after WITH, RECURSIVE or a
-    comma, then its column list, then AS."""
-    if i == 0 or toks[i - 1] not in (("word", "with"), ("word", "recursive"), ("punct", ",")):
-        return False
-    j = _closing(toks, i + 1)
-    return j is not None and j + 1 < len(toks) and toks[j + 1] == ("word", "as")
+def _cte_declarations(toks):
+    """The indices of the tokens that name a CTE AT ITS DECLARATION, read from
+    the WITH lists only: the name right after WITH or WITH RECURSIVE, or right
+    after a comma that follows the closing parenthesis of a CTE body at the
+    list's own depth; then its column list, AS, and its body. The list ends at
+    the first token after a body that is not a comma (the statement the list
+    belongs to). Outside a WITH list nothing is a declaration."""
+    out = set()
+    for w, t in enumerate(toks):
+        if t != ("word", "with"):
+            continue
+        i = w + 1
+        if i < len(toks) and toks[i] == ("word", "recursive"):
+            i += 1
+        while i < len(toks) and toks[i][0] in ("word", "qident"):
+            at = i
+            i += 1
+            if i < len(toks) and toks[i] == ("punct", "("):         # the column list
+                j = _closing(toks, i)
+                if j is None:
+                    break
+                i = j + 1
+            if i >= len(toks) or toks[i] != ("word", "as"):
+                break
+            i += 1
+            if i < len(toks) and toks[i] == ("word", "not"):
+                i += 1
+            if i < len(toks) and toks[i] == ("word", "materialized"):
+                i += 1
+            if i >= len(toks) or toks[i] != ("punct", "("):
+                break
+            j = _closing(toks, i)                                  # the CTE body
+            if j is None:
+                break
+            out.add(at)
+            i = j + 1
+            if i < len(toks) and toks[i] == ("punct", ","):
+                i += 1
+                continue
+            break
+    return out
 
 
 def shape_faults(sql):
@@ -706,6 +740,7 @@ def shape_faults(sql):
     toks = sql_tokens(sql)
     faults = [t[1] for t in toks if t[0] == "fault"]
     toks = [t for t in toks if t[0] != "fault"]
+    decl = _cte_declarations(toks)
     semis = [i for i, t in enumerate(toks) if t == ("punct", ";")]
     if semis and semis != [len(toks) - 1]:
         faults.append("two statements")
@@ -718,7 +753,7 @@ def shape_faults(sql):
             continue
         if tk == "word" and name in SQL_WORDS:
             continue
-        if _declares_cte(toks, i):
+        if i in decl:
             continue
         if name not in known:
             faults.append("function " + name)
@@ -794,9 +829,28 @@ def test_the_shape_check_allows_a_cte_name_only_at_its_own_declaration():
     assert shape_faults("WITH RECURSIVE tree(oid, depth) AS (SELECT array_agg(a) FROM t "
                         "WHERE a = any($1::oid[])) SELECT * FROM tree") == []
     assert shape_faults("WITH a(x) AS (SELECT 1), b(y) AS (SELECT 2) SELECT * FROM a, b") == []
+    assert shape_faults("WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n FROM t), "
+                        "u(m) AS (SELECT n FROM t) SELECT * FROM u") == []
+    assert shape_faults("SELECT x FROM (WITH a(x) AS (SELECT 1) SELECT x FROM a) s") == []
     assert shape_faults('SELECT "now"()') == []
     assert shape_faults("SELECT 'it''s', $q$ a ' b $q$, E'\\'' FROM t") == []
     assert shape_faults("SELECT 1 -- a comment with set_config(\n") == []
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 1, pg_advisory_lock(1) AS y",
+    "SELECT 1, set_config('jit', 'off', false) AS y",
+    "WITH a AS (SELECT 1, pg_advisory_lock(1) AS y) SELECT * FROM a",
+    "WITH a AS (SELECT 1) SELECT 1, pg_advisory_lock(1) AS y FROM a",
+    "SELECT s.y FROM (SELECT 1, pg_advisory_lock(1) AS y) s",
+], ids=["select-list-call", "select-list-set-config", "call-in-cte-body",
+        "main-select-call-after-with", "call-in-subquery"])
+def test_a_name_counts_as_declared_only_inside_a_with_list(sql):
+    """[6] (ORDER-R3-FIX-2 F1): a call after a comma and closed by `) AS` is
+    a call, not a CTE declaration, everywhere outside a WITH list: in a
+    select list, in a CTE body, in the main select after a WITH list, in a
+    subquery."""
+    assert any(f.startswith("function ") for f in shape_faults(sql)), (sql, shape_faults(sql))
 
 
 def test_every_sql_text_of_the_tool_is_an_approved_shape():
@@ -1010,6 +1064,36 @@ def test_a_game_whose_earliest_eligible_matches_tie_is_counted_ambiguous_and_now
     assert lines[0].startswith("run whole: games read 3 of 3 (card 1 of 1, ")
 
 
+def test_a_tied_game_outside_the_window_is_counted_outside_and_not_ambiguous(planted):
+    """[10] (ORDER-R3-FIX-2 F2): the game's newest matches end at the same
+    instant BEFORE the cutoff. Whichever were chosen, it is outside: it is
+    counted once under `outside`, not on the ambiguous line, and the counts
+    still sum to the games read."""
+    _path, rs = planted
+
+    class S(RecordingSession):
+        def _answer(self, sql, b):
+            rows = super()._answer(sql, b)
+            if sql.startswith("WITH cand AS") and "card_evidence" in sql.split(" FROM ", 1)[1][:20]:
+                rows[0]["recent"] = False
+                rows[0]["tied"] = True
+            return rows
+    sess = S()
+    tally = run(rc.walk_db(rs, lambda: sess, 41))
+    assert tally.domains["card"] == {"walked": 0, "skipped": {"outside": 1}}
+    assert tally.ambiguous == {"card": 0, "identity": 0, "combat": 0}
+    for d in rc.DOMAINS:
+        v = tally.domains[d]
+        assert v["walked"] + sum(v["skipped"].values()) + tally.ambiguous[d] == tally.totals[d]
+    lines = rc.render(tally)
+    assert "ambiguous (tied earliest match, not counted): card 0, identity 0, combat 0" in lines
+    assert lines[0].startswith("run whole: games read 3 of 3 (card 1 of 1, ")
+    doc = " ".join(rc.__doc__.split())
+    assert ("A tied game INSIDE the window (its tied matches ended after the cutoff) is counted "
+            "on the ambiguous line") in doc
+    assert "A game outside the window is counted as `outside` (cohort: it is not in the cohort), tied or not" in doc
+
+
 def test_the_selection_states_the_tie_and_a_total_order_in_its_statement():
     """[10]: the canonical pick orders by the match id after the end time
     (one result under every plan) and the statement returns whether the
@@ -1126,6 +1210,79 @@ def test_the_drivers_environment_is_out_of_the_process_while_it_connects(monkeyp
     assert all(os.environ.get(k) == "planted" for k in rc._DRIVER_ENV)
 
 
+_ENV_READ = re.compile(r"""\bos\.(?:getenv|environ\.get)\(\s*['"]([A-Z_]+)['"]""")
+
+
+def test_the_drivers_environment_list_holds_every_variable_and_file_its_connect_parser_reads():
+    """[5] (ORDER-R3-FIX-2 F7b), held against the INSTALLED driver's own
+    source: every environment variable asyncpg's connect-parameter parser
+    reads is in _DRIVER_ENV, every environment access there has the read form
+    counted, and every file it takes from a default place under the home
+    directory is in _DRIVER_HOME_FILES, which the module text names as a
+    declared limit. A variable or a default file a newer driver adds is red."""
+    import asyncpg
+    import asyncpg.connect_utils as cu
+    src = open(cu.__file__, encoding="utf-8").read()
+    names = set(_ENV_READ.findall(src))
+    assert len(re.findall(r"\bos\.(?:getenv|environ)\b", src)) == len(_ENV_READ.findall(src))
+    assert names and names <= set(rc._DRIVER_ENV), sorted(names - set(rc._DRIVER_ENV))
+    files = set(re.findall(r"""_dot_postgresql_path\(\s*['"]([^'"]+)['"]""", src))
+    files |= set(re.findall(r"""^\s*(?:PGPASSFILE|PG_SERVICEFILE)\s*=\s*['"]([^'"]+)['"]""", src, re.M))
+    assert len(re.findall(r"_dot_postgresql_path\(", src)) == 1 + len(
+        re.findall(r"""_dot_postgresql_path\(\s*['"]""", src))          # the definition + named calls
+    assert files and files <= set(rc._DRIVER_HOME_FILES), sorted(files - set(rc._DRIVER_HOME_FILES))
+    doc = " ".join(rc.__doc__.split())
+    assert "A DECLARED LIMIT" in doc and "_DRIVER_HOME_FILES" in doc
+    for f in rc._DRIVER_HOME_FILES:
+        assert f in doc, f
+    print("DRIVER-ENV asyncpg %s: %d variables read, all in _DRIVER_ENV; home files %s"
+          % (asyncpg.__version__, len(names), sorted(files)))
+
+
+class _SwallowingDisposal:
+    """An engine whose disposal swallows its cancellation and goes on for
+    `rest_s` more."""
+
+    def __init__(self, rest_s):
+        self.rest_s = rest_s
+        self.cancelled = 0
+
+    async def dispose(self):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            await asyncio.sleep(self.rest_s)
+
+
+def test_a_disposal_that_swallows_its_cancellation_is_abandoned_after_the_close_slack(monkeypatch):
+    """[8] (ORDER-R3-FIX-2 F7a): the engine's disposal is waited for at most
+    CLOSE_SLACK_S; one that swallows its cancellation is asked once to cancel
+    and abandoned, so _dispose returns by the slack and not when the
+    disposal would end."""
+    monkeypatch.setattr(rc, "CLOSE_SLACK_S", 0.3)
+    eng = _SwallowingDisposal(rest_s=3.0)
+    t0 = time.monotonic()
+    rc._run_loop(rc._dispose(eng))
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.5, elapsed
+
+
+_RAISES_OUTSIDE_THE_CENSUS = ("utc_cutoff", "bounded")
+
+
+def test_every_raise_of_the_module_is_in_a_census_function_or_named_outside_it():
+    """[7] (ORDER-R3-FIX-2 F7c): the census reaches the raises of
+    _BRANCH_FUNCS; the module's other raises stand in the functions named
+    here (utc_cutoff's guard of an instant without a zone, bounded's re-raise
+    of the walk's own exception, which ends as a failure word). A raise in
+    any other function is red."""
+    tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
+    have = {f.name for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and any(isinstance(n, ast.Raise) for n in ast.walk(f))}
+    assert have == set(_BRANCH_FUNCS) | set(_RAISES_OUTSIDE_THE_CENSUS), sorted(have)
+
+
 def test_the_outer_bound_leaves_room_for_the_tools_own_slack():
     """[8] (METHOD 2): the server verb's limit (deadline + VERB_SLACK_S, then
     a kill VERB_KILL_AFTER_S later) is later than the tool's report bound
@@ -1138,6 +1295,13 @@ def test_the_outer_bound_leaves_room_for_the_tools_own_slack():
                  "THE ABSOLUTE BOUND of a run is the server verb's outer time limit",
                  "can therefore run for one statement timeout more",
                  "A kill before the one write leaves nothing",
+                 # ORDER-R3-FIX-2 F7a, F7d, F4: the sentences as the code gives them
+                 "one that does not honour its cancellation included, is asked once to cancel "
+                 "and abandoned unfinished",
+                 "the whole seconds left of the deadline when the run builds its session factory",
+                 "the tool gives every statement the full value ON PURPOSE",
+                 "a statement that starts late, when most of the deadline is gone, still has its "
+                 "whole statement timeout",
                  # [3] ACCEPTED SMALL RISK, the order's sentence word for word
                  "Only a process that can write the rules directory can replace the named "
                  "directory during a run; the tool then lists the other directory and the load "
@@ -2518,23 +2682,38 @@ def test_live_a_purged_stray_record_does_not_remove_a_game_the_passes_evaluate(w
 
 
 def test_live_the_connection_takes_nothing_from_the_drivers_environment(live, monkeypatch):
-    """[5]: a target session attribute of `standby` and a TLS mode of
-    `require` planted in the process environment; the tool's connection to
-    the primary opens (neither variable reached the driver) and the recorder
-    sees no recovery SELECT."""
+    """[5] (ORDER-R3-FIX-2 F3): a target session attribute of `standby` and a
+    TLS mode of `require` planted in the process environment; the tool's
+    connection to the primary opens (neither variable reached the driver).
+    The recorder is installed as the driver creates the connection object,
+    so the check can fail: the tool's own connect returns with NO statement
+    recorded during establishment, and the first statement sent afterwards
+    is the first one recorded (the recorder is live on that connection)."""
+    from sqlalchemy.engine import make_url
     monkeypatch.setenv("PGTARGETSESSIONATTRS", "standby")
     monkeypatch.setenv("PGSSLMODE", "require")
-    log = []
+    log, direct = [], []
 
     async def go():
         engine, factory = rc.session_factory(60, url=live.url, recorder=log,
                                              extra_settings=live.settings)
         try:
             async with rc.read_only(factory) as db:
-                return (await db.execute(text("SELECT 1"))).scalar()
+                one = (await db.execute(text("SELECT 1"))).scalar()
         finally:
             await engine.dispose()
-    assert live.run(go()) == 1
+        args = make_url(live.url).translate_connect_args(username="user")
+        conn = await rc._connect(args, dict(rc.server_settings(60), **live.settings), recorder=direct)
+        try:
+            during = list(direct)
+            await conn.fetchval("SELECT 2")
+        finally:
+            await conn.close()
+        return one, during
+    one, during = live.run(go())
+    assert one == 1
+    assert during == [], during
+    assert direct == ["SELECT 2"], direct
     assert log and not any("pg_is_in_recovery" in s for s in log)
     assert os.environ["PGTARGETSESSIONATTRS"] == "standby"     # put back after the connect
 
@@ -2560,6 +2739,39 @@ def test_live_a_statement_ends_by_its_statement_timeout(live):
     word, elapsed = live.run(go())
     assert "statement timeout" in word, word
     assert elapsed < 3, elapsed
+
+
+def test_live_a_statement_started_late_has_its_whole_statement_timeout(live):
+    """[9] (ORDER-R3-FIX-2 F4), the sentence of the module text: a deadline of
+    3 s gives a statement timeout of 3 s; the session's connection is opened,
+    then 2.2 s of the 3 pass (most of the run's time gone), then a statement
+    that would run 8 s starts. The server ends it by ITS OWN statement
+    timeout, counted from its own start: at about 3 s after it started (not
+    at the 0.8 s left of the deadline), so it ends past the deadline and
+    within the deadline plus one statement timeout."""
+    from sqlalchemy.exc import DBAPIError
+
+    async def go():
+        t_built = time.monotonic()
+        engine, factory = rc.session_factory(3, url=live.url, extra_settings=live.settings)
+        try:
+            async with rc.read_only(factory) as db:
+                assert (await db.execute(text("SELECT 1"))).scalar() == 1
+                await asyncio.sleep(max(0.0, 2.2 - (time.monotonic() - t_built)))
+                t0 = time.monotonic()
+                try:
+                    await db.execute(text("SELECT pg_sleep(8)"))
+                    word = "finished"
+                except DBAPIError as e:
+                    word = str(e).split("\n")[0]
+                t1 = time.monotonic()
+                return word, t1 - t0, t1 - t_built
+        finally:
+            await engine.dispose()
+    word, own, total = live.run(go())
+    assert "statement timeout" in word, word
+    assert 2.6 <= own < 4.5, own
+    assert 3 < total < 3 + 3 + 1, total
 
 
 def test_live_the_cohort_cutoff_does_not_move_with_the_session_time_zone(live, monkeypatch, capfd):
