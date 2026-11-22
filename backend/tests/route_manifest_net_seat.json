@@ -844,7 +844,7 @@
           ],
           "main",
           "get_player_stats",
-          "1c4f37c176d81222ede46d956c84d159a9751030"
+          "934942f934a920b0e8efbf58280683270b007124"
         ],
         [
           "/api/v1/players/{steam_id}/active-color",
@@ -2236,7 +2236,7 @@
           ],
           "main",
           "lfp_ping",
-          "bab68b29ff33ae03174e39cad2bf02cf3741b49e"
+          "18f0342e0e2b099580d5c02c9ba9d724388e2862"
         ],
         [
           "/api/v1/lobby-bets",

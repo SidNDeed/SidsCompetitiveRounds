@@ -29,7 +29,13 @@ holds, one check per requirement:
      found; the first casual ping waits for it, and a row of two kinds waits
      once, the bound in all;
   B5 a row without casual is posted exactly as before;
-  B6 the bot declares the casual kind on every poll of pending pings.
+  B6 the bot declares the casual kind on every poll of pending pings;
+  B7 when the casual and ranked names resolve to one role, startup says so
+     in one line naming both env keys, and the ping still posts.
+
+After review round 2: C6 (the cooldown compares a floored age; the fake
+applies each cooldown text's own arithmetic) and the base text of the
+differentials read from the tracked fixture lfp_casual_base_spans.json.
 
 After review round 1: C5 (the admission lock, once, before the cooldown
 read, then the insert and the commit) and a fake session that knows its
@@ -50,6 +56,9 @@ comment-only edit in each source) leave every check green.
 
 import asyncio
 import functools
+import hashlib
+import json
+import math
 import os
 import re
 import subprocess
@@ -97,11 +106,36 @@ with open(MAIN, encoding="utf-8") as _fh:
     ROUTE_SRC = route_source(_fh.read())
 
 
-@functools.lru_cache(maxsize=1)
+# The base text of both differentials (this file's C4, test_lfp_casual_pg.py's P1) is a TRACKED fixture
+# (review round 2, F8): `git show` has no such object on a seat or in a copied tree, and a differential
+# against nothing measures nothing. The fixture holds the two route spans of main.py at BASE_COMMIT, with
+# LF newlines; each is checked against its sha256 here before use, and against `git show` where git has
+# the object (test_the_base_fixture_is_main_at_base_commit).
+BASE_FIXTURE = os.path.join(HERE, "lfp_casual_base_spans.json")
+BASE_SHA256 = {"lfp_ping": "1715d953f3eb246d28257a5237a1b95753e239e3dd334df2209fe432579f9f41",
+               "internal_lfp_pings": "eb25d686484f56cad4664379498b82ad3209b06d388ebe87309168715b0f6ced"}
+PEND_START, PEND_END = '@app.get("/api/v1/internal/lfp-pings"', "class _LfpPingAck(BaseModel):"
+
+
+def pending_segment(text):
+    text = text.replace("\r\n", "\n")
+    assert text.count(PEND_START) == 1 and text.count(PEND_END) == 1, "the pending-pings route is not found once"
+    start = text.index(PEND_START)
+    return text[start:text.index(PEND_END, start)]
+
+
+@functools.lru_cache(maxsize=2)
+def base_span(name):
+    with open(BASE_FIXTURE, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    assert doc["commit"] == BASE_COMMIT and doc["file"] == "backend/api/main.py", (doc["commit"], doc["file"])
+    span = doc["spans"][name]
+    assert hashlib.sha256(span.encode("utf-8")).hexdigest() == BASE_SHA256[name], "the base fixture changed: " + name
+    return span
+
+
 def base_src():
-    out = subprocess.run(["git", "-C", REPO, "show", "%s:backend/api/main.py" % BASE_COMMIT],
-                         capture_output=True, check=True, timeout=120)
-    return _segment(out.stdout.decode("utf-8"))
+    return base_span("lfp_ping")
 
 
 # -- fakes: the session and the names the route reads ---------------------------------------------
@@ -155,10 +189,18 @@ class _Result:
 # The statements the fake session knows, by their exact text and exact parameter names (review round 1,
 # findings 5 and 6). A statement whose text differs by one character is refused, never matched on a fragment.
 LOCK_SQL = "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:who AS text)))"
-COOLDOWN_SQL = "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int   FROM lfp_pings WHERE steam_id = :sid"
+# The cooldown read in two texts: the route at BASE_COMMIT rounds the age (::int), the route as it stands
+# floors it (review round 2, F1). The trace names both "cooldown read", so the differential compares what the
+# two routes do; the fake applies each text's own arithmetic.
+COOLDOWN_SQL_ROUNDED = ("SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int   FROM lfp_pings "
+                        "WHERE steam_id = :sid")
+COOLDOWN_SQL = ("SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(created_at))))::int   FROM lfp_pings "
+                "WHERE steam_id = :sid")
+COOLDOWN = "cooldown read"
 INSERT_SQL = ("INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at, modes) "
               "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m), :modes)")
-KNOWN = {LOCK_SQL: {"cls", "who"}, COOLDOWN_SQL: {"sid"}, INSERT_SQL: {"sid", "msg", "m", "modes"}}
+KNOWN = {LOCK_SQL: {"cls", "who"}, COOLDOWN_SQL: {"sid"}, COOLDOWN_SQL_ROUNDED: {"sid"},
+         INSERT_SQL: {"sid", "msg", "m", "modes"}}
 
 
 def _pg_int(seconds):
@@ -173,7 +215,8 @@ class FakeDb:
     The cooldown read applies its own predicates: the rows of steam_id = :sid
     that this session can see (every committed row, and its own rows not yet
     committed), of any modes, and answers MAX(created_at) as whole seconds
-    before now, rounded as ::int rounds, or None with no row. An insert
+    before now, floored by the FLOOR text and rounded as ::int rounds by the
+    other, or None with no row. An insert
     stores its row as PENDING; commit() makes the pending rows durable; close()
     is the session's end and drops what is still pending, as a rollback does.
     `trace` is ONE ordered record of statements and commits."""
@@ -195,13 +238,16 @@ class FakeDb:
         if sql not in KNOWN:
             raise AssertionError("a statement the fake does not know: %r" % sql)
         assert set(params) == KNOWN[sql], ("the parameters of a known statement changed", sql, sorted(params))
-        self.trace.append((sql, params))
+        self.trace.append((COOLDOWN if sql in (COOLDOWN_SQL, COOLDOWN_SQL_ROUNDED) else sql, params))
         if sql == LOCK_SQL:
             assert isinstance(params["cls"], int) and params["who"] == SID, params
             return _Result(None)
-        if sql == COOLDOWN_SQL:
+        if sql in (COOLDOWN_SQL, COOLDOWN_SQL_ROUNDED):
             mine = [r["created"] for r in self.rows + self.pending if r["steam_id"] == params["sid"]]
-            return _Result(_pg_int(self.now - max(mine)) if mine else None)
+            if not mine:
+                return _Result(None)
+            age = self.now - max(mine)
+            return _Result(math.floor(age) if sql == COOLDOWN_SQL else _pg_int(age))
         self.pending.append({"steam_id": params["sid"], "message": params["msg"], "expires_minutes": params["m"],
                              "modes": params["modes"], "created": self.now})
         return _Result(None)
@@ -364,7 +410,7 @@ def check_c4(src, base=None):
             assert d_new.log == d_old.log and d_new.commits == d_old.commits, (name, body)
             # the one statement the route adds is the admission lock, just before the cooldown read, and only there
             assert all(t[0] != LOCK_SQL for t in d_old.trace), (name, body)
-            reads = [i for i, t in enumerate(d_new.trace) if t[0] == COOLDOWN_SQL]
+            reads = [i for i, t in enumerate(d_new.trace) if t[0] == COOLDOWN]
             locks = [i for i, t in enumerate(d_new.trace) if t[0] == LOCK_SQL]
             assert locks == [i - 1 for i in reads], (name, body, d_new.trace)
             compared += 1
@@ -382,23 +428,39 @@ def check_c4(src, base=None):
 def check_c5(src):
     """The order the route works in, from the fake's one trace: the player read, the admission lock, the
     cooldown read, the insert, then the commit, and the row durable after the session ends. The lock's
-    effect (a second request waits, then answers cooldown) is proven on the real database in
-    test_lfp_casual_pg.py; here, that it is taken, once, with the class constant, before the read."""
+    effect (a second request of the player waits until the first one's transaction ends, and after its
+    commit answers cooldown) is proven on the real database in test_lfp_casual_pg.py; here, that the
+    lock is taken, once, with the class constant, before the read."""
     ns = route(src)
     for modes, ranked in (("1v1", True), ("casual", False), ("ffa,casual", True)):
         answer, db = ping(ns, modes, ranked=ranked)
         assert answer == QUEUED, (modes, answer)
-        assert [t[0] for t in db.trace] == ["select players", LOCK_SQL, COOLDOWN_SQL, INSERT_SQL, "COMMIT"], \
+        assert [t[0] for t in db.trace] == ["select players", LOCK_SQL, COOLDOWN, INSERT_SQL, "COMMIT"], \
             (modes, db.trace)
         assert db.trace[1][1] == {"cls": ns["LFP_ADMISSION_LOCK_CLASS"], "who": SID}, db.trace[1]
         assert [r["modes"] for r in db.rows] == [modes] and db.pending == [], (modes, db.rows)
     # a refused request takes the lock only when it reaches the cooldown read, and stores nothing
     answer, db = ping(ns, "casual", rows=({"steam_id": SID, "created": 1000000.0 - 5, "modes": "1v1"},))
     assert answer == {"status": "cooldown", "seconds_left": 3595}
-    assert [t[0] for t in db.trace] == ["select players", LOCK_SQL, COOLDOWN_SQL] and len(db.rows) == 1
+    assert [t[0] for t in db.trace] == ["select players", LOCK_SQL, COOLDOWN] and len(db.rows) == 1
 
 
-ROUTE_CHECKS = {"C1": check_c1, "C2": check_c2, "C3": check_c3, "C4": check_c4, "C5": check_c5}
+# -- C6: the floored age (review round 2, F1) ------------------------------------------------------
+
+def check_c6(src):
+    """The cooldown compares a FLOORED age: a row 3599.5 s old is still inside the hour, one second left,
+    for either kind; a row 3600 s old is past it. (The rounded ::int read 3600 and admitted a second row.)
+    The real database proves the same, for both readers, in test_lfp_casual_pg.py (B1, B2)."""
+    ns = route(src)
+    for kind, ranked in (("1v1", True), ("casual", False)):
+        for age, want in ((3599.5, {"status": "cooldown", "seconds_left": 1}), (3599.999, {"status": "cooldown",
+                          "seconds_left": 1}), (3600.0, QUEUED), (3600.5, QUEUED)):
+            answer, db = ping(ns, kind, ranked=ranked, rows=({"steam_id": SID, "created": 1000000.0 - age,
+                                                               "modes": kind},))
+            assert answer == want, (kind, age, answer)
+
+
+ROUTE_CHECKS = {"C1": check_c1, "C2": check_c2, "C3": check_c3, "C4": check_c4, "C5": check_c5, "C6": check_c6}
 
 
 # -- the bot ---------------------------------------------------------------------------------------
@@ -581,7 +643,35 @@ def check_b5(tree):
         assert kw["allowed_mentions"].roles == [w.guild.roles[0]] and w.lines() == [found("lfp")]
 
 
-BOT_CHECKS = {"B1": check_b1, "B2": check_b2, "B3": check_b3, "B4": check_b4, "B5": check_b5, "B6": check_b6}
+# -- B7: two kinds, one role (review round 2, F7) --------------------------------------------------
+
+SHARED = ("[PING-CHECK] kind=casual startup: the casual and the ranked role names resolve to the same role "
+          "('Ranked Looking For Player'): a casual-only ping mentions that role, as a ranked ping does "
+          "(env LFP_CASUAL_ROLE and env LFP_ROLE)")
+
+
+def check_b7(tree):
+    """When the casual and the ranked names resolve to the SAME role (configured so, or by a normalised
+    alias), startup prints ONE plain line naming both env keys, after both kinds' checks; the ping still
+    posts, mentioning that role. Two different roles, or no casual role, print no such line."""
+    for casual_name in (S.LFP_NAME, "ranked-looking-for-player"):
+        w = S.World(tree, roles=S.open_roles(), casual_name=casual_name)
+        w.startup()
+        shared = [ln for ln in w.log if "resolve to the same role" in ln]
+        assert shared == [SHARED], (casual_name, w.log)
+        checks = [i for i, ln in enumerate(w.log) if ln.startswith("[PING-CHECK] kind=casual startup: role resolved")]
+        assert checks and w.log.index(SHARED) > checks[0], w.log
+        w.lfp(dict(S.PING, modes="casual"))
+        content, kw = S.one(w.queue.sent, "a casual ping on the shared role")
+        assert content == post_text("<@&1>", "casual"), content
+    for roles in (S.open_roles() + [casual_role()], S.open_roles()):
+        w = S.World(tree, roles=roles)
+        w.startup()
+        assert not [ln for ln in w.log if "resolve to the same role" in ln], w.log
+
+
+BOT_CHECKS = {"B1": check_b1, "B2": check_b2, "B3": check_b3, "B4": check_b4, "B5": check_b5, "B6": check_b6,
+              "B7": check_b7}
 
 
 @pytest.mark.parametrize("req", sorted(ROUTE_CHECKS))
@@ -607,9 +697,14 @@ LOCK_MUTANT_OLD = ('    await db.execute(text(\n'
                    '        "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:who AS text)))"\n'
                    '    ), {"cls": LFP_ADMISSION_LOCK_CLASS, "who": steam_id})\n')
 COOLDOWN_READ_OLD = ('    return (await db.execute(text(\n'
-                     '        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "\n'
+                     '        "SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(created_at))))::int "\n'
                      '        "  FROM lfp_pings WHERE steam_id = :sid"\n'
                      '    ), {"sid": steam_id})).scalar()\n')
+# review round 2, F1: the floor removed from the admission's read (the stats reader's twin: STATS_FLOOR_*)
+FLOOR_MUTANT_OLD = '        "SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(created_at))))::int "\n'
+FLOOR_MUTANT_NEW = '        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "\n'
+STATS_FLOOR_OLD = '            "SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(created_at))))::int "\n'
+STATS_FLOOR_NEW = '            "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "\n'
 LOCK_AFTER_READ = COOLDOWN_READ_OLD.replace("    return (await", "    elapsed = (await") + LOCK_MUTANT_OLD \
     + "    return elapsed\n"
 GATE_OLD = '    if (modes := _lfp_modes(req.modes)) != "casual" and not player.ranked_enabled:\n'
@@ -638,6 +733,7 @@ ROUTE_MUTANTS = [
      COOLDOWN_MUTANT_OLD, COOLDOWN_MUTANT_NEW),
     # review round 1, finding 6: the commit before the insert leaves the row to the session's rollback
     ("C1", "the commit moved before the insert (finding 6)", COMMIT_MUTANT_OLD, COMMIT_MUTANT_NEW),
+    ("C6", "the floor removed from the admission's read (round 2, F1)", FLOOR_MUTANT_OLD, FLOOR_MUTANT_NEW),
     ("C5", "the admission lock removed", LOCK_MUTANT_OLD, ""),
     ("C5", "the admission lock taken after the cooldown read", LOCK_MUTANT_OLD + COOLDOWN_READ_OLD,
      LOCK_AFTER_READ),
@@ -677,6 +773,10 @@ BOT_MUTANTS = [
      ")]\n    seen = \", \".join(repr(r.name) for r in near)"),
     ("B4", "the NO line's names in the guild's order, not a stable one",
      "for r in sorted(named, key=lambda r: (getattr(r, \"id\", 0), r.name))", "for r in named"),
+    ("B7", "no line when both kinds resolve to one role (round 2, F7)",
+     "            _ping_log(shared_line)\n", "            pass\n"),
+    ("B7", "the shared-role test inverted",
+     'if getattr(r, "id", None) in ranked_ids]', 'if getattr(r, "id", None) not in ranked_ids]'),
     ("B6", "the bot's declaration of the casual kind dropped",
      'api_get("/internal/lfp-pings?kinds=casual")', 'api_get("/internal/lfp-pings")'),
     ("B5", "a ranked row's headline changed",
@@ -841,3 +941,22 @@ def test_each_client_mutant_turns_its_requirement_red(req, what, where, old, new
     assert texts[where].count(old) == 1, old
     texts[where] = texts[where].replace(old, new, 1)
     _expect_red(CLIENT_CHECKS[req], texts, what=what)
+
+
+# -- the base fixture against git (review round 2, F8) ---------------------------------------------
+
+def test_the_base_fixture_is_main_at_base_commit():
+    """The fixture's two spans are main.py's at BASE_COMMIT, read with `git show`, where git has that
+    object. On a seat or in a copied tree there is no such object: this ONE check is skipped there, with
+    that reason; the differentials themselves run from the fixture everywhere."""
+    try:
+        out = subprocess.run(["git", "-C", REPO, "show", "%s:backend/api/main.py" % BASE_COMMIT],
+                             capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        pytest.skip("git is not usable here (%s): the fixture is checked against git where it is" % ex)
+    if out.returncode != 0:
+        pytest.skip("git has no object %s:backend/api/main.py here (exit %d): a seat or a copied tree"
+                    % (BASE_COMMIT[:12], out.returncode))
+    text = out.stdout.decode("utf-8")
+    assert base_span("lfp_ping") == _segment(text)
+    assert base_span("internal_lfp_pings") == pending_segment(text)

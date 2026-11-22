@@ -13734,11 +13734,11 @@ async def get_player_stats(
     lfp_seconds_left = 0
     try:
         _lfp_elapsed = (await db.execute(text(
-            "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
+            "SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(created_at))))::int "
             "  FROM lfp_pings WHERE steam_id = :sid"
-        ), {"sid": player.steam_id})).scalar()
+        ), {"sid": player.steam_id})).scalar()  # floored, as _lfp_admit reads it
         if _lfp_elapsed is not None:
-            lfp_seconds_left = max(0, 3600 - int(_lfp_elapsed))
+            lfp_seconds_left = max(0, LFP_COOLDOWN_SECONDS - int(_lfp_elapsed))
     except Exception:
         lfp_seconds_left = 0
 
@@ -87186,10 +87186,12 @@ LFP_RANKED_MODES = ("1v1", "2v2", "ffa")
 LFP_MODE_ORDER = LFP_RANKED_MODES + ("casual",)
 # Advisory-lock class for "one looking-for-players admission of a player at a
 # time" (review round 1). The two-key form is a key space of its own, so it
-# never meets the single-key identity locks elsewhere in this module and adds
-# no row lock. Keyed by hashtext(steam_id): requests of one player, of either
-# kind, wait on each other; two players whose hashes collide cost a short wait
-# and nothing else.
+# never meets the single-key identity locks elsewhere in this module, and it
+# adds no row lock on players. Keyed by hashtext(steam_id): requests of one
+# player, of either kind, wait on each other, and so do requests of two
+# players whose hashes collide (their cooldowns stay separate: the read
+# filters the full steam_id). No deadline in this module bounds that wait;
+# see _lfp_admit.
 LFP_ADMISSION_LOCK_CLASS = 461122
 
 
@@ -87203,17 +87205,26 @@ def _lfp_modes(raw) -> str:
 
 async def _lfp_admit(db, steam_id):
     """One admission at a time per player, across both kinds: takes the
-    player's transaction-scoped admission lock, then reads the whole seconds
-    since the player's newest lfp_pings row of any modes (None with no row).
-    A second request of the player waits at the lock until the first one's
-    transaction ends (lfp_ping's commit, or the session's rollback on any
-    other exit), then reads that row and answers cooldown. The caller takes
-    no other waiting lock after it."""
+    player's transaction-scoped admission lock, then reads the whole seconds,
+    FLOORED, since the player's newest lfp_pings row of any modes (None with
+    no row). Floored, so an age of 3599.5 s reads 3599 and is still inside the
+    cooldown (a rounded ::int read 3600 and admitted a second row); the stats
+    route reads the same floored age for lfp_seconds_left.
+
+    A second request of the player (or of a player whose hash collides) waits
+    at the lock until the first one's transaction ends, then reads the rows
+    committed by then: after the first one's commit it reads that row and
+    answers cooldown; after a rollback there is no such row and it can queue.
+    After the lock, the route's statements take their ordinary table locks
+    (the read, then the insert). No deadline in this module bounds the wait:
+    it lasts as long as the first request's transaction, two short statements
+    and a commit. Past the client's 20 seconds the client shows its
+    unreachable text; no ping is lost or doubled by the wait."""
     await db.execute(text(
         "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:who AS text)))"
     ), {"cls": LFP_ADMISSION_LOCK_CLASS, "who": steam_id})
     return (await db.execute(text(
-        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
+        "SELECT FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(created_at))))::int "
         "  FROM lfp_pings WHERE steam_id = :sid"
     ), {"sid": steam_id})).scalar()
 
