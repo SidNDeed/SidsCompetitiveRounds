@@ -17132,6 +17132,40 @@ async def _alt_abandon(db: AsyncSession, ex: Exception) -> None:
         pass
 
 
+def _alt_table_missing(ex) -> bool:
+    """True only when the SQLSTATEs `ex` carries, on itself or on an exception
+    it wraps (.orig, or the explicit cause of `raise ... from`), are 42P01
+    ("the table does not exist") and nothing else, and it carries one. An
+    error raised while another was being handled (__context__) does not wrap
+    it, and a chain that also carries another state is not this failure."""
+    states, todo, seen = set(), [ex], set()
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        for attr in ("sqlstate", "pgcode"):
+            code = getattr(e, attr, None)
+            if isinstance(code, str) and code:
+                states.add(code)
+        todo.append(getattr(e, "orig", None))
+        todo.append(getattr(e, "__cause__", None))
+    return states == {"42P01"}
+
+
+async def _alt_delete_one(db: AsyncSession, stmt, steam_id: str) -> None:
+    """One of account deletion's three DELETEs of the alternate-account
+    signal tables (items 11 and 12), in its own savepoint. A table that does
+    not exist (42P01: a box migration 427 has not reached) is passed over;
+    any other failure is raised and fails the deletion."""
+    try:
+        async with db.begin_nested():
+            await db.execute(stmt, {"sid": steam_id})
+    except Exception as ex:
+        if not _alt_table_missing(ex):
+            raise
+
+
 def _alt_boot() -> None:
     """Load the signal key from the environment and say its state in one
     line, on both roles: `key absent`, `key refused`, or `key loaded id=`
@@ -46824,6 +46858,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
       - deleted_at stamped so the row is hidden from leaderboards
       - personal-only rows (achievements, link codes, region ping maps, 1v1/2v2/1v2 queue
         entries, blocks, Steam sessions) deleted
+      - the account's sign-in evidence rows (steam_signin_facts, steam_family_shares,
+        conn_markers; CHEAT-ALT-1) deleted first, under the identity key, also when
+        no players row exists: that answer is still not_found, and nothing else changes
 
     Requires an HMAC signature over "delete:{steam_id}" using the mod secret,
     AND a verified Steam session for the same steam_id — STRICT, not the
@@ -46890,10 +46927,22 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # that hasn't acquired it yet blocks, then fails its post-lock tombstone/
     # live re-reads. Global order: identity -> lobby/series -> queue -> lease.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
+    # CHEAT-ALT-1 (items 11, 12): the account's rows of the three
+    # alternate-account signal tables go here, under the identity key and
+    # before the player read, so an identity with no players row loses them
+    # too; both early answers below commit them.
+    await _alt_delete_one(db, text(
+        "DELETE FROM conn_markers WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text(
+        "DELETE FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text(
+        "DELETE FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)"), steam_id)
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
+        await db.commit()
         return {"status": "not_found", "steam_id": steam_id}
     if player.deleted_at is not None:
+        await db.commit()
         return {"status": "already_deleted", "steam_id": steam_id}
 
     pid = player.id
