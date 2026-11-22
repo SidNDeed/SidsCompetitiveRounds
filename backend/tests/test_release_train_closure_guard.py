@@ -1,27 +1,9 @@
-"""The release tool's closure guard (item 41, after round guard-r1).
-
-/health's review_eval is what review_rules.review_eval() returns in the running api: the leading hex of the framed
-digest over the review evaluator's files as review_boot executed them. A batch whose deploy changes one of them
-changes that word, and an installed rules revision built for the old word stops loading. The release tool
-(scripts/deploy/release_train.py, local to the operating seat and not tracked) refuses before anything is merged or
-deployed unless the batch entry answers for a change: closure_change.eval_to equal to the tip's word and a health
-list that expects that word on both roles.
-
-Two methods hold it (round guard-r1):
-- THE WORD OF A COMMIT is computed by that commit's own routine over that commit's own bytes: the tool exports
-  backend/api from git objects into a temporary directory and runs review_boot and review_rules.review_eval() there
-  in a child interpreter. The tests here compare the tool's answer with the routine run directly over the same
-  bytes, on the constructions the review named (line ends inside a comment, a boot file in CRLF at the size bound,
-  the domain bound a second time) and on a seventh file.
-- THE TREE THAT IS DEPLOYED is judged: _deploy_both, the one deploy site (a census over the tool's syntax tree), hands
-  the exact sha to closure_judge_deploy before the first box.
-
-Every test builds a scratch git repository holding LF copies of this checkout's evaluator files, and fakes for the
-two boxes' /health and code state. Without the tool every test here skips, as the tool's other tests do; the routine's
-child needs a Windows job object, so off Windows they skip as well.
-"""
+"""The release tool's closure guard (item 41). Without the tool every test here skips."""
 import ast
+import hashlib
 import importlib.util
+import itertools
+import json
 import os
 import re
 import subprocess
@@ -33,9 +15,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 API = REPO / "backend" / "api"
 PRIMARY, STANDBY = "primary-box", "standby-box"
-OLD = (True, False, True, ["old"])
-NEW = (True, True, False, ["new"])
-UNKNOWN = (True, False, False, ["neither"])
 EVALUATOR = ("card_measures.py", "combat_measures.py", "identity_clock_measures.py", "review_boot.py",
              "review_measures.py", "review_rules.py")
 DIRECT = ("import sys; sys.path[:0] = [sys.argv[1]]; import review_boot, review_rules; "
@@ -54,7 +33,6 @@ def _release_train():
 
 @pytest.fixture(autouse=True)
 def _no_network_program(monkeypatch):
-    """No test here spawns curl, ssh or scp; a refused spawn is recorded and asserted at teardown."""
     real, spawned = subprocess.run, []
 
     def guard(cmd, *args, **kw):
@@ -66,13 +44,10 @@ def _no_network_program(monkeypatch):
         return real(cmd, *args, **kw)
     monkeypatch.setattr(subprocess, "run", guard)
     yield
-    assert spawned == [], "this test tried to spawn %s" % ", ".join(spawned)
+    assert spawned == [], spawned
 
 
 class Scratch:
-    """A git repository with backend/api holding LF copies of this checkout's evaluator files on main, and a lane
-    branch whose commits change them."""
-
     def __init__(self, root):
         self.root = root
         self.repo = root / "repo"
@@ -97,17 +72,27 @@ class Scratch:
                            cwd=str(self.repo), capture_output=True, check=True)
         return p.stdout.decode("utf-8").strip()
 
+    def index_commit(self, put, drop=()):
+        """A commit made in the index alone (paths spelled exactly, whatever the file system folds)."""
+        for path in drop:
+            self.git("rm", "-q", "--cached", path)
+        for path, data in put.items():
+            blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], input=data, cwd=str(self.repo),
+                                  capture_output=True, check=True).stdout.decode("ascii").strip()
+            self.git("update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, path))
+        self.git("commit", "-q", "-m", "index commit")
+        return self.git("rev-parse", "HEAD")
+
     def path(self, name):
         return self.repo / "backend" / "api" / name
 
     def commit(self, edits, message="lane"):
-        """Apply {file: bytes, None (delete) or a function of the old bytes} on the checked-out branch and commit;
-        returns the sha."""
         for name, new in edits.items():
-            p = self.path(name)
+            p = self.repo / name if "/" in name else self.path(name)
             if new is None:
                 p.unlink()
             else:
+                p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(new(p.read_bytes()) if callable(new) else new)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
@@ -115,8 +100,6 @@ class Scratch:
 
 
 def _direct(scratch):
-    """The routine run directly over the scratch checkout's backend/api as it stands on disk (the bytes just
-    committed): the commit's own review_boot and review_rules in an isolated interpreter."""
     p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", DIRECT, str(scratch.repo / "backend" / "api")],
                        capture_output=True, timeout=120)
     return p.stdout.decode("ascii", "replace").strip() if p.returncode == 0 else None
@@ -131,16 +114,14 @@ class Boxes:
     def __init__(self, word, rules="absent"):
         self.health = {PRIMARY: {"review_eval": word, "review_rules": rules},
                        STANDBY: {"review_eval": word, "review_rules": rules}}
-        self.state = {PRIMARY: OLD, STANDBY: OLD}
 
     def health_json(self, host):
+        if self.health[host] is None:
+            raise OSError("silent")
         return dict(self.health[host])
 
-    def code_state(self, host):
-        return self.state[host]
 
-
-def _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change=None, rows=None):
+def _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change=None, rows=None, base=None):
     monkeypatch.setattr(rt, "REPO", str(scratch.repo))
     monkeypatch.setattr(rt, "PRIMARY", PRIMARY)
     monkeypatch.setattr(rt, "STANDBY", STANDBY)
@@ -151,11 +132,16 @@ def _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change=None, rows=None
     monkeypatch.setattr(rt, "ALL_SQL", [])
     monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "state" / "train-state.json"))
     monkeypatch.setattr(rt, "health_json", boxes.health_json)
-    monkeypatch.setattr(rt, "code_state", boxes.code_state)
+    monkeypatch.setattr(rt, "closure_base", lambda: (base or scratch.base, "state"))
+
+
+def _rw(rt, rev):
+    r = rt.closure_routine(rev)
+    return r["word"] if r else None
 
 
 def _word(rt, rev):
-    word = rt.closure_routine_word(rev)
+    word = _rw(rt, rev)
     assert word is not None and rt.CLOSURE_WORD.fullmatch(word), word
     return word
 
@@ -167,56 +153,36 @@ def world(tmp_path, monkeypatch):
         pytest.skip("the closure routine's child runs in a Windows job object")
     scratch = Scratch(tmp_path / "scratch")
     monkeypatch.setattr(rt, "REPO", str(scratch.repo))
-    base_word = _word(rt, scratch.base)
-    return rt, scratch, base_word
+    return rt, scratch, _word(rt, scratch.base)
 
 
 def _changed_tip(scratch):
     return scratch.commit({"review_rules.py": lambda raw: raw + b"\n# a change of the evaluator\n"})
 
 
-def _deploys(monkeypatch, rt):
-    """zap and the per-box checks of _deploy_both replaced by recorders: what a deploy would have started."""
-    plays = []
-    monkeypatch.setattr(rt, "zap", lambda playbook, limit=None, extra=None, **kw: plays.append((playbook, extra))
-                        or "ok failed=0")
-    monkeypatch.setattr(rt, "assert_control", lambda host: None)
-    monkeypatch.setattr(rt, "assert_box_build", lambda host, expect, sha: None)
-    return plays
+def _predict(rt, rev, base):
+    return rt.closure_prediction(rev, rev, base, "the test tree")
 
 
-def _record(word):
-    return {"from": word, "rules": {"primary": "absent", "standby": "absent"}, "tip": "f" * 40, "tip_word": word,
-            "stage": "code", "recorded_at": "2026-11-22T00:00:00Z"}
-
-
-# ---------------------------------------------------------------- the word of a commit (class B)
+# ---------------------------------------------------------------- the word of a commit
 
 
 def test_the_tools_word_is_the_routines_own_on_this_checkouts_files(world):
-    """The scratch base holds this checkout's six files: the tool's word is the routine's, run directly."""
     rt, scratch, base_word = world
     assert base_word == _direct(scratch)
 
 
 def test_line_ends_inside_a_comment_are_read_as_the_routine_reads_them(world):
-    """Review finding 3: a comment ending CR CR CR LF, then CR CR LF, in a module review_boot executes. Each gives
-    exactly the word the routine gives over those bytes, and the two words differ, so the bytes reach the routine as
-    git stores them."""
     rt, scratch, base_word = world
     words = []
     for ending in (b"\r\r\r\n", b"\r\r\n"):
-        sha = scratch.commit({"review_measures.py": lambda raw, e=ending: raw.split(b"\n# crs")[0]
-                              + b"\n# crs" + e})
+        sha = scratch.commit({"review_measures.py": lambda raw, e=ending: raw.split(b"\n# crs")[0] + b"\n# crs" + e})
         words.append(_word(rt, sha))
         assert words[-1] == _direct(scratch), (ending, words[-1])
     assert words[0] != words[1], words
 
 
-def test_a_boot_file_in_crlf_over_the_bound_is_refused_as_the_server_refuses_it(world, monkeypatch, tmp_path):
-    """Review finding 4: review_boot.py padded so its LF bytes are inside the loader's size bound and its CRLF bytes
-    over it. In LF the tool's word is the routine's word; in CRLF the routine answers refused (the server bounds
-    the raw bytes), the tool says the same, and the guard refuses that tip."""
+def test_a_boot_file_in_crlf_over_the_bound_answers_refused_and_the_prediction_refuses(world, monkeypatch):
     rt, scratch, base_word = world
     bound = 1048576
     boot = scratch.path("review_boot.py").read_bytes()
@@ -226,17 +192,14 @@ def test_a_boot_file_in_crlf_over_the_bound_is_refused_as_the_server_refuses_it(
     lf = scratch.commit({"review_boot.py": padded})
     assert _word(rt, lf) == _direct(scratch)
     crlf = scratch.commit({"review_boot.py": padded.replace(b"\n", b"\r\n")})
-    assert _direct(scratch) == "refused"
-    assert rt.closure_routine_word(crlf) == "refused"
-    _bind(monkeypatch, rt, scratch, crlf, Boxes(base_word), tmp_path, rows=_rows(base_word))
+    assert _direct(scratch) == "refused" and _rw(rt, crlf) == "refused"
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
     with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=False)
+        _predict(rt, crlf, scratch.base)
     assert "answers refused" in str(exc.value), str(exc.value)
 
 
 def test_the_domain_bound_a_second_time_is_read_as_the_routine_reads_it(world):
-    """Review finding 5: review_rules.py binds CODE_DOMAIN again through a match capture. The tool's word is the word
-    the routine computes with the domain the module ends with, and it differs from the base word."""
     rt, scratch, base_word = world
     tip = scratch.commit({"review_rules.py": lambda raw: raw + b"\n\nmatch b'scr-review-code-closure-x\\n':\n"
                                                                 b"    case CODE_DOMAIN:\n        pass\n"})
@@ -245,30 +208,20 @@ def test_the_domain_bound_a_second_time_is_read_as_the_routine_reads_it(world):
 
 
 def test_a_seventh_file_is_covered_when_the_loader_executes_it_and_refused_when_it_does_not(world):
-    """R4 and review finding 7: a file added to CODE_REQUIRED and to review_boot.SOURCE_ONLY and imported by
-    review_rules is in the word, as the routine computes it; a change of that file alone moves the word. Listed in
-    CODE_REQUIRED without being executed by the loader, the routine answers refused, and so does the tool."""
     rt, scratch, base_word = world
 
-    def listed(raw):
-        out, n = re.subn(rb'(CODE_REQUIRED = \([^)]*)\)', lambda m: m.group(1) + b', "extra_measures.py")', raw,
-                         count=1)
-        assert n == 1
-        return out
-
-    def loaded(raw):
-        out, n = re.subn(rb'(SOURCE_ONLY = \([^)]*)\)', lambda m: m.group(1) + b', "extra_measures")', raw, count=1)
-        assert n == 1
-        return out
-
-    def imported(raw):
-        out, n = re.subn(rb"\nimport combat_measures as cbm\n", b"\nimport combat_measures as cbm\n"
-                                                                 b"import extra_measures as _xm  # noqa: F401\n", raw,
-                         count=1)
-        assert n == 1
-        return out
+    def sub(pattern, repl):
+        def f(raw):
+            out, n = re.subn(pattern, repl, raw, count=1)
+            assert n == 1
+            return out
+        return f
+    listed = sub(rb'(CODE_REQUIRED = \([^)]*)\)', lambda m: m.group(1) + b', "extra_measures.py")')
+    loaded = sub(rb'(SOURCE_ONLY = \([^)]*)\)', lambda m: m.group(1) + b', "extra_measures")')
+    imported = sub(rb"\nimport combat_measures as cbm\n",
+                   b"\nimport combat_measures as cbm\nimport extra_measures as _xm  # noqa: F401\n")
     unloaded = scratch.commit({"extra_measures.py": b"X = 1\n", "review_rules.py": listed})
-    assert _direct(scratch) == "refused" and rt.closure_routine_word(unloaded) == "refused"
+    assert _direct(scratch) == "refused" and _rw(rt, unloaded) == "refused"
     tip = scratch.commit({"review_boot.py": loaded, "review_rules.py": imported})
     word = _word(rt, tip)
     assert word == _direct(scratch) and word != base_word
@@ -276,442 +229,460 @@ def test_a_seventh_file_is_covered_when_the_loader_executes_it_and_refused_when_
     assert _word(rt, again) == _direct(scratch) != word
 
 
-def test_a_commit_without_the_routine_is_unknown_and_refused(world, monkeypatch, tmp_path):
-    """A tip whose review_rules has no review_eval (or no review_boot.py at all): the word is unknown, and the guard
-    refuses, with a fixed line."""
+def test_a_commit_without_the_routine_is_unknown_and_refused(world, monkeypatch):
     rt, scratch, base_word = world
     gone = scratch.commit({"review_rules.py": lambda raw: raw.replace(b"def review_eval(", b"def review_eval_gone(")})
-    assert rt.closure_routine_word(gone) is None
-    no_boot = scratch.commit({"review_boot.py": None})
-    assert rt.closure_routine_word(no_boot) is None
-    _bind(monkeypatch, rt, scratch, gone, Boxes(base_word), tmp_path, rows=_rows(base_word))
+    assert _rw(rt, gone) is None
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
     with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=False)
-    assert "could not be run to its one line, so its word is unknown" in str(exc.value), str(exc.value)
+        _predict(rt, gone, scratch.base)
+    assert "did not run to its lines" in str(exc.value), str(exc.value)
 
 
-# ---------------------------------------------------------------- R1
+# ---------------------------------------------------------------- the envelope (B3, B4)
 
 
-def test_equal_words_ask_for_no_key_and_record_the_boxes_word(world, monkeypatch, tmp_path):
-    """The tip leaves the evaluator as the boxes run it: no closure_change is asked and the word is recorded."""
+def test_i_a_file_the_loader_opens_under_another_spelling_is_refused(world, monkeypatch):
     rt, scratch, base_word = world
-    tip = scratch.commit({"main.py": b"# an api file outside the evaluator\n"}, "no evaluator change")
-    boxes = Boxes(base_word)
-    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, rows=_rows(base_word))
-    st = {}
-    rt.closure_guard(st, "check", write=True)
-    assert st[rt.CLOSURE_STATE_KEY]["from"] == base_word
-    assert rt.load_state()[rt.CLOSURE_STATE_KEY]["tip_word"] == base_word
-
-
-def test_a_change_without_the_key_is_refused_by_the_code_phase_before_the_merge(world, monkeypatch, tmp_path):
-    """The code phase of a batch with no sql: the negative control passes, then the guard refuses at the reviewed
-    tip, naming the tip's word and the boxes' word, before any lease, merge, push or deploy."""
-    rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    assert tip_word != base_word
-    boxes = Boxes(base_word)
-    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, rows=_rows(base_word))
-    monkeypatch.setattr(rt, "require_rollback_point", lambda *a, **kw: None)
-    touched = []
-    for name in ("git_child", "blocking_child", "zap", "controller_lease_session", "read_code_world"):
-        monkeypatch.setattr(rt, name, lambda *a, _n=name, **kw: touched.append(_n))
-    main_before = scratch.git("rev-parse", "refs/heads/main")
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
+    raw = scratch.path("review_measures.py").read_bytes()
+    tip = scratch.index_commit({"backend/api/REVIEW_measures.py": raw}, drop=("backend/api/review_measures.py",))
     with pytest.raises(rt.Fail) as exc:
-        rt.phase_code(type("Args", (), {"go": True})(), {"schema_done": True})
-    msg = str(exc.value)
-    assert tip_word in msg and base_word in msg and "no closure_change" in msg, msg
-    assert touched == [] and scratch.git("rev-parse", "refs/heads/main") == main_before
+        _predict(rt, tip, scratch.base)
+    assert "(i)" in str(exc.value), str(exc.value)
 
 
-def test_a_wrong_eval_to_is_refused(world, monkeypatch, tmp_path):
+def test_i_two_directories_that_differ_only_by_case_are_unknown(world, monkeypatch):
     rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    wrong = "0" * 8 if tip_word != "0" * 8 else "1" * 8
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, change={"eval_to": wrong}, rows=_rows(wrong))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "eval_to is %s" % wrong in str(exc.value) and tip_word in str(exc.value), str(exc.value)
+    ok = scratch.index_commit({"backend/api/pkg/a.py": b"A = 1\n", "backend/api/pkg/b.py": b"B = 1\n"})
+    assert _rw(rt, ok) == base_word
+    tip = scratch.index_commit({"backend/api/Pkg/b.py": b"B = 1\n"}, drop=("backend/api/pkg/b.py",))
+    assert _rw(rt, tip) is None
 
 
-def test_the_key_with_the_health_list_still_at_the_old_word_is_refused(world, monkeypatch, tmp_path):
+def test_ii_an_attributes_line_that_can_match_backend_api_is_refused_and_mains_lines_pass(world, monkeypatch):
     rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, change={"eval_to": tip_word},
-          rows=_rows(base_word))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "does not expect review_eval=%s" % tip_word in str(exc.value), str(exc.value)
-    # the control: the same entry with the list at the tip's word passes
-    monkeypatch.setattr(rt, "HEALTH_EXPECT", _rows(tip_word))
-    rt.closure_guard({}, "check", write=True)
-
-
-# ---------------------------------------------------------------- R2
-
-
-def test_an_installed_revision_without_rules_next_is_refused_and_with_it_the_staging_proof_is_owed(
-        world, monkeypatch, tmp_path):
-    rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    installed, nxt = "a" * 12, "b" * 12
-    boxes = Boxes(base_word, rules=installed)
-    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change={"eval_to": tip_word}, rows=_rows(tip_word, nxt))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "names no rules_next" in str(exc.value), str(exc.value)
-    monkeypatch.setattr(rt, "CLOSURE_CHANGE", rt.closure_change_form("test", {"eval_to": tip_word,
-                                                                              "rules_next": nxt}))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "is not built yet" in str(exc.value), str(exc.value)
-
-
-# ---------------------------------------------------------------- R3 and R5
-
-
-def test_a_silent_box_is_refused(world, monkeypatch, tmp_path):
-    rt, scratch, base_word = world
-    boxes = Boxes(base_word)
-    boxes.health[STANDBY] = {}
-    _bind(monkeypatch, rt, scratch, scratch.base, boxes, tmp_path, rows=_rows(base_word))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "the standby did not answer" in str(exc.value), str(exc.value)
-
-
-def test_boxes_that_disagree_are_refused(world, monkeypatch, tmp_path):
-    rt, scratch, base_word = world
-    other = "0" * 8 if base_word != "0" * 8 else "1" * 8
-    boxes = Boxes(base_word)
-    boxes.health[STANDBY]["review_eval"] = other
-    _bind(monkeypatch, rt, scratch, scratch.base, boxes, tmp_path, rows=_rows(base_word))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "disagree" in str(exc.value) and other in str(exc.value), str(exc.value)
-
-
-def test_the_guards_refusals_are_fixed_lines_without_text_from_outside(world, monkeypatch, tmp_path):
-    """R5 and review finding 8: a box's review_eval or review_rules out of form, a /health read that fails with its
-    own text, and a reviewed tip git does not hold: each refusal is the guard's fixed line, and none carries the
-    value or the text it was handed."""
-    rt, scratch, base_word = world
-    planted = "planted-text-0"
-    for key, value in (("review_eval", planted), ("review_rules", planted)):
-        boxes = Boxes(base_word)
-        boxes.health[PRIMARY][key] = value
-        _bind(monkeypatch, rt, scratch, scratch.base, boxes, tmp_path, rows=_rows(base_word))
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
+    mains = (REPO / ".gitattributes").read_bytes().replace(b"\r\n", b"\n")
+    ok = scratch.commit({"./.gitattributes": mains})
+    assert _predict(rt, ok, scratch.base) == base_word
+    for line in (b"backend/api/review_boot.py text eol=crlf\n", b"*.py text eol=crlf\n", b"backend/** -text\n"):
+        bad = scratch.commit({"./.gitattributes": mains + line})
         with pytest.raises(rt.Fail) as exc:
-            rt.closure_guard({}, "check", write=False)
-        assert "the primary reads a %s that is not" % key in str(exc.value) and planted not in str(exc.value), \
-            str(exc.value)
-
-    def failing(host):
-        raise rt.Fail("command failed (rc=7): %s" % planted)
-    _bind(monkeypatch, rt, scratch, scratch.base, Boxes(base_word), tmp_path, rows=_rows(base_word))
-    monkeypatch.setattr(rt, "health_json", failing)
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=False)
-    assert "reading /api/v1/health of the primary did not succeed" in str(exc.value), str(exc.value)
-    assert planted not in str(exc.value), str(exc.value)
-    _bind(monkeypatch, rt, scratch, "e" * 40, Boxes(base_word), tmp_path, rows=_rows(base_word))
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=False)
-    assert "its word is unknown" in str(exc.value) and "fatal" not in str(exc.value), str(exc.value)
+            _predict(rt, bad, scratch.base)
+        assert "(ii)" in str(exc.value), (line, str(exc.value))
 
 
-# ---------------------------------------------------------------- R6
-
-
-def _deployed_change(world, monkeypatch, tmp_path):
-    """A run that recorded the boxes' word, merged (code_sha) and deployed the primary only."""
+def test_iii_a_build_file_changed_needs_its_sha256_in_the_key(world, monkeypatch):
     rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    boxes = Boxes(base_word)
-    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change={"eval_to": tip_word}, rows=_rows(tip_word))
-    st = {"schema_done": True}
-    rt.closure_guard(st, "code", write=True)
-    assert st[rt.CLOSURE_STATE_KEY]["from"] == base_word
-    st["code_sha"] = "c" * 40
-    boxes.health[PRIMARY]["review_eval"] = tip_word
-    boxes.state[PRIMARY] = NEW
-    return rt, scratch, boxes, st, base_word, tip_word
-
-
-def test_a_run_stopped_after_the_primarys_deploy_resumes(world, monkeypatch, tmp_path):
-    """The primary in the NEW state at the tip's word, the standby in the OLD state at the recorded word: the resumed
-    code phase's guard passes, and so does a second check; once the standby is deployed too, it passes again."""
-    rt, scratch, boxes, st, base_word, tip_word = _deployed_change(world, monkeypatch, tmp_path)
-    rt.closure_guard(st, "code", write=True)
-    rt.closure_guard(st, "check", write=True)
-    assert st[rt.CLOSURE_STATE_KEY]["from"] == base_word
-    boxes.health[STANDBY]["review_eval"] = tip_word
-    boxes.state[STANDBY] = NEW
-    rt.closure_guard(st, "check", write=True)
-
-
-def test_a_box_at_neither_word_is_refused_after_the_record_binds(world, monkeypatch, tmp_path):
-    rt, scratch, boxes, st, base_word, tip_word = _deployed_change(world, monkeypatch, tmp_path)
-    third = next(w for w in ("0" * 8, "1" * 8, "2" * 8) if w not in (base_word, tip_word))
-    boxes.health[STANDBY]["review_eval"] = third
+    base = scratch.commit({"Dockerfile": b"FROM x\nCOPY . .\n"}, "base with a Dockerfile")
+    body = b"FROM x\nCOPY . .\nRUN echo changed\n"
+    tip = scratch.commit({"Dockerfile": body})
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
     with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard(st, "code", write=True)
-    assert third in str(exc.value) and base_word in str(exc.value), str(exc.value)
-    boxes.health[STANDBY]["review_eval"] = base_word
-    boxes.state[STANDBY] = UNKNOWN
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard(st, "code", write=True)
-    assert "reads as neither build" in str(exc.value), str(exc.value)
+        _predict(rt, tip, base)
+    assert "(iii) backend/api/Dockerfile" in str(exc.value), str(exc.value)
+    key = {"build": {"backend/api/Dockerfile": hashlib.sha256(body).hexdigest()}}
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", rt.closure_change_form("test", key))
+    assert _predict(rt, tip, base) == base_word
 
 
-def test_a_merge_recorded_without_a_word_takes_the_old_boxs_word_and_goes_on(world, monkeypatch, tmp_path):
-    """A state file that holds the merge (code_sha) but no recorded word, the primary in the NEW state at the tip's
-    word: the standby's word in the OLD state is taken as the word before the landing, recorded, and the entry is
-    held to it. Without the merge recorded, the same reading is refused (a box runs new code no step of this run
-    deployed)."""
+def test_iii_a_script_the_dockerfile_runs_joins_the_set_from_the_dockerfiles_own_lines(world, monkeypatch):
     rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    boxes = Boxes(base_word)
-    boxes.health[PRIMARY]["review_eval"] = tip_word
-    boxes.state[PRIMARY] = NEW
-    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change={"eval_to": tip_word}, rows=_rows(tip_word))
-    st = {"code_sha": "c" * 40}
-    rt.closure_guard(st, "code", write=True)
-    assert st[rt.CLOSURE_STATE_KEY]["from"] == base_word
+    base = scratch.commit({"Dockerfile": b"FROM x\nCOPY . .\nRUN python -B stamp_files.py /app\n",
+                           "stamp_files.py": b"print(1)\n"}, "base with a build script")
+    tip = scratch.commit({"stamp_files.py": b"print(2)\n"})
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
     with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "check", write=True)
-    assert "no word is recorded" in str(exc.value), str(exc.value)
+        _predict(rt, tip, base)
+    assert "(iii) backend/api/stamp_files.py" in str(exc.value), str(exc.value)
 
 
-def test_the_merge_of_main_and_the_tip_must_carry_the_tips_word(world, monkeypatch, tmp_path):
-    """Main moved one evaluator file after the lane's base: what would deploy (the merge) is not what the tip
-    holds, and the code stage refuses before the merge; the same tip passes in check, which merges nothing."""
+def test_iv_a_store_on_the_evaluator_from_outside_is_refused(world, monkeypatch):
     rt, scratch, base_word = world
-    tip = scratch.commit({"review_measures.py": lambda raw: raw + b"\n# the lane\n"})
-    tip_word = _word(rt, tip)
-    scratch.git("checkout", "-q", "main")
-    scratch.commit({"combat_measures.py": lambda raw: raw + b"\n# main moved\n"}, "main moved")
-    scratch.git("checkout", "-q", "lane")
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, change={"eval_to": tip_word},
-          rows=_rows(tip_word))
-    rt.closure_guard({}, "check", write=False)
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "code", write=False)
-    assert "the merge of main and the reviewed tip" in str(exc.value) and tip_word in str(exc.value), str(exc.value)
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
+    for body in (b"import review_rules as _r\n_r.CODE_DOMAIN += b'changed'\n",
+                 b"import seat_mod as _s\n_s.rr.CODE_DOMAIN = b'x'\n",
+                 b"from review_rules import CODE_REQUIRED\nCODE_REQUIRED.append('x')\n",
+                 b"import review_rules\nsetattr(review_rules, 'CODE_DOMAIN', b'x')\n",
+                 b"import review_rules as rr\ndef f(rr):\n    return rr\n"):
+        tip = scratch.commit({"seat_mod.py": b"import review_rules as rr\n", "main.py": body})
+        with pytest.raises(rt.Fail) as exc:
+            _predict(rt, tip, scratch.base)
+        assert "(iv)" in str(exc.value), (body, str(exc.value))
 
 
-# ---------------------------------------------------------------- the tree that is deployed (class A)
-
-
-# Every place the tool starts the deploy play, or another deploy, and why it is placed. A site not listed here is a
-# failure that names it.
-_DEPLOY_SITES = {
-    ("_deploy_both", "zap", "'deploy-scr-backend.yml'"): "the one deploy site; closure_judge_deploy judges its sha first",
-    ("phase_snapshot", "zap", "'snapshot-scr.yml'"): "a snapshot of the boxes: no tree is deployed",
-    ("phase_bot", "blocking_child", "ssh_argv(PRIMARY, 'deploy-bot')"):
-        "the bot is rebuilt on the primary from the tree the code deploy left there (no sha of its own); the api, "
-        "whose review_eval the guard holds, is not the bot",
-}
-
-
-def _top_functions(tree):
-    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-
-
-def test_every_deploy_goes_through_the_one_wrapper_that_judges_its_sha():
-    """Review findings 1 and 2, the census: every call of zap and every deploy wrapper verb in the tool is a site
-    _DEPLOY_SITES names; the deploy play's name and its sha variable appear nowhere but in _deploy_both and the
-    registry's measure; _deploy_both judges `sha` (never rebound there) before its first box, and every caller of
-    _deploy_both hands it the batch's state."""
+def test_iv_mains_backend_api_holds_no_form_the_census_refuses():
     rt = _release_train()
-    src = Path(rt.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    fns = _top_functions(tree)
-    found, strays = set(), []
-    for name, fn in fns.items():
-        for n in ast.walk(fn):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in rt.RUNNERS:
-                # every process start: the deploy play (zap) and any wrapper verb that names a deploy
-                pos = (0,) if n.func.id == "zap" else rt.RUNNERS[n.func.id][0]
-                text = ", ".join(ast.unparse(n.args[i]) for i in pos if i < len(n.args))
-                if n.func.id == "zap" or "deploy" in text:
-                    key = (name, n.func.id, text)
-                    (found.add(key) if key in _DEPLOY_SITES else strays.append(key))
-            if isinstance(n, ast.Constant) and isinstance(n.value, str) and (
-                    "deploy-scr-backend" in n.value or "scr_deploy_ref" in n.value) \
-                    and name not in ("_deploy_both", "_reg_zap"):
-                strays.append((name, "a constant naming a deploy", n.value[:60]))
-    for n in tree.body:
-        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id not in ("COMMAND_REGISTRY",)
-                                             for t in n.targets):
-            for c in ast.walk(n):
-                if isinstance(c, ast.Constant) and isinstance(c.value, str) and "deploy-scr-backend" in c.value:
-                    strays.append(("module level", ast.unparse(n.targets[0]), c.value[:60]))
-    assert strays == [] and found == set(_DEPLOY_SITES), (strays, set(_DEPLOY_SITES) - found)
-    body = fns["_deploy_both"].body
-    first = body[1] if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) else body[0]
-    assert ast.unparse(first) == "closure_judge_deploy(st, sha, expect)", ast.unparse(first)
-    assert not [n for n in ast.walk(fns["_deploy_both"]) if isinstance(n, ast.Name) and n.id == "sha"
-                and isinstance(n.ctx, ast.Store)]
-    callers = [(name, n) for name, fn in fns.items() for n in ast.walk(fn)
-               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_deploy_both"]
-    assert sorted(c[0] for c in callers) == ["phase_code", "phase_deploy_precursor"], callers
-    for name, n in callers:
-        assert [ast.unparse(k.value) for k in n.keywords if k.arg == "st"] == ["st"], (name, ast.unparse(n))
+    paths = [p.relative_to(API).as_posix() for p in API.rglob("*.py")]
+    count, hits = rt.closure_census(str(API), paths, list(EVALUATOR))
+    assert count >= 30 and hits == [], hits[:5]
 
 
-def test_the_phases_hand_the_guard_their_state_before_any_lease():
-    """Limit L8 of round 1: the phases' guard calls, read from the tool's syntax tree. phase_precursor and phase_code
-    each ask the guard (with the batch's state) before their first lease; the code phase asks it again for a
-    resumed run; phase_check asks it."""
+def test_the_base_must_be_an_ancestor_of_the_judged_tree(world, monkeypatch):
+    rt, scratch, base_word = world
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
+    lane = scratch.commit({"main.py": b"# lane\n"})
+    scratch.git("checkout", "-q", "main")
+    other = scratch.commit({"main.py": b"# main\n"}, "main moved")
+    scratch.git("checkout", "-q", "lane")
+    with pytest.raises(rt.Fail) as exc:
+        _predict(rt, lane, other)
+    assert "not an ancestor" in str(exc.value), str(exc.value)
+
+
+# ---------------------------------------------------------------- the table (A-1)
+
+O_W, N_W, X_W = "aaaa0000", "bbbb1111", "cccc2222"
+TIP, BASE, PRE, CODE = "a" * 40, "b" * 40, "1" * 40, "2" * 40
+AXES = (("rec", ("absent", "valid", "invalid")), ("pre", (False, True)), ("code", (False, True)),
+        ("P", ("O", "N", "X", "S")), ("Sb", ("O", "N", "X", "S")), ("key", ("absent", "valid", "invalid")),
+        ("call", ("F", "W", "Jp", "Jc")))
+
+
+def _words(c):
+    new = O_W if c["key"] == "absent" else N_W
+    return {"O": O_W, "N": new, "X": X_W, "S": None}, new
+
+
+def _as8(c):
+    w, new = _words(c)
+    p, s = w[c["P"]], w[c["Sb"]]
+    return p in (O_W, new) and s in (O_W, new) and not (new != O_W and p == O_W and s == new)
+
+
+ROWS = (   # (row, predicate over a cell, outcome): the first matching row is the cell's one outcome
+    (1, lambda c: c["key"] == "invalid", "refuse"),
+    (2, lambda c: (c["pre"] or c["code"]) and c["rec"] == "invalid", "refuse"),
+    (3, lambda c: (c["pre"] or c["code"]) and c["rec"] == "absent", "refuse"),
+    (4, lambda c: c["call"] in "FW" and not (c["pre"] or c["code"])
+        and _words(c)[0][c["P"]] == O_W and _words(c)[0][c["Sb"]] == O_W, "pass"),
+    (5, lambda c: c["call"] in "FW" and not (c["pre"] or c["code"]), "refuse"),
+    (6, lambda c: c["call"] == "Jp" and not c["pre"], "refuse"),
+    (7, lambda c: c["call"] == "Jc" and not c["code"], "refuse"),
+    (8, lambda c: c["call"] == "Jp" and c["code"], "refuse"),
+    (9, lambda c: c["call"] in "FW" and _as8(c), "pass"),
+    (10, lambda c: c["call"] in "FW", "refuse"),
+    (11, lambda c: c["call"] == "Jp" and _as8(c), "pass"),
+    (12, lambda c: c["call"] == "Jc" and _as8(c), "pass"),
+    (13, lambda c: True, "refuse"),
+)
+
+
+def _first_row(c):
+    return next(r for r in ROWS if r[1](c))
+
+
+def _cell_world(monkeypatch, rt, c, saved):
+    w, new = _words(c)
+    monkeypatch.setattr(rt, "REVIEWED_TIP", TIP)
+    monkeypatch.setattr(rt, "PRIMARY", PRIMARY)
+    monkeypatch.setattr(rt, "STANDBY", STANDBY)
+    monkeypatch.setattr(rt, "ALL_SQL", [])
+    change = {"absent": None, "valid": {"eval_to": N_W}, "invalid": {"eval_to": X_W}}[c["key"]]
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", change)
+    monkeypatch.setattr(rt, "HEALTH_EXPECT", _rows(new))
+    words = {TIP: new, BASE: O_W, PRE: O_W, CODE: new}
+    monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
+    monkeypatch.setattr(rt, "closure_base", lambda: (BASE, "state"))
+    health = {PRIMARY: w[c["P"]], STANDBY: w[c["Sb"]]}
+
+    def hj(host):
+        if health[host] is None:
+            raise OSError("silent")
+        return {"review_eval": health[host], "review_rules": "absent"}
+    monkeypatch.setattr(rt, "health_json", hj)
+    monkeypatch.setattr(rt, "save_state", lambda st: saved.append(dict(st)))
+    st = {}
+    if c["rec"] != "absent":
+        st[rt.CLOSURE_STATE_KEY] = {"from": O_W, "to": new if c["rec"] == "valid" else X_W, "base": BASE,
+                                    "tip": TIP, "recorded_at": "2026-11-22T00:00:00Z"}
+    if c["pre"]:
+        st["precursor_sha"] = PRE
+    if c["code"]:
+        st["code_sha"] = CODE
+    return st
+
+
+def _call(rt, c, st):
+    if c["call"] == "F":
+        return rt.closure_guard(st, "start", write=True, reach=())
+    if c["call"] == "W":
+        return rt.closure_guard(st, "check")
+    return rt.closure_judge_deploy(st, PRE if c["call"] == "Jp" else CODE, "old" if c["call"] == "Jp" else "new")
+
+
+def _run_cell(monkeypatch, rt, c):
+    saved = []
+    st = _cell_world(monkeypatch, rt, c, saved)
+    try:
+        _call(rt, c, st)
+        return "pass", None, saved
+    except rt.ClosureRefusal as e:
+        m = re.search(r"row (\d+):", str(e))
+        return "refuse", int(m.group(1)) if m else str(e), saved
+
+
+def test_the_table_walks_every_cell_against_its_oracle(monkeypatch, capsys):
     rt = _release_train()
-    fns = _top_functions(ast.parse(Path(rt.__file__).read_text(encoding="utf-8")))
-
-    def calls(name):
-        return [(n.lineno, ast.unparse(n)) for n in ast.walk(fns[name]) if isinstance(n, ast.Call)]
-    for phase, guard in (("phase_precursor", "assert_reviewed_tip('precursor', st, write=args.go)"),
-                         ("phase_code", "assert_reviewed_tip('code', st, write=args.go)"),
-                         ("phase_code", "closure_guard(st, 'code', write=args.go)"),
-                         ("phase_check", "closure_guard(st, 'check', write=True)")):
-        seen = [line for line, text in calls(phase) if text == guard]
-        leases = [line for line, text in calls(phase) if text.startswith("controller_lease_session(")]
-        assert len(seen) == 1 and all(seen[0] < lease for lease in leases), (phase, guard, seen, leases)
-    asked = [text for _l, text in calls("assert_reviewed_tip") if text.startswith("closure_guard(")]
-    assert asked == ["closure_guard(st, stage, write=write)"], asked
-
-
-def test_a_landed_batch_resumed_without_a_record_redeploys_only_the_tips_word(world, monkeypatch, tmp_path):
-    """Both boxes already run the new build at the tip's word and the state file (an older tool's) holds the merge but
-    no word: the guard records the tip's word as the word before the landing, so the resumed deploy of a sha at the
-    tip's word goes on, and a sha at any other word is refused before any play."""
-    rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    tip_word = _word(rt, tip)
-    boxes = Boxes(tip_word)
-    boxes.state = {PRIMARY: NEW, STANDBY: NEW}
-    _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change={"eval_to": tip_word}, rows=_rows(tip_word))
-    st = {"code_sha": tip}
-    rt.closure_guard(st, "code", write=True)
-    assert st[rt.CLOSURE_STATE_KEY]["from"] == tip_word
-    plays = _deploys(monkeypatch, rt)
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(scratch.base, expect="new", st=dict(st, code_sha=scratch.base))
-    assert base_word in str(exc.value) and plays == [], (str(exc.value), plays)
-    rt._deploy_both(tip, expect="new", st=st)
-    assert len(plays) == 2, plays
+    cells = [dict(zip([a for a, _v in AXES], vals)) for vals in itertools.product(*[v for _a, v in AXES])]
+    assert len(cells) == 2304
+    reached, wrong, last = set(), [], []
+    for c in cells:
+        row, _pred, outcome = _first_row(c)
+        reached.add(row)
+        got, got_row, saved = _run_cell(monkeypatch, rt, c)
+        want_saved = 1 if (row == 4 and c["call"] == "F") else 0
+        if got != outcome or (got == "refuse" and got_row != row) or len(saved) != want_saved:
+            wrong.append((c, row, got, got_row, len(saved)))
+        if row == 13:
+            last.append(c)
+        capsys.readouterr()
+    assert wrong == [], (len(wrong), wrong[:3])
+    assert reached == set(range(1, 14)), sorted(reached)
+    print("cells reaching row 13: %d" % len(last))
 
 
-def test_the_precursor_deploy_is_judged_by_the_precursors_own_word(world, monkeypatch, tmp_path):
-    """Review finding 1: main carries an evaluator change the boxes do not run (word B); the tip leaves the evaluator
-    as the boxes run it (word A), so the tip's guard asks nothing. The precursor (main with the batch's sql) carries
-    B: the precursor stage refuses before the commit, and _deploy_both refuses that sha before any play. The control:
-    a precursor at A deploys to both boxes."""
-    rt, scratch, base_word = world
-    tip = scratch.commit({"main.py": b"# the lane, outside the evaluator\n"})
-    scratch.git("checkout", "-q", "main")
-    main_b = scratch.commit({"review_rules.py": lambda raw: raw + b"\n# main moved the evaluator\n"}, "main moved")
-    scratch.git("checkout", "-q", "lane")
-    word_b = _word(rt, main_b)
-    assert word_b != base_word
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, rows=_rows(base_word))
-    monkeypatch.setattr(rt, "ALL_SQL", ["999_closure_test.sql"])
-    with pytest.raises(rt.Fail) as exc:
-        rt.closure_guard({}, "precursor", write=False)
-    assert "main %s carries the word %s" % (main_b[:12], word_b) in str(exc.value), str(exc.value)
-    plays = _deploys(monkeypatch, rt)
-    st = {rt.CLOSURE_STATE_KEY: _record(base_word), "precursor_sha": main_b}
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(main_b, expect="old", st=st)
-    assert word_b in str(exc.value) and base_word in str(exc.value) and plays == [], (str(exc.value), plays)
-    rt._deploy_both(scratch.base, expect="old", st=dict(st, precursor_sha=scratch.base))
-    assert [p for p, _e in plays] == ["deploy-scr-backend.yml"] * 2, plays
+@pytest.mark.parametrize("row,cell", [
+    (1, dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="invalid", call="F")),
+    (2, dict(rec="invalid", pre=False, code=True, P="N", Sb="N", key="valid", call="W")),
+    (3, dict(rec="absent", pre=True, code=False, P="O", Sb="O", key="valid", call="F")),
+    (4, dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="F")),
+    (5, dict(rec="absent", pre=False, code=False, P="X", Sb="O", key="valid", call="F")),
+    (6, dict(rec="valid", pre=False, code=True, P="O", Sb="O", key="valid", call="Jp")),
+    (7, dict(rec="valid", pre=True, code=False, P="O", Sb="O", key="valid", call="Jc")),
+    (8, dict(rec="valid", pre=True, code=True, P="O", Sb="O", key="valid", call="Jp")),
+    (9, dict(rec="valid", pre=False, code=True, P="N", Sb="O", key="valid", call="F")),
+    (10, dict(rec="valid", pre=False, code=True, P="O", Sb="N", key="valid", call="W")),
+    (11, dict(rec="valid", pre=True, code=False, P="O", Sb="O", key="valid", call="Jp")),
+    (12, dict(rec="valid", pre=True, code=True, P="N", Sb="O", key="valid", call="Jc")),
+    (13, dict(rec="valid", pre=False, code=True, P="S", Sb="O", key="valid", call="Jc")),
+])
+def test_one_named_cell_per_row(monkeypatch, row, cell):
+    rt = _release_train()
+    want = {4: "pass", 9: "pass", 11: "pass", 12: "pass"}.get(row, "refuse")
+    got, got_row, saved = _run_cell(monkeypatch, rt, cell)
+    assert (got, got_row if got == "refuse" else row) == (want, row), (got, got_row)
+    assert len(saved) == (1 if row == 4 else 0), saved
 
 
-def test_a_recorded_code_sha_from_an_older_run_is_judged_by_its_own_word(world, monkeypatch, tmp_path):
-    """Review finding 2: the tip and the entry name word B; a state file from an older run records as code_sha a
-    real merge that carries C (main had moved the evaluator too). The resumed code deploy computes the merge's own
-    word and refuses before any play. The control: a recorded merge that carries B deploys."""
-    rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    word_b = _word(rt, tip)
-    scratch.git("checkout", "-q", "main")
-    scratch.commit({"combat_measures.py": lambda raw: raw + b"\n# main moved\n"}, "main moved")
-    scratch.git("merge", "-q", "--no-ff", "-m", "merge the lane", "lane")
-    merge_c = scratch.git("rev-parse", "HEAD")
-    word_c = _word(rt, merge_c)
-    scratch.git("reset", "-q", "--hard", scratch.base)
-    scratch.git("merge", "-q", "--no-ff", "-m", "merge the lane", "lane")
-    merge_b = scratch.git("rev-parse", "HEAD")
-    scratch.git("checkout", "-q", "lane")
-    assert len({base_word, word_b, word_c}) == 3 and _word(rt, merge_b) == word_b
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, change={"eval_to": word_b}, rows=_rows(word_b))
-    plays = _deploys(monkeypatch, rt)
-    st = {rt.CLOSURE_STATE_KEY: _record(base_word), "code_sha": merge_c, "schema_done": True}
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(merge_c, expect="new", st=st)
-    assert word_c in str(exc.value) and plays == [], (str(exc.value), plays)
-    rt._deploy_both(merge_b, expect="new", st=dict(st, code_sha=merge_b))
-    assert len(plays) == 2, plays
+def test_a_resumed_run_with_the_primary_new_passes_f_writes_nothing_and_the_code_judge_finishes_the_standby(
+        monkeypatch):
+    rt = _release_train()
+    cell = dict(rec="valid", pre=False, code=True, P="N", Sb="O", key="valid", call="F")
+    saved = []
+    st = _cell_world(monkeypatch, rt, cell, saved)
+    before = json.dumps(st, sort_keys=True)
+    rt.closure_guard(st, "start", write=True, reach=())
+    assert saved == [] and json.dumps(st, sort_keys=True) == before
+    plays = _fake_plays(monkeypatch, rt, {PRIMARY: N_W, STANDBY: N_W})
+    rt._deploy_both(CODE, expect="new", st=st)
+    assert [p for p, _l in plays] == ["deploy-scr-backend.yml"] * 2, plays
 
 
-def test_the_code_deploy_must_carry_the_target_word(world, monkeypatch, tmp_path):
-    """With closure_change eval_to B, a code sha that carries the word before the landing (A) is in the approved set
-    of the precursor but not the code deploy's target: refused before any play."""
-    rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    word_b = _word(rt, tip)
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, change={"eval_to": word_b}, rows=_rows(word_b))
-    plays = _deploys(monkeypatch, rt)
-    st = {rt.CLOSURE_STATE_KEY: _record(base_word), "code_sha": scratch.base}
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(scratch.base, expect="new", st=st)
-    assert "approved for %s" % word_b in str(exc.value) and plays == [], (str(exc.value), plays)
+# ---------------------------------------------------------------- B1: the judge after each box
 
 
-def test_a_deploy_without_a_recorded_word_is_not_made(world, monkeypatch, tmp_path):
-    rt, scratch, base_word = world
-    _bind(monkeypatch, rt, scratch, scratch.base, Boxes(base_word), tmp_path, rows=_rows(base_word))
-    plays = _deploys(monkeypatch, rt)
-    with pytest.raises(rt.Fail) as exc:
-        rt._deploy_both(scratch.base, expect="new", st={"code_sha": scratch.base})
-    assert "no word before the landing is recorded" in str(exc.value) and plays == [], (str(exc.value), plays)
+def _fake_plays(monkeypatch, rt, after):
+    """zap records a play and sets that box's /health word to `after[host]` (None: silent)."""
+    plays, health = [], {}
+    real = rt.health_json
+
+    def zap(playbook, limit=None, extra=None, **kw):
+        host = PRIMARY if limit == rt.PRIMARY_SELECTOR else STANDBY
+        plays.append((playbook, limit))
+        health[host] = after[host]
+        return "ok failed=0"
+
+    def hj(host):
+        if host in health:
+            if health[host] is None:
+                raise OSError("silent")
+            return {"review_eval": health[host], "review_rules": "absent"}
+        return real(host)
+    monkeypatch.setattr(rt, "zap", zap)
+    monkeypatch.setattr(rt, "health_json", hj)
+    monkeypatch.setattr(rt, "assert_control", lambda host: None)
+    monkeypatch.setattr(rt, "assert_box_build", lambda host, expect, sha: None)
+    return plays
 
 
-# ---------------------------------------------------------------- [6]: the command line path
+@pytest.mark.parametrize("after", [X_W, None])
+def test_the_standby_is_not_deployed_when_the_primary_publishes_another_word(monkeypatch, after):
+    rt = _release_train()
+    cell = dict(rec="valid", pre=False, code=True, P="O", Sb="O", key="valid", call="Jc")
+    st = _cell_world(monkeypatch, rt, cell, [])
+    st["snapshot"] = "label"
+    plays = _fake_plays(monkeypatch, rt, {PRIMARY: after, STANDBY: N_W})
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt._deploy_both(CODE, expect="new", st=st)
+    msg = str(exc.value)
+    assert len(plays) == 1 and "the primary publishes %s" % (after or "nothing") in msg and N_W in msg, msg
+    assert "no further box is deployed" in msg and BASE[:12] in msg, msg
 
 
-def test_the_command_line_refuses_a_missing_key_before_any_token_or_lease(world, monkeypatch, tmp_path, capsys):
-    """Review finding 6: `run --go` of a batch whose tip changes the word and whose entry carries no key stops at the
-    guard's first pass, through main(): no train token is written, no lease is taken, no phase runs."""
-    rt, scratch, base_word = world
-    tip = _changed_tip(scratch)
-    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path, rows=_rows(base_word))
-    events = []
+def test_every_deploy_play_is_followed_by_the_box_judge_before_the_next():
+    rt = _release_train()
+    fns = {n.name: n for n in ast.parse(Path(rt.__file__).read_text(encoding="utf-8")).body
+           if isinstance(n, ast.FunctionDef)}
+    zaps = [(name, n) for name, fn in fns.items() for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "zap"
+            and n.args and "deploy-scr-backend" in ast.unparse(n.args[0])]
+    assert [name for name, _n in zaps] == ["_deploy_both"], zaps
+    loop = next(n for n in fns["_deploy_both"].body if isinstance(n, ast.For))
+    assert ast.unparse(loop.body[-1]) == "closure_judge_box(st, role, host, sha, expect)", ast.unparse(loop.body[-1])
+    first = [s for s in fns["_deploy_both"].body if not isinstance(s, ast.Expr) or not isinstance(s.value, ast.Constant)]
+    assert ast.unparse(first[0]) == "closure_judge_deploy(st, sha, expect)"
+    bot = [ast.unparse(s) for s in fns["phase_bot"].body]
+    assert bot.index("closure_judge_bot(st)") < bot.index("st['bot_deployed'] = True"), bot
 
+
+def test_the_bot_judge_refuses_a_primary_at_another_word(monkeypatch):
+    rt = _release_train()
+    st = _cell_world(monkeypatch, rt, dict(rec="valid", pre=False, code=True, P="O", Sb="N", key="valid",
+                                           call="W"), [])
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_judge_bot(st)
+    assert "(bot) the primary publishes %s" % O_W in str(exc.value)
+
+
+# ---------------------------------------------------------------- the command line: F, B2, C8, C9, C10
+
+
+def _main_world(monkeypatch, rt, tmp_path, events, argv):
     def refused(what):
         def f(*a, **kw):
             events.append(what)
             raise rt.Fail("%s was reached" % what)
         return f
-    for name in ("train_token_write", "controller_lease_session", "phase_snapshot", "phase_precursor"):
+    for name in ("train_token_write", "controller_lease_session"):
         monkeypatch.setattr(rt, name, refused(name))
     monkeypatch.setattr(rt, "PHASES", [(p, refused("phase " + p)) for p, _fn in rt.PHASES])
     monkeypatch.setattr(rt, "BATCHES", {"zz-closure-guard": {}})
     monkeypatch.setattr(rt, "select_batch", lambda name: None)
     monkeypatch.setattr(rt, "assert_run_cmdlines_fit", lambda selected, st: None)
-    monkeypatch.setattr(rt, "git_forms_preflight", lambda selected, st: [])
+    monkeypatch.setattr(rt, "git_forms_preflight", lambda selected, st: events.append("preflight") or [])
     monkeypatch.setattr(rt, "NEW_ROUTES", [])
     monkeypatch.setattr(rt, "JSON_MARKERS", [])
     monkeypatch.setattr(rt, "CODE_MARKERS", ["review_eval"])
-    monkeypatch.setattr(rt.sys, "argv", ["release_train.py", "run", "--go", "--batch", "zz-closure-guard"])
+    if rt.ALL_SQL is None:
+        monkeypatch.setattr(rt, "ALL_SQL", [])
+    monkeypatch.setattr(rt.sys, "argv", ["release_train.py"] + argv + ["--batch", "zz-closure-guard"])
+
+
+def test_the_command_line_refuses_when_the_boxes_word_is_not_the_bases_before_any_token(
+        world, monkeypatch, tmp_path, capsys):
+    rt, scratch, base_word = world
+    _bind(monkeypatch, rt, scratch, scratch.base, Boxes(X_W), tmp_path, rows=_rows(base_word))
+    events = []
+    _main_world(monkeypatch, rt, tmp_path, events, ["run", "--go", "--only", "deploy-precursor"])
+    monkeypatch.setattr(rt, "ALL_SQL", ["999_closure_test.sql"])
     assert rt.main() == 1
     out = capsys.readouterr().out
-    assert events == [], events
-    assert "no closure_change" in out and "before a train token was written" in out, out
+    assert events == ["preflight"] and "row 5" in out and "before a train token was written" in out, (events, out)
+
+
+def test_a_main_behind_origin_is_refused_before_any_token(monkeypatch, tmp_path, capsys):
+    rt = _release_train()
+    events = []
+    _main_world(monkeypatch, rt, tmp_path, events, ["run", "--go", "--only", "code"])
+    monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(rt, "_closure_main_sha", lambda: "1" * 40)
+    monkeypatch.setattr(rt, "ls_remote_main", lambda: "2" * 40)
+    monkeypatch.setattr(rt, "closure_guard", lambda *a, **kw: events.append("guard"))
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert events == ["preflight"] and "is not origin's main" in out, (events, out)
+
+
+def test_the_commits_judge_their_tree_from_the_base_read_then():
+    rt = _release_train()
+    fns = {n.name: n for n in ast.parse(Path(rt.__file__).read_text(encoding="utf-8")).body
+           if isinstance(n, ast.FunctionDef)}
+    pre = ast.unparse(fns["phase_precursor"])
+    assert pre.index("base = _git_line(git_argv('rev-parse', 'refs/heads/main'))") < pre.index(
+        "closure_judge_tree(st, expected_precursor_tree(base, tip, files), base, 'old'") < pre.index(
+        "git_child(lease, c)"), "precursor"
+    assert pre.index("closure_judge_tree(st, expected_precursor_tree(world['base'], tip, files)") < pre.index(
+        "resume_precursor(world")
+    code = ast.unparse(fns["phase_code"])
+    j = code.index("closure_judge_tree(st, expected_merge_tree(world['base'], tip), world['base'], 'new'")
+    assert code.index("world = read_code_world(tip)") < j < code.index("resume_code_merge(") and j < code.index(
+        "controller_lease_session('phase 4 merge commit and push')")
+
+
+def test_an_unreadable_state_file_is_refused_by_a_fixed_line(monkeypatch, tmp_path, capsys):
+    rt = _release_train()
+    events = []
+    for verb in (["check"], ["plan"], ["run", "--go"]):
+        _main_world(monkeypatch, rt, tmp_path, events, verb)
+        bad = tmp_path / "secret-dir-name" / "state.json"
+        bad.parent.mkdir(exist_ok=True)
+        bad.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(rt, "STATE_PATH", str(bad))
+        assert rt.main() == 1
+        out = capsys.readouterr().out
+        assert "state file cannot be read as a JSON object" in out and "secret-dir-name" not in out, out
+    assert events == []
+
+
+def test_only_the_first_pass_writes_the_record():
+    rt = _release_train()
+    tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
+    calls = [(fn.name, ast.unparse(n)) for fn in tree.body if isinstance(fn, ast.FunctionDef) for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "closure_guard"]
+    writes = [c for c in calls if "write" in c[1]]
+    assert writes == [("main", "closure_guard(st, 'start', write=True, reach=reach)")], calls
+    saves = [fn.name for fn in tree.body if isinstance(fn, ast.FunctionDef) and "closure" in fn.name
+             for n in ast.walk(fn) if isinstance(n, ast.Call) and ast.unparse(n.func) == "save_state"]
+    assert saves == ["_closure_guard"], saves
+
+
+_GUARD_READS = {"git_out", "_git_line", "health_json", "load_state", "save_state", "expected_merge_tree",
+                "ls_remote_main", "closure_routine", "_closure_state_files"}
+
+
+def test_every_read_the_guard_depends_on_runs_inside_the_wrapper():
+    rt = _release_train()
+    import builtins
+    tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
+    names = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))} | set(dir(builtins))
+    bad = []
+    for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef) and "closure" in n.name]:
+        if fn.name in ("closure_export", "closure_routine", "closure_census", "_closure_state_files",
+                       "closure_load_state"):
+            continue
+        wrapped = set()
+        for w in ast.walk(fn):
+            if isinstance(w, ast.With) and any("_closure_reading" in ast.unparse(i.context_expr) for i in w.items):
+                wrapped |= {id(x) for s in w.body for x in ast.walk(s)}
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _GUARD_READS \
+                    and id(n) not in wrapped:
+                bad.append((fn.name, n.lineno, n.func.id))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id not in names:
+                bad.append((fn.name, n.lineno, "a call the census does not know: " + n.func.id))
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    loads = [n for n in ast.walk(main) if isinstance(n, ast.Call) and ast.unparse(n.func) in ("load_state",)]
+    assert bad == [] and loads == [], (bad, loads)
+
+
+@pytest.mark.parametrize("sql", [[], ["999_closure_test.sql"]])
+def test_the_guard_runs_exactly_where_the_preflight_runs(monkeypatch, tmp_path, capsys, sql):
+    rt = _release_train()
+    names = [p for p, _fn in rt.PHASES]
+    argvs = [[verb] + go + sel for verb in ("run", "plan") for go in ([], ["--go"])
+             for sel in [[]] + [["--from", p] for p in names] + [["--only", p] for p in names]]
+    bad = []
+    for argv in argvs:
+        events = []
+        _main_world(monkeypatch, rt, tmp_path, events, argv)
+        monkeypatch.setattr(rt, "ALL_SQL", list(sql))
+        monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "none.json"))
+        monkeypatch.setattr(rt, "closure_main_is_origin", lambda: events.append("origin"))
+        monkeypatch.setattr(rt, "closure_guard", lambda *a, **kw: events.append("guard"))
+        rt.main()
+        capsys.readouterr()
+        if ("guard" in events or "origin" in events) and "preflight" not in events:
+            bad.append((argv, events))
+    assert bad == [], bad
