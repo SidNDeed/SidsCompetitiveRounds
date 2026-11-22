@@ -1411,8 +1411,8 @@ def test_every_run_kind_builds_its_session_factory_with_the_seconds_left(
         planted, monkeypatch, mode):
     """[9] (ORDER-R3-FIX-3 G6): in the count run, the cohort run and the check
     run, the session factory is built with the whole seconds left of
-    the deadline at that moment (rounded up, never more than the deadline),
-    and before the run's first connection (a session asked of the factory)."""
+    the deadline at that moment
+    (rounded up, never more than the deadline)."""
     path, _rs = planted
     events = []
 
