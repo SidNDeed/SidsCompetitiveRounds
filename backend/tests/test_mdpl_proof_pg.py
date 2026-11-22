@@ -1612,8 +1612,8 @@ async def _outside_statements(env):
 
 def test_r1h_point6_a_call_outside_a_deletion_issues_the_statements_it_issued_before(monkeypatch):
     """Point 6: the no-wait mode is off by default, so the janitor's and the
-    reports' calls of the bet helpers send exactly the SQL they sent at
-    8d920c07: no guard statement, nothing moved."""
+    reports' calls of the bet helpers send the SQL they sent at 8d920c07,
+    with only 3e56313f's named delta: no guard statement, nothing else moved."""
     async def body(env):
         got, _raw = await _outside_statements(env)
         path = os.environ.get("MDPL_CAPTURE_WRITE")
@@ -1622,7 +1622,7 @@ def test_r1h_point6_a_call_outside_a_deletion_issues_the_statements_it_issued_be
                 json.dump(got, fh, indent=1)
             return
         assert _OUTSIDE_STATEMENTS_8D920C07 is not None, "not measured at 8d920c07 yet"
-        assert got == _OUTSIDE_STATEMENTS_8D920C07, got
+        assert got == _outside_expected(), got
     case(monkeypatch, body, prefix="mdpl")
 
 
@@ -1641,8 +1641,29 @@ def test_r1h_point6_control_the_guards_on_for_every_caller_add_their_statements(
         env.mp.setattr(main, "_deletion_lock_ffa_bet", bet_on)
         got, raw = await _outside_statements(env)
         assert _OUTSIDE_STATEMENTS_8D920C07 is not None, "not measured at 8d920c07 yet"
-        assert got != _OUTSIDE_STATEMENTS_8D920C07
+        assert got != _outside_expected()
         assert any("SKIP LOCKED" in s and "FROM players" in s for s in raw), raw
         assert any("SKIP LOCKED" in s and "FROM ffa_bets" in s for s in raw), raw
         assert any("pg_try_advisory_xact_lock" in s for s in raw), raw
     case(monkeypatch, body, prefix="mdpl")
+
+
+# THE ONE NAMED DELTA to _OUTSIDE_STATEMENTS_8D920C07 (above), which stays exactly as measured at 8d920c07.
+# 3e56313f (19 Nov, Bans part 2a, BAN-R21) gave _refund_lobby_bets's open-wager SELECT its bettor filter,
+# "AND (CAST(:b AS uuid) IS NULL OR player_id = CAST(:b AS uuid))", so team_lobby_refund's statement 2 has a
+# new digest. Keyed (call, index): (the pin's item, the item now).
+_OUTSIDE_DELTA_3E56313F = {
+    ("team_lobby_refund", 1): (["SELECT id, player_id FROM lobby_bets WHERE mode = $1 AND lobby_i", "162c5b7135f9"],
+                               ["SELECT id, player_id FROM lobby_bets WHERE mode = $1 AND lobby_i", "720a23864c80"]),
+}
+
+
+def _outside_expected():
+    """The measured pin with the named delta applied. Each delta's old item must be the pin's item at its place,
+    so the delta names exactly what moved, and every other statement is still the one measured at 8d920c07."""
+    want = [[call, [list(item) for item in items]] for call, items in _OUTSIDE_STATEMENTS_8D920C07]
+    for (call, i), (old, new) in sorted(_OUTSIDE_DELTA_3E56313F.items()):
+        rows = [r for r in want if r[0] == call]
+        assert len(rows) == 1 and rows[0][1][i] == old, ("the delta's old item is not the pin's", call, i, old)
+        rows[0][1][i] = list(new)
+    return want

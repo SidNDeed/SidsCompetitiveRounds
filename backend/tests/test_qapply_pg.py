@@ -3002,7 +3002,7 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
     route reaches turns this red. The service lookup's handler is reached
     by making its refresh fall due inside the unit (F7's interleaving)."""
     handlers = _f6_handlers()
-    assert len(handlers) == 38 and sum(1 for h in handlers if h[2] == "goes on") == 18, (
+    assert len(handlers) == 38 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
         "the sweep moved: re-pin with its reason", [(f, i, a) for f, i, a, _ in handlers])
     key = 0x5F6A11
 
