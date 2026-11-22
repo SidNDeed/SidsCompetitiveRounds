@@ -170,10 +170,10 @@ def env(monkeypatch):
     monkeypatch.delenv("STEAM_AUTH_ENFORCE", raising=False)
     monkeypatch.setattr(main, "_steam_http_get_json",
                         lambda url, timeout: {"response": {"params": dict(rec.STEAM["params"])}})
-    A.install(rec.KEY_HEX)
+    A.install_key(rec.KEY_HEX)
     main._alt_notice_line_at[0] = None
     yield monkeypatch
-    A.install(None)
+    A.install_key(None)
     main._alt_notice_line_at[0] = None
 
 

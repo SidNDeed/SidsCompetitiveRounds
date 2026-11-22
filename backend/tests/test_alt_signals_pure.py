@@ -3,6 +3,7 @@ states, marks, address rules, Steam's fields, the constants and the
 disclosure paragraph. No database. Ids are invented; the accepted addresses
 are public resolver service addresses; every other address is from a
 documentation, private or reserved range."""
+import ast
 import ipaddress
 import re
 from pathlib import Path
@@ -50,7 +51,7 @@ def _classify(cls):
 @pytest.fixture(autouse=True)
 def _no_key_installed_after():
     yield
-    A.install(None)
+    A.install_key(None)
 
 
 # -- the key -------------------------------------------------------------------
@@ -89,9 +90,9 @@ def test_load_key_never_raises_and_the_repr_names_only_the_key_id():
 
 
 def test_install_sets_the_state_the_route_and_health_read():
-    assert A.install(None) == "absent" and A.loaded_key() is None and A.key_word() == "absent"
-    assert A.install("zz") == "refused" and A.loaded_key() is None and A.key_word() == "refused"
-    assert A.install(KEY_HEX) == "loaded" and A.key_word() == KEY_ID
+    assert A.install_key(None) == "absent" and A.loaded_key() is None and A.key_word() == "absent"
+    assert A.install_key("zz") == "refused" and A.loaded_key() is None and A.key_word() == "refused"
+    assert A.install_key(KEY_HEX) == "loaded" and A.key_word() == KEY_ID
     assert A.loaded_key().secret == bytes.fromhex(KEY_HEX)
 
 
@@ -110,7 +111,7 @@ def test_the_three_domains_and_the_prefix_byte_separate_the_marks():
     # Same network address, different prefix: only the prefix byte differs.
     assert A.net_mark(k.secret, _net("192.0.2.0/24")) != A.net_mark(k.secret, _net("192.0.2.0/32"))
     payload = b"76561190000000001"
-    assert A._mark(k.secret, A.D_NET, payload) != A._mark(k.secret, A.D_ACCOUNT, payload)
+    assert A._asg_mark(k.secret, A.D_NET, payload) != A._asg_mark(k.secret, A.D_ACCOUNT, payload)
 
 
 # -- the address rules ---------------------------------------------------------
@@ -267,3 +268,66 @@ def test_the_disclosure_is_the_paragraph_427_adds_and_names_the_deadline():
     assert len(was) == 1 and len(new) == 1
     assert new[0] == was[0] + "\n\n" + A.DISCLOSURE
     assert ("no later than %d days after it was last seen" % A.DEADLINE_DAYS) in A.DISCLOSURE
+
+
+# -- The route manifest's fold by name ----------------------------------------
+# The gate (test_route_manifest_net_seat.py) resolves a bare name in every api
+# module and folds each match into a route's fingerprint. A name this module
+# binds that another api module also spells therefore enters the fingerprints
+# of routes that never run this file, and every change here would move them.
+
+API_DIR = Path(__file__).resolve().parents[1] / "api"
+
+
+def _module_level_names(source):
+    """The names a module binds at its top level: defs, classes, assigned
+    names and import aliases."""
+    names = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return names
+
+
+def _spelled_names(source):
+    """Every name a module spells bare anywhere: a Name, a def or class name,
+    an import alias or a parameter."""
+    names = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+    return names
+
+
+def _clashes(mine, others):
+    return {name: sorted(fn for fn, spelled in others.items() if name in spelled)
+            for name in sorted(mine) if any(name in spelled for spelled in others.values())}
+
+
+def test_no_module_level_name_is_spelled_by_another_api_module():
+    mine = _module_level_names((API_DIR / "alt_signals.py").read_text(encoding="utf-8"))
+    # The reader sees the aliased imports and the renamed names, so the check
+    # runs over what the module really binds.
+    assert {"_asg_hashlib", "_asg_hmac", "_asg_ipaddress", "_asg_re", "_asg_namedtuple",
+            "install_key", "RELATION_LIST_CAP", "DISCLOSURE"} <= mine, sorted(mine)
+    others = {p.name: _spelled_names(p.read_text(encoding="utf-8"))
+              for p in sorted(API_DIR.glob("*.py")) if p.name != "alt_signals.py"}
+    assert len(others) >= 30, sorted(others)
+    assert _clashes(mine, others) == {}
+
+
+def test_the_spelling_check_finds_a_plain_import_and_a_shared_name():
+    others = {"x.py": _spelled_names("import re\nimport hashlib\n\ndef install(a):\n    return re.sub('a', '', a)\n")}
+    mine = _module_level_names("import re\nimport hashlib as _h\nLIST = 1\n\ndef install(raw):\n    return raw\n")
+    assert _clashes(mine, others) == {"install": ["x.py"], "re": ["x.py"]}

@@ -17412,7 +17412,7 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
         window = min(days, _alt_signals.DUE_DAYS)
     key = _alt_signals.loaded_key()
     sid = str(steam_id)
-    cap = _alt_signals.LIST_CAP
+    cap = _alt_signals.RELATION_LIST_CAP
     base = {"sid": sid, "w": window}
 
     counts = (await db.execute(text(
@@ -17542,7 +17542,7 @@ def _alt_boot() -> None:
     """Load the signal key from the environment and say its state in one
     line, on both roles: `key absent`, `key refused`, or `key loaded id=`
     with the key id. The value itself is never printed."""
-    state = _alt_signals.install(os.getenv(_alt_signals.KEY_ENV))
+    state = _alt_signals.install_key(os.getenv(_alt_signals.KEY_ENV))
     _alt_print("[ALT-SIGNALS] key loaded id=%s" % _alt_signals.key_word() if state == "loaded"
                else "[ALT-SIGNALS] key %s" % state)
 

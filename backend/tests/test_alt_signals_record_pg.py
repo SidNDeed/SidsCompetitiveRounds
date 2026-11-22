@@ -250,10 +250,10 @@ def env(monkeypatch):
     monkeypatch.delenv("STEAM_AUTH_ENFORCE", raising=False)
     monkeypatch.setattr(main, "_steam_http_get_json",
                         lambda url, timeout: {"response": {"params": dict(STEAM["params"])}})
-    A.install(KEY_HEX)
+    A.install_key(KEY_HEX)
     main._alt_notice_line_at[0] = None
     yield monkeypatch
-    A.install(None)
+    A.install_key(None)
     main._alt_notice_line_at[0] = None
 
 
@@ -414,7 +414,7 @@ def test_the_boot_line_names_the_key_state_and_never_the_key(monkeypatch, capsys
             assert out.splitlines() == [want], out
             assert KEY_HEX not in out
     finally:
-        A.install(None)
+        A.install_key(None)
 
 
 # -- the recorded path ----------------------------------------------------------
@@ -475,9 +475,9 @@ def test_no_statement_is_added_without_a_verified_sign_in_and_a_loaded_key(case,
     if how == "unverified":
         env.delenv("STEAM_WEB_API_KEY")
     elif how == "key absent":
-        A.install(None)
+        A.install_key(None)
     else:
-        A.install("zz")
+        A.install_key("zz")
 
     async def body(sm, rsm):
         status, ans, plan = await _sign_in(rsm, sid, owner=_sid())
@@ -496,7 +496,7 @@ def test_the_sign_in_transaction_is_today_statement_for_statement(case, env):
     the key loaded as with the key absent: the recording adds nothing there."""
     async def body(sm, rsm):
         loaded = (await _sign_in(rsm, _sid(), owner=_sid()))[2]
-        A.install(None)
+        A.install_key(None)
         absent = (await _sign_in(rsm, _sid(), owner=_sid()))[2]
         return loaded, absent
 

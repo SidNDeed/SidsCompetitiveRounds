@@ -11,11 +11,17 @@ pinned to, and the disclosure paragraph.
 Nothing here judges an account. A mark is an HMAC-SHA256 under the server's
 key; the address and the block themselves are never returned.
 """
-import hashlib
-import hmac
-import ipaddress
-import re
-from collections import namedtuple
+# The imports are aliased, and the names this module binds are chosen, so
+# that no other api module spells any of them. The route-manifest gate
+# resolves a bare name in EVERY api module and folds each match into a
+# route's fingerprint, so a plain `import hashlib` here moved the
+# fingerprints of 397 routes that never run this file. A test in
+# test_alt_signals_pure.py holds every module-level name to that.
+import hashlib as _asg_hashlib
+import hmac as _asg_hmac
+import ipaddress as _asg_ipaddress
+import re as _asg_re
+from collections import namedtuple as _asg_namedtuple
 
 KEY_ENV = "SCR_ALT_SIGNAL_KEY"
 
@@ -54,7 +60,7 @@ SHARES_PER_ACCOUNT = 4
 
 # The read side (rulings R2, R3).
 OWNER_CANDIDATE_CAP = 50000
-LIST_CAP = 25
+RELATION_LIST_CAP = 25
 
 # conn_ranges.CONN_CLASSES without 'lan': a LAN address is never marked.
 STORED_CLASSES = ("none", "hosting", "vpn", "relay", "tor", "unknown")
@@ -74,8 +80,8 @@ DISCLOSURE = (
     "your account.")
 
 _ASCII_SPACE = " \t\n\r\x0b\x0c"
-_HEX = re.compile(r"[0-9a-fA-F]+")
-_STEAM_ID = re.compile(r"[0-9]{1,20}")
+_ASG_HEX = _asg_re.compile(r"[0-9a-fA-F]+")
+_STEAM_ID = _asg_re.compile(r"[0-9]{1,20}")
 
 
 class LoadedKey:
@@ -104,12 +110,12 @@ def load_key(raw):
         s = raw.strip(_ASCII_SPACE)
         if not s:
             return "absent", None
-        if not (64 <= len(s) <= 128) or len(s) % 2 or not _HEX.fullmatch(s):
+        if not (64 <= len(s) <= 128) or len(s) % 2 or not _ASG_HEX.fullmatch(s):
             return "refused", None
         secret = bytes.fromhex(s)
         if len(set(secret)) == 1:
             return "refused", None
-        key_id = hmac.new(secret, D_KEYID, hashlib.sha256).hexdigest()[:12]
+        key_id = _asg_hmac.new(secret, D_KEYID, _asg_hashlib.sha256).hexdigest()[:12]
         return "loaded", LoadedKey(secret, key_id)
     except Exception:  # noqa: BLE001 -- total by contract
         return "refused", None
@@ -118,7 +124,7 @@ def load_key(raw):
 _INSTALLED = ("absent", None)
 
 
-def install(raw):
+def install_key(raw):
     """Load `raw` as this process's key and return its state word. The api
     calls it once at import with the environment's value."""
     global _INSTALLED
@@ -137,19 +143,19 @@ def key_word():
     return key.key_id if state == "loaded" and key is not None else state
 
 
-def _mark(secret, domain, payload):
-    return hmac.new(secret, domain + payload, hashlib.sha256).digest()
+def _asg_mark(secret, domain, payload):
+    return _asg_hmac.new(secret, domain + payload, _asg_hashlib.sha256).digest()
 
 
 def net_mark(secret, network):
     """The mark of one network (an ipaddress network object): the version
     byte, the prefix byte and the packed network address."""
-    return _mark(secret, D_NET, bytes([network.version, network.prefixlen]) + network.network_address.packed)
+    return _asg_mark(secret, D_NET, bytes([network.version, network.prefixlen]) + network.network_address.packed)
 
 
 def account_mark(secret, steam_id):
     """The mark of one account id in decimal ASCII."""
-    return _mark(secret, D_ACCOUNT, steam_id.encode("ascii"))
+    return _asg_mark(secret, D_ACCOUNT, steam_id.encode("ascii"))
 
 
 def address_refusal(host, lan_nets):
@@ -175,7 +181,7 @@ def _parse(host):
     if not isinstance(host, str):
         return "type"
     try:
-        a = ipaddress.ip_address(host.split("%", 1)[0])
+        a = _asg_ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         return "unparsable"
     if a.version == 6 and a.ipv4_mapped is not None:
@@ -183,7 +189,7 @@ def _parse(host):
     return a
 
 
-Observation = namedtuple("Observation", "family addr_mark block_mark conn_class")
+Observation = _asg_namedtuple("Observation", "family addr_mark block_mark conn_class")
 
 
 def observe(host, key, classify, lan_nets):
@@ -195,8 +201,8 @@ def observe(host, key, classify, lan_nets):
         return None
     a = _parse(host)
     v = a.version
-    addr_net = ipaddress.ip_network("%s/%d" % (a, ADDR_PREFIX[v]), strict=False)
-    block_net = ipaddress.ip_network("%s/%d" % (a, BLOCK_PREFIX[v]), strict=False)
+    addr_net = _asg_ipaddress.ip_network("%s/%d" % (a, ADDR_PREFIX[v]), strict=False)
+    block_net = _asg_ipaddress.ip_network("%s/%d" % (a, BLOCK_PREFIX[v]), strict=False)
     try:
         cls = classify(str(a))[0]
     except Exception:  # noqa: BLE001 -- a fault is unknown
@@ -206,7 +212,7 @@ def observe(host, key, classify, lan_nets):
     return Observation(v, net_mark(key.secret, addr_net), net_mark(key.secret, block_net), cls)
 
 
-SteamFacts = namedtuple("SteamFacts", "copy_state owner_mark vac_banned publisher_banned")
+SteamFacts = _asg_namedtuple("SteamFacts", "copy_state owner_mark vac_banned publisher_banned")
 
 
 def steam_fields(params, steam_id, key):

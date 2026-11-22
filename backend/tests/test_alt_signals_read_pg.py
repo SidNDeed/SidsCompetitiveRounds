@@ -107,9 +107,9 @@ def clean(case):
 
 @pytest.fixture
 def key():
-    A.install(rec.KEY_HEX)
+    A.install_key(rec.KEY_HEX)
     yield A.loaded_key()
-    A.install(None)
+    A.install_key(None)
 
 
 @pytest.fixture
@@ -119,10 +119,10 @@ def env(monkeypatch):
     monkeypatch.delenv("STEAM_AUTH_ENFORCE", raising=False)
     monkeypatch.setattr(main, "_steam_http_get_json",
                         lambda url, timeout: {"response": {"params": dict(rec.STEAM["params"])}})
-    A.install(rec.KEY_HEX)
+    A.install_key(rec.KEY_HEX)
     main._alt_notice_line_at[0] = None
     yield monkeypatch
-    A.install(None)
+    A.install_key(None)
     main._alt_notice_line_at[0] = None
 
 
@@ -322,7 +322,7 @@ def test_no_share_row_in_the_window_is_its_own_word(clean, key):
 
 def test_a_box_with_no_key_says_so_and_still_serves_the_joins(clean, key):
     p, _today = _setup(clean, key)
-    A.install(None)
+    A.install_key(None)
     res = _read(clean, p["S"])
     assert res["family"]["owner"] == {"state": "no_key"} and res["family"]["lends_to"] == {"state": "no_key"}
     assert res["recorded"]["earlier_key_rows"] is None
@@ -349,7 +349,7 @@ def test_the_window_is_the_due_age_or_smaller_never_larger(clean, key):
 
 def test_a_list_holds_at_most_its_cap_and_says_how_many_more(clean, key, monkeypatch):
     p, _today = _setup(clean, key)
-    monkeypatch.setattr(A, "LIST_CAP", 1)
+    monkeypatch.setattr(A, "RELATION_LIST_CAP", 1)
     res = _read(clean, p["S"])
     assert _ids(res["address"]) == [p["X"]] and res["address"]["more"] == 1
     assert _ids(res["block"]) == [p["W"]] and res["block"]["more"] == 2
@@ -397,7 +397,7 @@ def test_with_the_key_withheld_no_query_over_the_three_tables_yields_an_owner(cl
         for n, owner, host in ((o, None, rec.ADDRESSES[1]), (s, o, rec.ADDRESSES[0]), (x, o, rec.ADDRESSES[0])):
             status, ans, _plan = await rec._sign_in(rsm, n, host=host, owner=owner)
             rec._like_baseline(status, ans)
-        A.install(None)
+        A.install_key(None)
         rows = {}
         async with sm() as db:
             for t in TABLES:
