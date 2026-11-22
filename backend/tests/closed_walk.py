@@ -129,7 +129,7 @@ class Grammar:
     included, is refused by shape.
 
     The definition scope also holds the SIGNAL CLASS rows (MDPL class C,
-    the integrator's rulings of 17 Nov 09:13:52Z and 10:05:30Z, question
+    the rulings of 17 Nov 09:13:52Z and 10:05:30Z, question
     2): ("<signal class>", name), ("<signal class>", name, file, the class
     statement's whole ast.dump, docstring included) and ("<signal class>",
     name, file, "uses", rule N's census of the name in that file), admitting
