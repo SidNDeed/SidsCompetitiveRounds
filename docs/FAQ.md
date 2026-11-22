@@ -30,6 +30,8 @@ Each `## Message N` section below is one Discord message (must stay under 2000 c
 
 Press **F5** in-game to open the competitive menu. That's the hub for everything: queue, stats, leaderboard, shop, settings.
 
+**What the server may record at sign-in, for fair-play review:** what Steam reports about your account, namely whether your copy of ROUNDS is owned or borrowed through Steam Family Sharing (for a borrowed copy, a keyed one-way code of the lending account, never its id) and whether the account has a VAC ban or a game ban; and from your connection, keyed one-way codes of your internet address and of its network block (never the address itself), whether it is IPv4 or IPv6, and its connection class, such as VPN or hosting. With these go the times each was first and last seen, and on how many days a storage limit was reached. Each record is deleted no later than 90 days after it was last seen, and at once if you delete your account.
+
 ## Message 2 — Updating
 
 **UPDATING**

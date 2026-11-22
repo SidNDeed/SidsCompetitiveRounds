@@ -656,6 +656,36 @@
         }
       ],
       "verdict": "verified"
+    },
+    {
+      "id": "alt_signal_deadline_days",
+      "what": "the days within which each record kept at sign-in is deleted after it was last seen (CHEAT-ALT-1)",
+      "value": "90",
+      "anchor": {
+        "file": "backend/api/alt_signals.py",
+        "pattern": "^DEADLINE_DAYS = (\\d+)$"
+      },
+      "also": [
+        {
+          "file": "backend/api/alt_signals.py",
+          "pattern": "deleted no later than (\\d+) days after it was last seen"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "deleted no later than 90 days after it was last seen"
+        },
+        {
+          "file": "backend/sql/427_alt_signals.sql",
+          "text": "deleted no later than 90 days after it was last seen"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "deleted no later than 90 days after it was last seen"
+        }
+      ],
+      "verdict": "verified"
     }
   ]
 }
