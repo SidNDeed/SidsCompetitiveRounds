@@ -13048,8 +13048,8 @@ QDIG_DIFF_WORDS = {"winner": "winner", "roster": "number of players", "rounds_wo
                    "absent": "absent"}
 QDIG_HEADER = "Held game reports: results a player's game sent that the server did not record as sent."
 QDIG_HEADER_MORE = "Held game reports (continued):"
-QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
-                        "as approved for a later ordered replay; it records nothing now. "
+QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept records the game with "
+                        "its ratings, wins, XP and gold. "
                         "Discard marks it as dismissed.")
 def _qdig_md(value, limit: int) -> str:
     """THE one function every string that goes to Discord from a D1 row
