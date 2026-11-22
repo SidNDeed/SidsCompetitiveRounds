@@ -6549,17 +6549,60 @@ _REJECT_OS = ("system", "popen", "spawn", "exec", "posix_spawn", "fork", "startf
 _REJECT_SUBPROCESS_ATTRS = ("TimeoutExpired", "SubprocessError", "CalledProcessError", "PIPE", "STDOUT", "DEVNULL",
                             "list2cmdline")
 _RUNNER_FUNCTIONS = ("start_process",)
+# The census's closed list of the OTHER modules that start a process (besides subprocess and os): no import of any
+# of them, in any form (plain, aliased, dotted, from-import), at any level. Matched on the import's top-level name.
+_REJECT_SIBLING_MODULES = {
+    "asyncio": "create_subprocess_exec, create_subprocess_shell and a loop's subprocess_exec start a process",
+    "multiprocessing": "Process, Pool and its spawn and forkserver start methods start an interpreter",
+    "concurrent": "concurrent.futures hands out ProcessPoolExecutor, whose workers are processes",
+    "pty": "pty.spawn and pty.fork start a process",
+    "_winapi": "CreateProcess, the Windows start under subprocess",
+    "_posixsubprocess": "fork_exec, the POSIX start under subprocess",
+    "nt": "the os module's Windows half: system, spawnv and startfile without the name os",
+    "posix": "the os module's POSIX half: system, fork, execv and posix_spawn without the name os",
+    "webbrowser": "open starts a browser process",
+    "pydoc": "its pagers run a shell command",
+}
+# Every module the census watches by name: an attribute of that name on any receiver (os.path.os, tempfile._os) or a
+# from-import binding that name (from shutil import os) reaches the module itself.
+_CENSUS_MODULE_NAMES = ("os", "subprocess") + tuple(_REJECT_SIBLING_MODULES)
+# Attribute names (prefixes) that start a process whatever their receiver: the Windows entry points ctypes reaches
+# (the train imports ctypes inside two functions for job objects) and an asyncio loop's subprocess methods.
+_REJECT_STARTER_ATTRS = ("CreateProcess", "ShellExecute", "WinExec", "NtCreateProcess", "NtCreateUserProcess",
+                         "ZwCreateProcess", "ZwCreateUserProcess", "RtlCreateUserProcess", "create_subprocess",
+                         "subprocess_exec", "subprocess_shell")
+# Attribute names that open a namespace or a lookup by text on any receiver (f.__globals__, m.__dict__, the builtins
+# module behind print.__self__, b.__import__).
+_REJECT_NAMESPACE_ATTRS = ("__import__", "eval", "exec", "__builtins__", "__globals__", "__dict__", "__self__")
+# The train's sound lookups of its OWN module-level names by text (globals()), keyed by the function that holds them:
+# function -> (the form, how many such lookups the function holds, why). Any other count or form there is refused.
+_CENSUS_NAME_LOOKUP_ALLOWED = {
+    "registry_cmdlines": ("a subscript on globals()", 1,
+                          "calls each enumerator function the command registry names, by that name"),
+    "_hosts": ("a subscript on globals()", 1, "reads each address constant the probe list names, by that name"),
+    "_longest_host": ("globals().get", 1, "reads each address constant of a fixed tuple, absent ones as empty"),
+}
 
 
 def _census_reject(src):
-    """The census's REJECT rule over the train's syntax tree: (a) one plain module-level `import subprocess` and no
-    other import of subprocess, of asyncio's subprocess functions or of os's process functions; (b) the name
-    subprocess only as the receiver of an attribute: a call only inside a runner function, else one of the
-    non-starting names (exceptions, pipes, list2cmdline), the one module-level seam SUBPROCESS_RUNNER excepted;
-    (c) os's process functions only inside a runner; (d) no __import__, importlib, eval, exec, nor getattr on os or
-    subprocess anywhere. Returns one line per refusal, with its line number."""
+    """The census's REJECT rule over the train's syntax tree. It refuses: (a) any import of subprocess but one plain
+    module-level `import subprocess`; (b) the name subprocess other than as the receiver of an attribute: a call only
+    inside a runner function, else one of the non-starting names (exceptions, pipes, list2cmdline), the one
+    module-level seam SUBPROCESS_RUNNER excepted; (c) the same for os: any import of os but one plain module-level
+    `import os` (an alias, an import inside a function or class, a dotted import, any from-import, `from os import *`
+    included), the name os rebound or used other than as an attribute's receiver, os's process functions outside a
+    runner, os's private and dunder attributes anywhere; (d) any import, at any level and in any form, of a module of
+    the closed list _REJECT_SIBLING_MODULES; an attribute or a from-imported name equal to a watched module's name;
+    (e) __import__, importlib, builtins, __builtins__, eval, exec, getattr on os or subprocess, and the namespace
+    attributes of _REJECT_NAMESPACE_ATTRS anywhere; (f) sys.modules in any use (a subscript, a .get, a value, through
+    os.sys, or from-imported); a subscript on, an attribute of, or any other use of globals(), locals() or vars(),
+    save the allow-listed sites of _CENSUS_NAME_LOOKUP_ALLOWED in their exact form and count; (g) an attribute, a
+    getattr name or a subscript name that starts a process on any receiver (_REJECT_STARTER_ATTRS: ctypes's
+    CreateProcess*, ShellExecute*, WinExec and the native creators; a loop's subprocess_exec). Returns one line per
+    refusal, naming the form and its line number. The census is syntactic: a start reached through a computed name,
+    or through a module outside its closed list, is outside it."""
     tree = ast.parse(src)
-    out, plain = [], 0
+    out, plain, plain_os = [], 0, 0
     funcs = _census_functions(tree)
     inside = {}
     for q, fn in funcs.items():
@@ -6569,6 +6612,8 @@ def _census_reject(src):
             and [ast.unparse(t) for t in st.targets] == ["SUBPROCESS_RUNNER"]
             and ast.unparse(st.value) == "subprocess.run"}
     calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    parent = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+    lookups = {}
     for n in ast.walk(tree):
         line = getattr(n, "lineno", 0)
         if isinstance(n, ast.Import):
@@ -6576,23 +6621,81 @@ def _census_reject(src):
                 top = a.name.split(".")[0]
                 if a.name == "subprocess" and a.asname is None and n in tree.body:
                     plain += 1
-                elif top in ("subprocess", "importlib") or a.name == "asyncio.subprocess":
+                elif a.name == "os" and a.asname is None and n in tree.body:
+                    plain_os += 1
+                elif top == "os":
+                    out.append("an import of os other than the one plain module-level import (%s%s%s) refused "
+                               "(line %d)" % (a.name, " as %s" % a.asname if a.asname else "",
+                                              "" if n in tree.body else ", below module level", line))
+                elif top in _REJECT_SIBLING_MODULES:
+                    out.append("an import of %s refused: %s (line %d)" % (a.name, _REJECT_SIBLING_MODULES[top], line))
+                elif top in ("subprocess", "importlib", "builtins"):
                     out.append("an import of %s refused (line %d)" % (a.name, line))
         elif isinstance(n, ast.ImportFrom):
             mod = n.module or ""
-            if mod.split(".")[0] in ("subprocess", "importlib") or mod == "asyncio.subprocess":
+            top = mod.split(".")[0] if not n.level else ""
+            if top in ("subprocess", "importlib", "builtins"):
                 out.append("a from-import of %s refused (line %d)" % (mod, line))
-            elif mod == "os" and any(a.name.startswith(_REJECT_OS) for a in n.names):
-                out.append("a from-import of os's process functions refused (line %d)" % line)
-            elif mod == "asyncio" and any(a.name.startswith("create_subprocess") for a in n.names):
-                out.append("a from-import of asyncio's subprocess functions refused (line %d)" % line)
-        elif isinstance(n, ast.Name) and n.id == "subprocess" and not isinstance(n.ctx, ast.Load):
-            out.append("the name subprocess rebound (line %d)" % line)
-        elif isinstance(n, ast.Name) and n.id in ("__import__", "eval", "exec", "importlib"):
+            elif top == "os":
+                what = ("a star import from %s" % mod if any(a.name == "*" for a in n.names)
+                        else "a from-import of os's process functions" if any(a.name.startswith(_REJECT_OS)
+                                                                             for a in n.names)
+                        else "a from-import of %s (os is reached only as os.<name>)" % mod)
+                out.append("%s refused (line %d)" % (what, line))
+            elif top in _REJECT_SIBLING_MODULES:
+                out.append("a from-import of %s refused: %s (line %d)" % (mod, _REJECT_SIBLING_MODULES[top], line))
+            elif top == "sys" and any(a.name == "modules" for a in n.names):
+                out.append("a from-import of sys.modules refused (line %d)" % line)
+            elif any(a.name.lstrip("_") in _CENSUS_MODULE_NAMES for a in n.names):
+                out.append("a from-import binding a watched module's name (%s) refused (line %d)"
+                           % (", ".join(a.name for a in n.names), line))
+        elif isinstance(n, ast.Name) and n.id in ("subprocess", "os") and not isinstance(n.ctx, ast.Load):
+            out.append("the name %s rebound (line %d)" % (n.id, line))
+        elif isinstance(n, ast.Name) and n.id in ("__import__", "eval", "exec", "importlib", "__builtins__"):
             out.append("%s refused (line %d)" % (n.id, line))
         elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and n.args \
                 and isinstance(n.args[0], ast.Name) and n.args[0].id in ("os", "subprocess"):
             out.append("getattr on %s refused (line %d)" % (n.args[0].id, line))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" \
+                and len(n.args) > 1 and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str) \
+                and n.args[1].value.startswith(_REJECT_STARTER_ATTRS):
+            out.append("getattr naming the process starter %s refused (line %d)" % (n.args[1].value, line))
+        elif isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str) \
+                and n.slice.value.startswith(_REJECT_STARTER_ATTRS):
+            out.append("a subscript naming the process starter %s refused (line %d)" % (n.slice.value, line))
+        elif isinstance(n, ast.Attribute) and n.attr.startswith(_REJECT_STARTER_ATTRS):
+            out.append("an attribute named %s refused: it starts a process on any receiver (line %d)"
+                       % (n.attr, line))
+        elif isinstance(n, ast.Attribute) and n.attr in _REJECT_NAMESPACE_ATTRS:
+            out.append("the namespace attribute %s refused (line %d)" % (n.attr, line))
+        elif isinstance(n, ast.Attribute) and n.attr == "modules" and (
+                isinstance(n.value, ast.Name) and n.value.id == "sys"
+                or isinstance(n.value, ast.Attribute) and n.value.attr == "sys"):
+            p = parent.get(id(n))
+            how = ("a subscript on sys.modules" if isinstance(p, ast.Subscript) and p.value is n
+                   else "sys.modules.%s" % p.attr if isinstance(p, ast.Attribute) and p.value is n
+                   else "sys.modules taken as a value")
+            out.append("%s refused (line %d)" % (how, line))
+        elif isinstance(n, ast.Attribute) and n.attr.lstrip("_") in _CENSUS_MODULE_NAMES:
+            out.append("the watched module %s reached as an attribute (.%s) refused (line %d)"
+                       % (n.attr.lstrip("_"), n.attr, line))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("globals", "locals", "vars"):
+            p = parent.get(id(n))
+            how = ("a subscript on %s()" % n.func.id if isinstance(p, ast.Subscript) and p.value is n
+                   else "%s().%s" % (n.func.id, p.attr) if isinstance(p, ast.Attribute) and p.value is n
+                   else "%s() taken as a value" % n.func.id)
+            key = (p.slice if isinstance(p, ast.Subscript) else
+                   (getattr(parent.get(id(p)), "args", None) or [None])[0] if isinstance(p, ast.Attribute) else None)
+            if isinstance(key, ast.Constant):
+                how += " naming %r" % (key.value,)      # a name written as text is never an allow-listed form
+            lookups.setdefault(inside.get(id(n)), []).append((how, line))
+    for q, seen in lookups.items():
+        allowed = _CENSUS_NAME_LOOKUP_ALLOWED.get(q)
+        if allowed and len(seen) == allowed[1] and all(how == allowed[0] for how, _ in seen):
+            continue
+        for how, line in seen:
+            out.append("%s refused%s (line %d)" % (how, " (the allow-listed %s holds %d such lookups of the form %s, "
+                                                    "not this)" % (q, allowed[1], allowed[0]) if allowed else "", line))
     attr_parents = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
@@ -6614,10 +6717,16 @@ def _census_reject(src):
                 out.append("subprocess.%s taken as a value (line %d)" % (a.attr, line))
         elif n.id == "os":
             a = attr_parents.get(id(n))
-            if a is not None and a.attr.startswith(_REJECT_OS) and inside.get(id(a)) not in _RUNNER_FUNCTIONS:
+            if a is None:
+                out.append("the name os used other than as an attribute's receiver (line %d)" % line)
+            elif a.attr.startswith("_"):
+                out.append("os.%s refused: a private or dunder attribute of os (line %d)" % (a.attr, line))
+            elif a.attr.startswith(_REJECT_OS) and inside.get(id(a)) not in _RUNNER_FUNCTIONS:
                 out.append("os.%s outside a runner (line %d)" % (a.attr, line))
     if plain != 1:
         out.append("%d plain module-level imports of subprocess, not one" % plain)
+    if plain_os != 1:
+        out.append("%d plain module-level imports of os, not one" % plain_os)
     return out
 
 
@@ -6629,21 +6738,86 @@ _REJECT_PLANTS = {
     "getattr": "def zz_plant():\n    return getattr(subprocess, \"run\")([\"git\", \"status\"])\n",
     "dunder": "def zz_plant():\n    return __import__(\"subprocess\").run([\"git\", \"status\"])\n",
     "importlib": "def zz_plant():\n    return importlib.import_module(\"subprocess\").run([\"git\", \"status\"])\n",
+    # TRAIN-CENSUS-OS-1 (item 40): the os module under another name, the sibling modules, a module reached by its
+    # name as text, and the process starters ctypes reaches
+    "os-alias": "def zz_plant():\n    import os as o\n    return o.system(\"git status\")\n",
+    "os-inner": "def zz_plant():\n    import os\n    return os.getpid()\n",
+    "os-class": "class ZzPlant:\n    import os\n    pid = os.getpid()\n",
+    "os-dotted": "def zz_plant():\n    import os.path as p\n    return p.join(\"a\")\n",
+    "os-twice": "import os\n\ndef zz_plant():\n    return os.getpid()\n",
+    "os-star": "from os import *\n\ndef zz_plant():\n    return system(\"git status\")\n",
+    "os-from": "def zz_plant():\n    from os import environ as e\n    return e\n",
+    "os-assigned": "def zz_plant():\n    o = os\n    return o.system(\"git status\")\n",
+    "os-argument": "def zz_plant():\n    return zz_call(os, \"system\")\n",
+    "os-returned": "def zz_plant():\n    return os\n",
+    "os-container": "def zz_plant():\n    return [os][0].system(\"git status\")\n",
+    "os-rebound": "def zz_plant():\n    os = zz_other\n",
+    "os-private": "def zz_plant():\n    return os._spawnvef(0, \"git\", [\"git\"], None, None)\n",
+    "os-attribute": "def zz_plant():\n    return zz_path.os.system(\"git status\")\n",
+    "os-from-other": "def zz_plant():\n    from shutil import os as o\n    return o.system(\"git status\")\n",
+    "sibling-from": "def zz_plant():\n    from concurrent.futures import ProcessPoolExecutor as P\n    return P().submit(print)\n",
+    "sibling-asyncio-from": "def zz_plant():\n    from asyncio import create_subprocess_exec as c\n    return c(\"git\")\n",
+    "loop-subprocess": "async def zz_plant(loop):\n    return await loop.subprocess_exec(zz_proto, \"git\", \"status\")\n",
+    "sys-modules-subscript": "def zz_plant():\n    return sys.modules[\"subprocess\"].run([\"git\", \"status\"])\n",
+    "sys-modules-get": "def zz_plant():\n    return sys.modules.get(\"os\").system(\"git status\")\n",
+    "sys-modules-value": "def zz_plant():\n    m = os.sys.modules\n    return m[\"os\"].system(\"git status\")\n",
+    "sys-modules-from": "def zz_plant():\n    from sys import modules as m\n    return m[\"os\"].system(\"git status\")\n",
+    "globals-subscript": "def zz_plant():\n    return globals()[\"subprocess\"].run([\"git\", \"status\"])\n",
+    "globals-get": "def zz_plant():\n    return globals().get(\"os\").system(\"git status\")\n",
+    "locals-subscript": "def zz_plant():\n    return locals()[\"zz_name\"]\n",
+    "vars-subscript": "def zz_plant():\n    return vars(sys)[\"modules\"][\"os\"].system(\"git status\")\n",
+    "globals-value": "def zz_plant():\n    g = globals()\n    return g[\"os\"].system(\"git status\")\n",
+    "namespace-globals": "def zz_plant():\n    return zz_plant.__globals__[\"os\"].system(\"git status\")\n",
+    "namespace-builtins": "def zz_plant():\n    return print.__self__.__import__(\"os\").system(\"git status\")\n",
+    "builtins-import": "def zz_plant():\n    import builtins as b\n    return b.open\n",
+    "builtins-name": "def zz_plant():\n    return __builtins__\n",
+    "ctypes-attribute": "def zz_plant(k):\n    return k.CreateProcessW(None, \"git status\", None, None, False, 0, None, None, None, None)\n",
+    "ctypes-getattr": "def zz_plant(k):\n    return getattr(k, \"ShellExecuteW\")(None, \"open\", \"git\", None, None, 1)\n",
+    "ctypes-subscript": "def zz_plant(k):\n    return k[\"WinExec\"](b\"git status\", 0)\n",
 }
+# Every module of the closed list, plain-imported inside a function and aliased-imported at module level.
+for _m in sorted(_REJECT_SIBLING_MODULES):
+    _REJECT_PLANTS["sibling-%s" % _m] = "def zz_plant():\n    import %s\n    return %s\n" % (_m, _m)
+    _REJECT_PLANTS["sibling-%s-alias" % _m] = "import %s.zz_sub as zz_alias\n" % _m
 
 
 @pytest.mark.parametrize("form", sorted(_REJECT_PLANTS))
 def test_r3_high3_the_census_rejects_every_other_way_to_reach_a_process_start(form):
     """The train's own text passes the reject rule (the control); each planted form (an aliased import, a
     from-import of subprocess's run or os's system, subprocess.run taken as a value, getattr on subprocess,
-    __import__, importlib) is refused with the line it stands on."""
+    __import__, importlib; os under another name, inside a function or class, star- or from-imported, assigned,
+    passed, returned, contained, rebound or reached as an attribute; each module of the closed sibling list;
+    sys.modules, globals(), locals(), vars() and the namespace attributes; ctypes's process starters by attribute,
+    getattr or subscript) is refused with the line it stands on. The assertion names the plant not refused."""
     rt, src = _release_train()
     assert _census_reject(src) == [], _census_reject(src)
     planted = src + "\n\n" + _REJECT_PLANTS[form]
     first = len(src.splitlines()) + 3
     said = _census_reject(planted)
     assert said and all("(line %d)" % first in s or "(line %d)" % (first + 1) in s or "(line %d)" % (first + 2) in s
-                        for s in said if "plain module-level" not in s), (form, said)
+                        for s in said if "plain module-level" not in s), ("the plant %s was not refused" % form, said)
+
+
+def test_r3_high3_the_census_lookup_allow_list_names_live_sites_only():
+    """Each allow-listed name lookup of _CENSUS_NAME_LOOKUP_ALLOWED stands in the train, in its function, in its
+    form and count: an entry whose site moved or vanished is stale and fails here, never silently widening the rule."""
+    rt, src = _release_train()
+    tree = ast.parse(src)
+    funcs = _census_functions(tree)
+    for q, (how, count, why) in _CENSUS_NAME_LOOKUP_ALLOWED.items():
+        assert q in funcs and why, q
+        got = [c for c in ast.walk(funcs[q]) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+               and c.func.id in ("globals", "locals", "vars")]
+        assert len(got) == count, (q, len(got), count)
+        one = "globals().get(zz_name)" if how == "globals().get" else "globals()[zz_name]"
+        named = "globals().get(\"os\")" if how == "globals().get" else "globals()[\"os\"]"
+        for probe, what in (("return globals()", "a changed form"),
+                            ("return [%s]" % ", ".join([one] * (count + 1)), "one lookup more than the count"),
+                            ("return %s" % named, "a lookup of a name written as text")):
+            said = _census_reject("def %s():\n    %s\n" % (q, probe))
+            assert any("allow-listed %s" % q in s for s in said), (q, what, "is not refused", said)
+        assert not [s for s in _census_reject("import os\nimport subprocess\ndef %s():\n    return [%s]\n"
+                                              % (q, ", ".join([one] * count))) if "globals" in s], q
 
 
 def _push_sites(src):
