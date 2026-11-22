@@ -188,9 +188,16 @@ def test_r11_res_sweep_production_settings_statements():
     # and Credit's transaction, before the admin check's read and the held
     # row's lock; neither route commits before the statements it bounds. The
     # count moves from 23 to 24 for this one and no other reason.
+    # Judged, +1 (CHEAT-ALT-1): the alternate-account signals' time limits,
+    # main._ALT_LIMITS_SQL, two set_config calls with is_local the literal
+    # true and the literal names lock_timeout and statement_timeout (values
+    # bound as text). It is the first statement of the recording's own
+    # transaction, which begins after the sign-in's commit, and no commit
+    # stands between it and the statements it bounds. The count moves from 24
+    # to 25 for this one and no other reason.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 24, got
+    assert len(got) == 25, got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "

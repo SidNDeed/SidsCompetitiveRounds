@@ -50,6 +50,7 @@ import discord_text as _dtext   # typed text in a Discord message the api compos
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
+import alt_signals as _alt_signals   # the alternate-account signals' pure half, standard library only: the sign-in's recording, the retention pass and the read use it (CHEAT-ALT-1)
 from models import AdminUser, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from models import player_ban_active_sql
 from models import BAN_MAX_DAYS, BAN_MAX_HOURS, BAN_MAX_MINUTES, ban_cap_sql
@@ -16937,11 +16938,222 @@ def _steam_http_get_json(url: str, timeout: float) -> dict:
         return _json.loads(resp.read().decode("utf-8", "replace"))
 
 
+# -- Alternate-account signals: the recording (CHEAT-ALT-1, migration 427) ----
+# After a VERIFIED sign-in has committed, and only while a signal key is
+# loaded, a second transaction on the same session may record what Steam
+# reported and the marks of the connecting address (alt_signals.py). The
+# route runs it inside one guard that lets no Exception out and returns the
+# answer it built before, so the sign-in's answer and rows never depend on
+# it. With no key, nothing is recorded and no statement is added.
+
+# The FAQ channel whose message 1 carries the disclosure (338 and 427 write
+# that row); the notice check reads it on every recording.
+_ALT_FAQ_CHANNEL = "1159243585309384805"
+# The time limits of the transaction it runs in (is_local true), the values
+# bound as text; the recording passes alt_signals' RECORD_* limits.
+_ALT_LIMITS_SQL = ("SELECT set_config('lock_timeout', CAST(:lt AS text), true),"
+                   " set_config('statement_timeout', CAST(:st AS text), true)")
+_ALT_NOTICE_LINE_EVERY_S = 3600.0
+_alt_notice_line_at = [None]   # monotonic time of the last notice line
+
+
+class _AltNotRecorded(Exception):
+    """A refusal of the recording; `word` is what its one line says."""
+
+    def __init__(self, word: str):
+        super().__init__(word)
+        self.word = word
+
+
+def _alt_print(msg: str) -> None:
+    """print() that cannot raise (the form of _janitor_print): the recording's
+    lines are printed on paths that must return the sign-in's answer."""
+    try:
+        print(msg)
+    except Exception:
+        pass
+
+
+def _alt_notice_line() -> None:
+    """The closed-notice line, at most once an hour."""
+    now = time.monotonic()
+    last = _alt_notice_line_at[0]
+    if last is None or now - last >= _ALT_NOTICE_LINE_EVERY_S:
+        _alt_notice_line_at[0] = now
+        _alt_print("[ALT-SIGNALS] notice not up: nothing recorded")
+
+
+async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
+    """The recording's transaction, after the sign-in's commit (design 5.2):
+    its own time limits; the account's identity key exclusive with the ban
+    read under it; the tombstone read again; the notice check; the upserts,
+    each capped; commit. Raises on every refusal and every failure: the
+    route's guard ends the transaction with _alt_abandon. With no key loaded
+    it returns before any statement."""
+    key = _alt_signals.loaded_key()
+    if key is None:
+        return
+    host = _rl_client_address(request) if request is not None else None
+    facts = _alt_signals.steam_fields(params, steam_id, key)
+    seen = _alt_signals.observe(host, key, _conn_ranges.classify_address, _conn_ranges.CR_LAN_NETS)
+    await db.execute(text(_ALT_LIMITS_SQL),
+                     {"lt": "%dms" % _alt_signals.RECORD_LOCK_TIMEOUT_MS,
+                      "st": "%dms" % _alt_signals.RECORD_STATEMENT_TIMEOUT_MS})
+    await _ban_lock_and_gate(db, [steam_id], exclusive=[steam_id])
+    if MATCH_HMAC_SECRET:
+        tombed = (await db.execute(text(
+            "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
+        ), {"h": _hash_steam_id(steam_id)})).scalar()
+        if tombed:
+            raise _AltNotRecorded("deleted")
+    # The notice check (R6): open only when exactly one message 1 row exists,
+    # the bot has posted its current revision, and it holds the disclosure.
+    # A failed read is a closed notice.
+    try:
+        notice = tuple((await db.execute(text(
+            "SELECT count(*), count(*) FILTER (WHERE p.posted_revision = p.revision"
+            " AND strpos(p.content, CAST(:sentence AS text)) > 0)"
+            " FROM pending_channel_posts p"
+            " WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1"),
+            {"sentence": _alt_signals.DISCLOSURE, "ch": _ALT_FAQ_CHANNEL})).one())
+    except Exception:
+        notice = None
+    if notice != (1, 1):
+        raise _AltNotRecorded("notice")
+    over = False
+    if facts.copy_state == "shared" and facts.owner_mark is not None:
+        # Stored when the row exists or the account holds fewer than
+        # SHARES_PER_ACCOUNT share rows; no row back means the limit refused it.
+        stored = (await db.execute(text(
+            "INSERT INTO steam_family_shares AS s (steam_id, key_id, owner_mark)"
+            " SELECT CAST(:sid AS text), CAST(:kid AS text), CAST(:om AS bytea)"
+            " WHERE EXISTS (SELECT 1 FROM steam_family_shares x WHERE x.steam_id = CAST(:sid AS text)"
+            " AND x.key_id = CAST(:kid AS text) AND x.owner_mark = CAST(:om AS bytea))"
+            " OR (SELECT count(*) FROM steam_family_shares x"
+            " WHERE x.steam_id = CAST(:sid AS text)) < CAST(:cap AS integer)"
+            " ON CONFLICT (steam_id, key_id, owner_mark)"
+            " DO UPDATE SET last_seen_at = GREATEST(s.last_seen_at, now())"
+            " RETURNING 1"),
+            {"sid": steam_id, "kid": key.key_id, "om": facts.owner_mark,
+             "cap": _alt_signals.SHARES_PER_ACCOUNT})).first()
+        over = over or stored is None
+    if seen is not None:
+        # One row per account, UTC day, key and address; at most
+        # MARKERS_PER_DAY rows per account and day.
+        stored = (await db.execute(text(
+            "INSERT INTO conn_markers AS c"
+            " (steam_id, day, key_id, addr_mark, block_mark, family, conn_class)"
+            " SELECT CAST(:sid AS text), CAST((now() AT TIME ZONE 'UTC') AS date), CAST(:kid AS text),"
+            " CAST(:am AS bytea), CAST(:bm AS bytea), CAST(:fam AS smallint), CAST(:cls AS varchar)"
+            " WHERE EXISTS (SELECT 1 FROM conn_markers x WHERE x.steam_id = CAST(:sid AS text)"
+            " AND x.day = CAST((now() AT TIME ZONE 'UTC') AS date) AND x.key_id = CAST(:kid AS text)"
+            " AND x.addr_mark = CAST(:am AS bytea))"
+            " OR (SELECT count(*) FROM conn_markers x WHERE x.steam_id = CAST(:sid AS text)"
+            " AND x.day = CAST((now() AT TIME ZONE 'UTC') AS date)) < CAST(:cap AS integer)"
+            " ON CONFLICT (steam_id, day, key_id, addr_mark) DO UPDATE SET"
+            " last_at = GREATEST(c.last_at, now()),"
+            " conn_class = CASE WHEN now() >= c.last_at THEN EXCLUDED.conn_class ELSE c.conn_class END"
+            " RETURNING 1"),
+            {"sid": steam_id, "kid": key.key_id, "am": seen.addr_mark, "bm": seen.block_mark,
+             "fam": seen.family, "cls": seen.conn_class,
+             "cap": _alt_signals.MARKERS_PER_DAY})).first()
+        over = over or stored is None
+    # The account's row: last-ats move forward only, first-ats back only; a
+    # reported value replaces the stored one only when this sign-in is not
+    # older than the row's last sight; Steam reporting nothing keeps the
+    # stored copy state; a day a limit refused a row counts once.
+    await db.execute(text(
+        "INSERT INTO steam_signin_facts AS f (steam_id, copy_state, shared_first_at, shared_last_at,"
+        " vac_banned, vac_banned_first_at, vac_banned_last_at,"
+        " publisher_banned, publisher_banned_first_at, publisher_banned_last_at,"
+        " over_limit_days, over_limit_day)"
+        " SELECT v.sid, v.cs,"
+        " CASE WHEN v.cs = 'shared' THEN now() END, CASE WHEN v.cs = 'shared' THEN now() END,"
+        " v.vac, CASE WHEN v.vac THEN now() END, CASE WHEN v.vac THEN now() END,"
+        " v.pub, CASE WHEN v.pub THEN now() END, CASE WHEN v.pub THEN now() END,"
+        " CASE WHEN v.over THEN 1 ELSE 0 END,"
+        " CASE WHEN v.over THEN CAST((now() AT TIME ZONE 'UTC') AS date) END"
+        " FROM (SELECT CAST(:sid AS text) AS sid, CAST(:cs AS varchar) AS cs,"
+        " CAST(:vac AS boolean) AS vac, CAST(:pub AS boolean) AS pub, CAST(:over AS boolean) AS over) v"
+        " ON CONFLICT (steam_id) DO UPDATE SET"
+        " last_seen_at = GREATEST(f.last_seen_at, now()),"
+        " copy_state = CASE WHEN EXCLUDED.copy_state <> 'unknown' AND now() >= f.last_seen_at"
+        " THEN EXCLUDED.copy_state ELSE f.copy_state END,"
+        " shared_first_at = CASE WHEN EXCLUDED.copy_state = 'shared'"
+        " THEN LEAST(COALESCE(f.shared_first_at, now()), now()) ELSE f.shared_first_at END,"
+        " shared_last_at = CASE WHEN EXCLUDED.copy_state = 'shared'"
+        " THEN GREATEST(COALESCE(f.shared_last_at, now()), now()) ELSE f.shared_last_at END,"
+        " vac_banned = CASE WHEN EXCLUDED.vac_banned IS NOT NULL AND now() >= f.last_seen_at"
+        " THEN EXCLUDED.vac_banned ELSE f.vac_banned END,"
+        " vac_banned_first_at = CASE WHEN EXCLUDED.vac_banned"
+        " THEN LEAST(COALESCE(f.vac_banned_first_at, now()), now()) ELSE f.vac_banned_first_at END,"
+        " vac_banned_last_at = CASE WHEN EXCLUDED.vac_banned"
+        " THEN GREATEST(COALESCE(f.vac_banned_last_at, now()), now()) ELSE f.vac_banned_last_at END,"
+        " publisher_banned = CASE WHEN EXCLUDED.publisher_banned IS NOT NULL AND now() >= f.last_seen_at"
+        " THEN EXCLUDED.publisher_banned ELSE f.publisher_banned END,"
+        " publisher_banned_first_at = CASE WHEN EXCLUDED.publisher_banned"
+        " THEN LEAST(COALESCE(f.publisher_banned_first_at, now()), now())"
+        " ELSE f.publisher_banned_first_at END,"
+        " publisher_banned_last_at = CASE WHEN EXCLUDED.publisher_banned"
+        " THEN GREATEST(COALESCE(f.publisher_banned_last_at, now()), now())"
+        " ELSE f.publisher_banned_last_at END,"
+        " over_limit_days = f.over_limit_days + CASE WHEN EXCLUDED.over_limit_days > 0"
+        " AND (f.over_limit_day IS NULL OR f.over_limit_day < CAST((now() AT TIME ZONE 'UTC') AS date))"
+        " THEN 1 ELSE 0 END,"
+        " over_limit_day = CASE WHEN EXCLUDED.over_limit_days > 0"
+        " THEN GREATEST(f.over_limit_day, CAST((now() AT TIME ZONE 'UTC') AS date))"
+        " ELSE f.over_limit_day END"),
+        {"sid": steam_id, "cs": facts.copy_state, "vac": facts.vac_banned,
+         "pub": facts.publisher_banned, "over": over})
+    await db.commit()
+
+
+async def _alt_abandon(db: AsyncSession, ex: Exception) -> None:
+    """End a refused or failed recording: roll back (the rollback guarded),
+    record nothing, say one line through _alt_print. Lets no Exception out.
+    The line carries a word only: `deleted`, `refused` (the ban read), or
+    the exception's class name; a closed notice says the hourly line."""
+    try:
+        await db.rollback()
+    except Exception:
+        pass
+    try:
+        if isinstance(ex, _AltNotRecorded) and ex.word == "notice":
+            _alt_notice_line()
+            return
+        if isinstance(ex, _AltNotRecorded):
+            word = ex.word
+        elif isinstance(ex, HTTPException) and ex.status_code == 409:
+            word = "refused"
+        else:
+            word = type(ex).__name__
+        _alt_print("[ALT-SIGNALS] not recorded: %s" % word)
+    except Exception:
+        pass
+
+
+def _alt_boot() -> None:
+    """Load the signal key from the environment and say its state in one
+    line, on both roles: `key absent`, `key refused`, or `key loaded id=`
+    with the key id. The value itself is never printed."""
+    state = _alt_signals.install(os.getenv(_alt_signals.KEY_ENV))
+    _alt_print("[ALT-SIGNALS] key loaded id=%s" % _alt_signals.key_word() if state == "loaded"
+               else "[ALT-SIGNALS] key %s" % state)
+
+
+_alt_boot()
+
+
 @app.post("/api/v1/auth/steam", tags=["Mod"])
-async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
+async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db),
+                     request: Request = None):
     """Verify a Steam Web-API auth ticket and issue a session token.
     Key unset → pipeline no-op mode: token issued with verified=false so the
-    client/header plumbing can be proven end-to-end before enforcement."""
+    client/header plumbing can be proven end-to-end before enforcement.
+
+    CHEAT-ALT-1: a verified sign-in, after its own commit, may run the
+    alternate-account recording as a second transaction (_alt_record) inside
+    a guard that lets no Exception out; the answer is built before it."""
     # Reject non-hex tickets outright, before the value goes anywhere near the
     # outbound URL — the legit client only ever sends hex (BitConverter), and
     # raw interpolation would otherwise allow query-parameter injection
@@ -17049,8 +17261,17 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
          "v": verified, "iat": now,
          "exp": now + timedelta(seconds=STEAM_SESSION_TTL_SECONDS)})
     await db.commit()
-    return {"session_token": token, "expires_in": STEAM_SESSION_TTL_SECONDS,
-            "verified": verified}
+    answer = {"session_token": token, "expires_in": STEAM_SESSION_TTL_SECONDS,
+              "verified": verified}
+    # CHEAT-ALT-1: the recording runs only after the commit above, only for a
+    # verified sign-in (`params` is bound whenever `verified` is true), as its
+    # own transaction; whatever Exception it raises, the answer above is returned.
+    if verified:
+        try:
+            await _alt_record(db, req.steam_id, params, request)
+        except Exception as ex:
+            await _alt_abandon(db, ex)
+    return answer
 
 
 SEAT_VERIFIED = "verified"
