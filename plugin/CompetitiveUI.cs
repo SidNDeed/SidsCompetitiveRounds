@@ -2010,9 +2010,9 @@ namespace CompetitiveRounds
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
                 GUI.color = Color.white;
                 GUI.Label(new Rect(x, y + 6f, w, 22f),
-                    I18n.Tr("<color=#FFD94D>Ranked Looking For Player</color> - Discord ping"), lfpTitleStyle);
+                    I18n.Tr("<color=#FFD94D>Looking For Player</color> - Discord ping"), lfpTitleStyle);
                 GUI.Label(new Rect(x, y + 28f, w, 18f),
-                    I18n.Tr("<color=#8899AA>Pings the Ranked Looking For Player role (max 1 per hour). Optional message:</color>"), lfpTitleStyle);
+                    I18n.Tr("<color=#8899AA>Pings the role of each mode you pick, ranked or casual (max 1 per hour). Optional message:</color>"), lfpTitleStyle);
                 GUI.SetNextControlName(LFP_MSG_CTRL);
                 string next = GUI.TextField(new Rect(x + 20f, y + 52f, w - 40f, 30f), NativeUI.LfpMessageText ?? "", 200, lfpFieldStyle);
                 NativeUI.LfpMessageText = next;
@@ -2032,14 +2032,17 @@ namespace CompetitiveRounds
                 // Mode multi-select: TOGGLES (any combination), not radio.
                 GUI.Label(new Rect(x, y + 144f, w, 18f),
                     I18n.Tr("<color=#8899AA>Which modes? (pick any)</color>"), lfpTitleStyle);
-                float mbx = x + (w - (bw * 3 + 16f)) / 2f;
-                for (int i = 0; i < 3; i++)
+                // LFP-CASUAL-1: four toggles (1v1, 2v2, FFA, Casual), laid out
+                // as the four expiry buttons above are.
+                int modeCount = NativeUI.LfpModeLabels.Length;
+                float mbx = x + (w - (bw * modeCount + 8f * (modeCount - 1))) / 2f;
+                for (int i = 0; i < modeCount; i++)
                 {
                     bool sel = NativeUI.LfpModeSel[i];
                     GUI.color = sel ? new Color(0.35f, 0.55f, 0.85f, 1f) : new Color(0.22f, 0.24f, 0.30f, 1f);
                     GUI.DrawTexture(new Rect(mbx + i * (bw + 8f), y + 166f, bw, 26f), Texture2D.whiteTexture);
                     GUI.color = Color.white;
-                    if (GUI.Button(new Rect(mbx + i * (bw + 8f), y + 166f, bw, 26f), NativeUI.LfpModeLabels[i], lfpTitleStyle))
+                    if (GUI.Button(new Rect(mbx + i * (bw + 8f), y + 166f, bw, 26f), NativeUI.LfpModeLabel(i), lfpTitleStyle))
                         NativeUI.LfpModeSel[i] = !NativeUI.LfpModeSel[i];
                 }
                 if (GUI.Button(new Rect(x + 60f, y + 204f, 180f, 32f), I18n.Tr("Send ping")))
