@@ -58,14 +58,16 @@ older is counted under `outside` and not evaluated), and that same match is
 the one the walk reads for the game. Retention is checked on the records
 attached to that match, as the passes check it (card_evidence.py:668,
 identity_clock_evidence.py:630, combat_evidence.py:361): a purged record
-that names another match does not remove the game. When two or more such
-matches end at the same instant, the choice is AMBIGUOUS: the tool does not
-choose. A tied game INSIDE the window (its tied matches ended after the
-cutoff) is counted on the ambiguous line (cohort: apart from the members,
-not hashed) and in no other count. A game outside the window is counted as
-`outside` (cohort: it is not in the cohort), tied or not: whichever of the
-tied matches were chosen, the game is outside; the tie matters only where
-the choice decides which match the walk reads.
+that names another match does not remove the game. A game is READ (it is a
+candidate of the selection) only when one of the ranked matches of its pair
+that its records name ended after the cutoff; a game none of whose named
+matches ended after the cutoff is not read and stands in no count, the games
+read included. When two or more matches tie for the canonical one (they end
+at the same instant), the choice is AMBIGUOUS: the tool does not choose. A
+read game whose canonical match ended at or before the cutoff is counted as
+`outside`, tied or not. A tied game whose canonical match ended after the
+cutoff is counted on the ambiguous line (cohort: apart, not a member) and in
+no other count.
 
 HOW A COUNT DIFFERS FROM THE PASSES'. A count here is not a pass's count:
 
@@ -136,23 +138,20 @@ await (loading the revision, which precedes the walk; evaluating one game;
 the window rebuild between its checks; rendering) is not cut by the timer.
 When every step yields, the report is out by the deadline plus
 REPORT_SLACK_S: a cancelled task that has not ended CANCEL_SLACK_S after the
-deadline is abandoned (its connection goes with the process), the engine's
-disposal is waited for at most CLOSE_SLACK_S (a disposal that has not ended
-by then, one that does not honour its cancellation included, is asked once
-to cancel and abandoned unfinished: the closing of the run's connection is
-left undone and the connection goes with the process), and one second is
-left for the rest.
+deadline is abandoned, the engine's disposal is waited for at most
+CLOSE_SLACK_S (a disposal that has not ended by then, one that does not
+honour its cancellation included, is asked once to cancel and abandoned
+unfinished), and one second is left for the rest.
 THE STATEMENTS: each statement is bounded by the statement_timeout given at
 startup: the whole seconds left of the deadline when the run builds its
-session factory (once, after the revision is loaded and before the walk;
-every connection of the run is opened with that value), rounded up (never
-more than the deadline); idle_in_transaction_session_timeout is the same.
-The server counts a statement's timeout from that statement's own start, and
-the tool gives every statement the full value ON PURPOSE (no setting changes
-after startup): a statement that starts late, when most of the deadline is
-gone, still has its whole statement timeout. A statement that starts just
-before the deadline can therefore run for one statement timeout more on the
-server, also after the process has ended. The tool changes no setting after
+session factory (once per run, in every run kind, before its first
+connection), rounded up (never more than the deadline);
+idle_in_transaction_session_timeout is the same. The server counts a
+statement's timeout from that statement's own start, and the tool gives
+every statement the full value ON PURPOSE: a statement that starts late,
+when most of the deadline is gone, still has its whole statement timeout. A
+statement that starts just before the deadline can therefore run for one
+statement timeout more on the server. The tool changes no setting after
 startup.
 
 THE NAMED REVISION. The revision argument's FORM is checked before any
@@ -171,34 +170,22 @@ THE CONNECTION is built from explicit parameters only: the address must name
 host, port, user and database (refused `config` otherwise, and when it
 carries any option); the password is the address's. While the driver
 connects, every process-environment variable its connect-parameter parser
-reads (_DRIVER_ENV: the PG* variables of host, port, user, password,
-database, password file, service, TLS mode, negotiation, certificates, keys,
-revocation list, protocol versions, target session attributes, Kerberos and
-GSS library, and SSLKEYLOGFILE) is removed, and put back once it returns: none
-of them shapes the connection. A DECLARED LIMIT: the driver also reads
-files at default places under the home directory it takes from the process
-(asyncpg compat.get_pg_home_directory: on POSIX pathlib.Path.home()), and the
-tool does not control them (_DRIVER_HOME_FILES): the password file (.pgpass,
-pgpass.conf on Windows), read when the address has no password; under
-.postgresql the client certificate and key (postgresql.crt, postgresql.key),
-read at every TLS mode from `allow` up, so also at `prefer`, the driver's
-default for a TCP address, which is the tool's; the root certificate and
-revocation list there (root.crt, root.crl), read from TLS mode `require` up,
-which neither the address (no option) nor the cleared environment can ask
-for; and asyncpg 0.31.0's service file (.pg_service.conf), read only when a
-service is named, which neither can do either. The startup parameters are
-default_transaction_read_only=on, default_transaction_isolation=repeatable
-read, statement_timeout, idle_in_transaction_session_timeout and jit=off, so
-EVERY transaction on the connection, the driver's own included, is read-only
-from the first statement. The statement recorder (tests) is installed in the
-connection object as the driver creates it (asyncpg's connection_class), so
-it sees every SQL text sent through the connection from its creation, the
-driver's own checks during establishment included; the startup and
-authentication exchange before it carries no SQL text. With the target
-session attribute variable removed the attribute is `any`, and the driver
-sends no statement while it establishes the connection (asyncpg sends a
-recovery SELECT only for another attribute, and only when the server does
-not report in_hot_standby). THE FIRST STATEMENTS: the SQL dialect installs the JSON and JSONB
+reads (_DRIVER_ENV) is removed, and put back once it returns: none of them
+shapes the connection. A target session attribute of `standby` planted in
+the process environment does not stop the tool's connection to a primary.
+A DECLARED LIMIT: the driver also reads files at its own default places for
+the platform (_DRIVER_HOME_FILES: .pgpass, pgpass.conf, .pg_service.conf,
+postgresql.crt, postgresql.key, root.crt, root.crl); the tool does not
+control them. The startup parameters are default_transaction_read_only=on,
+default_transaction_isolation=repeatable read, statement_timeout,
+idle_in_transaction_session_timeout and jit=off, so EVERY transaction on the
+connection, the driver's own included, is read-only from the first
+statement. The statement recorder (tests) is installed in the connection
+object as the driver creates it (asyncpg's connection_class), so a statement
+sent while the tool's connect establishes the connection is recorded; the
+tool's connect returns with no statement recorded.
+
+THE FIRST STATEMENTS: the SQL dialect installs the JSON and JSONB
 codecs on connect; asyncpg 0.29.0 (the requirements' pin, with SQLAlchemy
 2.0.35) looks each type up by name in pg_catalog.pg_type, so the first two
 statements are those catalog SELECTs, then the BEGIN of the dialect's
@@ -486,8 +473,7 @@ _DRIVER_ENV = ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGPASS
                "PGSSLCRL", "PGSSLKEY", "PGSSLCERT", "PGSSLMINPROTOCOLVERSION",
                "PGSSLMAXPROTOCOLVERSION", "PGTARGETSESSIONATTRS", "PGKRBSRVNAME", "PGGSSLIB",
                "SSLKEYLOGFILE")
-# The files asyncpg reads at default places under the home directory
-# (connect_utils PGPASSFILE, PG_SERVICEFILE and _dot_postgresql_path): a
+# The files the driver reads at its own default places for the platform: a
 # declared limit of the module text, not controlled by the tool.
 _DRIVER_HOME_FILES = (".pgpass", "pgpass.conf", ".pg_service.conf", "postgresql.crt",
                       "postgresql.key", "root.crt", "root.crl")
@@ -537,9 +523,7 @@ class _RecordingProtocol:
 
 def _recording_class(recorder):
     """The driver's connection class with the recorder installed in each
-    connection object as the driver creates it (tests): every SQL text sent
-    through the connection from then on is recorded, the driver's own
-    checks during establishment included."""
+    connection object as the driver creates it (tests)."""
     import asyncpg
 
     class _Recorded(asyncpg.Connection):
@@ -573,8 +557,8 @@ def session_factory(deadline_s: int, url=None, recorder=None, extra_settings=Non
     connection per session (NullPool), opened by _connect with the read-only
     startup parameters; every session's transaction is REPEATABLE READ READ
     ONLY. The address must name host, port, user and database and carry no
-    option. `recorder` (a list) receives every SQL text the connection sends
-    once it is established; `extra_settings` adds startup parameters (tests:
+    option. `recorder` (a list, tests) is handed to _connect for each
+    connection; `extra_settings` adds startup parameters (tests:
     the case schema's search_path, a session TimeZone)."""
     from sqlalchemy.engine import make_url
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -614,8 +598,7 @@ async def read_only(session_factory):
 # pass's choice: the earliest ranked match of the pair, named by any of the
 # game's records, that ended at least :lag seconds ago), whether THAT match
 # ended after the cutoff, and whether another such match ended at the same
-# instant (tied: ambiguous when that match is inside the window; a game whose
-# canonical match is outside it is `outside`, tied or not). DISTINCT ON orders by the match id after the end
+# instant (tied). DISTINCT ON orders by the match id after the end
 # time, so the statement's result is the same under every plan. No purge
 # filter here: retention is checked per game on the attached records. Never
 # the passes' processing state.
@@ -1152,8 +1135,7 @@ def render(tally: Tally) -> list:
 # after the cutoff :cut (T in UTC less the days), with at least one record
 # attached to it and none of those attached records purged by T; a game whose
 # earliest such match is tied and ended after the cutoff is AMBIGUOUS
-# (counted, not a member); one whose earliest match ended by the cutoff is
-# not in the cohort, tied or not. For each
+# (counted, not a member). For each
 # member, its state now: whether an attached record has been purged since,
 # the games row's evaluated revision, a failure under :rev where the row
 # records one, and (combat) a derive mark without a revision. Members are
@@ -1314,17 +1296,14 @@ def _remaining_s(deadline_at) -> int:
 async def _dispose(engine):
     """The engine's disposal, waited for at most CLOSE_SLACK_S. One that has
     not ended by then (one that does not honour its cancellation included)
-    is asked once to cancel and ABANDONED unfinished: it is never awaited
-    again, the closing of the run's connection is left undone and the
-    connection goes with the process (_run_loop closes the loop without
-    waiting for it)."""
+    is asked once to cancel and ABANDONED unfinished."""
     try:
         task = asyncio.ensure_future(engine.dispose())
         done, _pending = await asyncio.wait({task}, timeout=CLOSE_SLACK_S)
         if not done:
             task.cancel()
             return
-        task.exception()                      # retrieved: a failed disposal is not reported
+        task.exception()
     except BaseException:                     # noqa: BLE001 -- the walk is over; the report follows
         pass
 

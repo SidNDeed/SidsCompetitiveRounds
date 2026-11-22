@@ -1065,10 +1065,14 @@ def test_a_game_whose_earliest_eligible_matches_tie_is_counted_ambiguous_and_now
 
 
 def test_a_tied_game_outside_the_window_is_counted_outside_and_not_ambiguous(planted):
-    """[10] (ORDER-R3-FIX-2 F2): the game's newest matches end at the same
-    instant BEFORE the cutoff. Whichever were chosen, it is outside: it is
-    counted once under `outside`, not on the ambiguous line, and the counts
-    still sum to the games read."""
+    """[10] (ORDER-R3-FIX-2 F2, ORDER-R3-FIX-3 G1), the walk's order alone: the
+    selection's row says the game's canonical match is tied and ended at or
+    before the cutoff (`recent` false, `tied` true: its OLDEST named matches
+    end at the same instant at or before the cutoff, and a later match of the
+    game ended after it, which is why the game is read). It is counted once
+    under `outside`, not on the ambiguous line, and the counts still sum to
+    the games read. The statement's part is held on the database by
+    test_live_the_selection_reads_a_tied_old_canonical_match_as_outside_and_not_a_game_without_a_recent_match."""
     _path, rs = planted
 
     class S(RecordingSession):
@@ -1089,9 +1093,10 @@ def test_a_tied_game_outside_the_window_is_counted_outside_and_not_ambiguous(pla
     assert "ambiguous (tied earliest match, not counted): card 0, identity 0, combat 0" in lines
     assert lines[0].startswith("run whole: games read 3 of 3 (card 1 of 1, ")
     doc = " ".join(rc.__doc__.split())
-    assert ("A tied game INSIDE the window (its tied matches ended after the cutoff) is counted "
-            "on the ambiguous line") in doc
-    assert "A game outside the window is counted as `outside` (cohort: it is not in the cohort), tied or not" in doc
+    assert ("A read game whose canonical match ended at or before the cutoff is counted as "
+            "`outside`, tied or not.") in doc
+    assert ("A tied game whose canonical match ended after the cutoff is counted on the "
+            "ambiguous line") in doc
 
 
 def test_the_selection_states_the_tie_and_a_total_order_in_its_statement():
@@ -1213,16 +1218,68 @@ def test_the_drivers_environment_is_out_of_the_process_while_it_connects(monkeyp
 _ENV_READ = re.compile(r"""\bos\.(?:getenv|environ\.get)\(\s*['"]([A-Z_]+)['"]""")
 
 
+# Per driver version: in its connect module and its platform module, the
+# number of calls of each name that builds a path from the home directory or
+# from an application data directory (read at each version's source).
+_DRIVER_PATH_CALLS = {
+    "0.29.0": {"connect_utils": {"get_pg_home_directory": 1, "home": 1, "_dot_postgresql_path": 4},
+               "compat": {"home": 1, "SHGetFolderPathW": 1}},
+    "0.31.0": {"connect_utils": {"get_pg_home_directory": 2, "home": 1, "_dot_postgresql_path": 4},
+               "compat": {"home": 1, "SHGetFolderPathW": 1}},
+}
+_PATH_CALL_NAMES = ("get_pg_home_directory", "home", "expanduser", "expandvars", "getenv",
+                    "SHGetFolderPathW", "SHGetKnownFolderPath", "_dot_postgresql_path",
+                    "user_config_dir", "user_data_dir")
+
+
+def _path_calls(src):
+    """{call name: count} of the calls in `src` whose name is one of
+    _PATH_CALL_NAMES, read by syntax tree (comments and strings do not
+    count); an os.getenv / environ read of HOME, APPDATA, LOCALAPPDATA or
+    USERPROFILE counts under its variable's name."""
+    out = {}
+    for n in ast.walk(ast.parse(src)):
+        name = None
+        if isinstance(n, ast.Call):
+            f = n.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+            if name in ("getenv", "get"):
+                arg = n.args[0] if n.args else None
+                name = arg.value if isinstance(arg, ast.Constant) and arg.value in (
+                    "HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE") else None
+            elif name not in _PATH_CALL_NAMES:
+                name = None
+        elif isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value in (
+                "HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE"):
+            name = n.slice.value
+        if name:
+            out[name] = out.get(name, 0) + 1
+    return out
+
+
 def test_the_drivers_environment_list_holds_every_variable_and_file_its_connect_parser_reads():
-    """[5] (ORDER-R3-FIX-2 F7b), held against the INSTALLED driver's own
-    source: every environment variable asyncpg's connect-parameter parser
-    reads is in _DRIVER_ENV, every environment access there has the read form
-    counted, and every file it takes from a default place under the home
-    directory is in _DRIVER_HOME_FILES, which the module text names as a
-    declared limit. A variable or a default file a newer driver adds is red."""
+    """[5] (ORDER-R3-FIX-2 F7b, ORDER-R3-FIX-3 G4), held against the INSTALLED
+    driver's own source: every environment variable asyncpg's
+    connect-parameter parser reads is in _DRIVER_ENV, and every environment
+    access there has the read form counted; every file name it passes to its
+    .postgresql path helper or names as the password or service file is in
+    _DRIVER_HOME_FILES, which the module text names as a declared limit.
+    The places where the connect module and the platform module build a path
+    from the home directory or an application data directory are counted by
+    call name and must equal the counts recorded for that driver version
+    (_DRIVER_PATH_CALLS); a version not recorded is red. So a variable the
+    parser adds, and a new place where the driver builds such a path, are red.
+    A LIMIT: a file the driver reads by another route (a path built without
+    one of the counted calls, or in another module) is not seen."""
     import asyncpg
+    import asyncpg.compat as compat
     import asyncpg.connect_utils as cu
     src = open(cu.__file__, encoding="utf-8").read()
+    assert asyncpg.__version__ in _DRIVER_PATH_CALLS, asyncpg.__version__
+    want = _DRIVER_PATH_CALLS[asyncpg.__version__]
+    got = {"connect_utils": _path_calls(src),
+           "compat": _path_calls(open(compat.__file__, encoding="utf-8").read())}
+    assert got == want, got
     names = set(_ENV_READ.findall(src))
     assert len(re.findall(r"\bos\.(?:getenv|environ)\b", src)) == len(_ENV_READ.findall(src))
     assert names and names <= set(rc._DRIVER_ENV), sorted(names - set(rc._DRIVER_ENV))
@@ -1256,31 +1313,134 @@ class _SwallowingDisposal:
 
 
 def test_a_disposal_that_swallows_its_cancellation_is_abandoned_after_the_close_slack(monkeypatch):
-    """[8] (ORDER-R3-FIX-2 F7a): the engine's disposal is waited for at most
-    CLOSE_SLACK_S; one that swallows its cancellation is asked once to cancel
-    and abandoned, so _dispose returns by the slack and not when the
-    disposal would end."""
+    """[8] (ORDER-R3-FIX-2 F7a, ORDER-R3-FIX-3 G3): the engine's disposal is
+    waited for at most CLOSE_SLACK_S; one that swallows its cancellation
+    receives exactly one cancellation and is abandoned, so _dispose returns
+    by the slack and not when the disposal would end."""
     monkeypatch.setattr(rc, "CLOSE_SLACK_S", 0.3)
     eng = _SwallowingDisposal(rest_s=3.0)
     t0 = time.monotonic()
     rc._run_loop(rc._dispose(eng))
     elapsed = time.monotonic() - t0
     assert elapsed < 1.5, elapsed
+    assert eng.cancelled == 1, eng.cancelled
 
 
 _RAISES_OUTSIDE_THE_CENSUS = ("utc_cutoff", "bounded")
 
 
+def _raise_places(tree):
+    """One (place, line) per raise statement of the whole module: the name of
+    the innermost function around it; `import guard` for a raise inside the
+    handler of the module-level try that holds the imports; `module` for any
+    other raise outside a function."""
+    out = []
+
+    def visit(node, func, guard):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Raise):
+                out.append((func or ("import guard" if guard else "module"), child.lineno))
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name, False)
+            elif isinstance(child, ast.ExceptHandler) and func is None and isinstance(node, ast.Try) \
+                    and node in tree.body and any(isinstance(s, (ast.Import, ast.ImportFrom))
+                                                  for s in node.body):
+                visit(child, None, True)
+            else:
+                visit(child, func, guard)
+    visit(tree, None, False)
+    return out
+
+
 def test_every_raise_of_the_module_is_in_a_census_function_or_named_outside_it():
-    """[7] (ORDER-R3-FIX-2 F7c): the census reaches the raises of
-    _BRANCH_FUNCS; the module's other raises stand in the functions named
-    here (utc_cutoff's guard of an instant without a zone, bounded's re-raise
-    of the walk's own exception, which ends as a failure word). A raise in
-    any other function is red."""
+    """[7] (ORDER-R3-FIX-2 F7c, ORDER-R3-FIX-3 G5), over the WHOLE module: every
+    raise statement stands in a function of _BRANCH_FUNCS (reached by the
+    census), in a function named in _RAISES_OUTSIDE_THE_CENSUS, or is the
+    import guard's re-raise (inside the handler of the module-level try that
+    holds the imports; there is one). A raise anywhere else, a module-level
+    one included, is red."""
     tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
-    have = {f.name for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and any(isinstance(n, ast.Raise) for n in ast.walk(f))}
-    assert have == set(_BRANCH_FUNCS) | set(_RAISES_OUTSIDE_THE_CENSUS), sorted(have)
+    places = _raise_places(tree)
+    allowed = set(_BRANCH_FUNCS) | set(_RAISES_OUTSIDE_THE_CENSUS) | {"import guard"}
+    assert [p for p in places if p[0] not in allowed] == [], places
+    assert [p for p, _ln in places if p == "import guard"] == ["import guard"], places
+    assert {p for p, _ln in places} == allowed, places
+
+
+def test_the_recorder_is_installed_only_in_the_constructor_of_the_connection_class():
+    """[5] (ORDER-R3-FIX-3 G2 a), by syntax tree: the module assigns a
+    connection's protocol in exactly one place, the constructor (__init__)
+    of the class _recording_class builds on the driver's connection class,
+    and no setattr names the protocol; the recording protocol is built only
+    there; _connect hands that class to the driver as connection_class
+    whenever a recorder is given (extra = {} if recorder is None else
+    {"connection_class": _recording_class(recorder)}, passed as **extra after
+    **args to the driver's one connect call). Any other form is red."""
+    tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
+    funcs = {f.name: f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    stores = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "_protocol"
+              and isinstance(n.ctx, ast.Store)]
+    rec = funcs["_recording_class"]
+    cls = [c for c in rec.body if isinstance(c, ast.ClassDef)]
+    assert len(cls) == 1 and [ast.unparse(b) for b in cls[0].bases] == ["asyncpg.Connection"]
+    init = [f for f in cls[0].body if isinstance(f, ast.FunctionDef) and f.name == "__init__"]
+    assert len(init) == 1
+    assert len(stores) == 1 and stores[0] in list(ast.walk(init[0])), [ast.unparse(s) for s in stores]
+    assert ast.unparse(stores[0].value) == "self"
+    builds = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "_RecordingProtocol"]
+    assert len(builds) == 1 and builds[0] in list(ast.walk(init[0]))
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None)
+                in ("setattr", "object.__setattr__") and "_protocol" in ast.unparse(n)]
+    con = funcs["_connect"]
+    extra = [n for n in ast.walk(con) if isinstance(n, ast.Assign)
+             and [ast.unparse(t) for t in n.targets] == ["extra"]]
+    assert [ast.unparse(e.value) for e in extra] == [
+        "{} if recorder is None else {'connection_class': _recording_class(recorder)}"]
+    calls = [n for n in ast.walk(con) if isinstance(n, ast.Call) and ast.unparse(n.func) == "asyncpg.connect"]
+    assert len(calls) == 1 and [ast.unparse(k.value) for k in calls[0].keywords if k.arg is None] == [
+        "args", "extra"]
+
+
+class _FirstSession(Exception):
+    """Ends a run at its first connection (a session asked of the factory)."""
+
+
+@pytest.mark.parametrize("mode", ["count", "cohort", "check"])
+def test_every_run_kind_builds_its_session_factory_once_with_the_seconds_left_before_its_first_connection(
+        planted, monkeypatch, mode):
+    """[9] (ORDER-R3-FIX-3 G6): in the count run, the cohort run and the check
+    run, the session factory is built once, with the whole seconds left of
+    the deadline at that moment (rounded up, never more than the deadline),
+    and before the run's first connection (a session asked of the factory)."""
+    path, _rs = planted
+    events = []
+
+    class Eng:
+        async def dispose(self):
+            events.append("dispose")
+
+    def opened():
+        events.append("session")
+        raise _FirstSession()
+
+    def factory(deadline_s, **_k):
+        events.append(("factory", deadline_s, time.monotonic()))
+        return Eng(), opened
+    monkeypatch.setattr(rc, "session_factory", factory)
+    monkeypatch.setenv(rr.ROOT_ENV, os.path.dirname(path))
+    argv = {"count": ["--revision", path],
+            "cohort": ["--cohort"],
+            "check": ["--cohort-check", "--rev", "0" * 12, "--at", "2026-01-02T03:04:05Z",
+                      "--digest", "0" * 64]}[mode] + ["--days", "5", "--deadline-s", "100"]
+    start = time.monotonic()
+    with pytest.raises(_FirstSession):
+        rc._main(argv, start)
+    built = [e for e in events if isinstance(e, tuple)]
+    assert len(built) == 1, events
+    _f, deadline_s, at = built[0]
+    assert events.index(built[0]) < events.index("session"), events
+    assert isinstance(deadline_s, int) and 100 - (at - start) <= deadline_s <= 100, (deadline_s, at - start)
 
 
 def test_the_outer_bound_leaves_room_for_the_tools_own_slack():
@@ -2673,6 +2833,61 @@ def test_live_a_game_whose_earliest_matches_tie_is_ambiguous_and_not_counted(wal
             in rc.render(t))
 
 
+def test_live_the_selection_reads_a_tied_old_canonical_match_as_outside_and_not_a_game_without_a_recent_match(
+        live, planted, walked):
+    """[10] (ORDER-R3-FIX-3 G1), through the tool's own statement and walk on
+    the database. Planted inside one transaction that is rolled back: game TO,
+    whose two OLDEST named matches end at the same instant 15 days ago (before
+    the cutoff: one room holding a match of each player order, named by the
+    first seat's record) and whose third named match ended 2 hours ago (after
+    it, named by the second seat's record); game NO, whose only named match
+    ended 15 days ago. The selection gives
+    ONE row for TO (`recent` false, `tied` true) and none for NO; the walk
+    over the same transaction counts TO once under `outside`, not on the
+    ambiguous line, and NO in no count: the games read grow by one."""
+    import test_title_ladder_hooks_live as lh
+    _path, rs = planted
+    a, b = live.plan.a, live.plan.b
+    key = {"to": "calibr3_to_q7z", "no": "calibr3_no_q7z"}
+    room = {n: "calibroom_r3_%s_q7z" % n for n in ("to1", "to3", "no1")}
+
+    async def go():
+        async with live.sm() as db:
+            now = (await db.execute(text("SELECT now()"))).scalar()
+            old, recent = now - timedelta(days=15), now - timedelta(hours=2)
+            for r, ended, p1, p2 in (("to1", old, a, b), ("to1", old, b, a), ("to3", recent, a, b),
+                                     ("no1", old, a, b)):
+                row = await lh._insert(db, "matches", {
+                    "player1_id": p1, "player2_id": p2, "photon_room_id": room[r], "is_ranked": True,
+                    "p1_rounds_won": 5, "p2_rounds_won": 3, "winner_id": a, "reported_by": a})
+                await db.execute(text("UPDATE matches SET ended_at = :e, created_at = :e WHERE id = :i"),
+                                 {"e": ended, "i": row["id"]})
+            for k, r, s, o in (("to", "to1", a, b), ("to", "to3", b, a), ("no", "no1", a, b)):
+                await db.execute(text(
+                    "INSERT INTO card_evidence (stable_game_key, attach_key, seat_player_id, "
+                    "  other_player_id, pool_digest, deal_profile, payload, payload_sha256, received_at) "
+                    "SELECT :k, :r, :s, :o, pool_digest, deal_profile, payload, payload_sha256, received_at "
+                    "  FROM card_evidence WHERE stable_game_key = :src AND attach_key = :srcr"),
+                    {"k": key[k], "r": room[r], "s": s, "o": o, "src": LK["c1"], "srcr": LR["c1"]})
+            rows = (await db.execute(text(rc._GAMES_SQL.format(t=rc._TABLES["card"])), {
+                "cut": now - timedelta(days=WALK_DAYS), "lag": rc._LAGS["card"]})).all()
+            mine = {r[0]: (r[4], r[5]) for r in rows if r[0] in key.values()}
+
+            @contextlib.asynccontextmanager
+            async def same():
+                yield db
+            tally = await rc.walk_db(rs, same, WALK_DAYS, time.monotonic() + 120)
+        return mine, tally
+    mine, tally = live.run(go())
+    assert mine == {key["to"]: (False, True)}, mine
+    base = walked.tally
+    assert tally.totals["card"] == base.totals["card"] + 1
+    assert tally.domains["card"]["skipped"].get("outside", 0) == \
+        base.domains["card"]["skipped"].get("outside", 0) + 1
+    assert tally.domains["card"]["walked"] == base.domains["card"]["walked"]
+    assert tally.ambiguous == base.ambiguous
+
+
 def test_live_a_purged_stray_record_does_not_remove_a_game_the_passes_evaluate(walked):
     """C7's attached record is retained; its stray record (another attach
     key) has purged lists. The game is selected and evaluated."""
@@ -2682,13 +2897,15 @@ def test_live_a_purged_stray_record_does_not_remove_a_game_the_passes_evaluate(w
 
 
 def test_live_the_connection_takes_nothing_from_the_drivers_environment(live, monkeypatch):
-    """[5] (ORDER-R3-FIX-2 F3): a target session attribute of `standby` and a
-    TLS mode of `require` planted in the process environment; the tool's
-    connection to the primary opens (neither variable reached the driver).
-    The recorder is installed as the driver creates the connection object,
-    so the check can fail: the tool's own connect returns with NO statement
-    recorded during establishment, and the first statement sent afterwards
-    is the first one recorded (the recorder is live on that connection)."""
+    """[5] (ORDER-R3-FIX-2 F3, ORDER-R3-FIX-3 G2): a target session attribute
+    of `standby` and a TLS mode of `require` planted in the process
+    environment; the tool's connection to the local server opens. With the
+    recorder handed to the tool's connect, the connect returns with NO
+    statement recorded, and the first statement sent afterwards is the first
+    one recorded. Where the recorder sits is held by
+    test_the_recorder_is_installed_only_in_the_constructor_of_the_connection_class;
+    the target attribute alone by
+    test_live_a_standby_target_attribute_in_the_environment_does_not_stop_the_tools_connection."""
     from sqlalchemy.engine import make_url
     monkeypatch.setenv("PGTARGETSESSIONATTRS", "standby")
     monkeypatch.setenv("PGSSLMODE", "require")
@@ -2714,8 +2931,37 @@ def test_live_the_connection_takes_nothing_from_the_drivers_environment(live, mo
     assert one == 1
     assert during == [], during
     assert direct == ["SELECT 2"], direct
-    assert log and not any("pg_is_in_recovery" in s for s in log)
+    assert log
     assert os.environ["PGTARGETSESSIONATTRS"] == "standby"     # put back after the connect
+
+
+def test_live_a_standby_target_attribute_in_the_environment_does_not_stop_the_tools_connection(
+        live, monkeypatch):
+    """[5] (ORDER-R3-FIX-3 G2 b): only PGTARGETSESSIONATTRS=standby planted.
+    The local server is a primary and reports in_hot_standby off. The
+    driver's own connect, handed the same parameters with that environment,
+    refuses it (the observable differs); the tool's connect, which takes the
+    variable out while the driver connects, opens it."""
+    import asyncpg
+    from sqlalchemy.engine import make_url
+    monkeypatch.setenv("PGTARGETSESSIONATTRS", "standby")
+    args = make_url(live.url).translate_connect_args(username="user")
+    settings = dict(rc.server_settings(60), **live.settings)
+
+    async def go():
+        try:
+            bare = await asyncpg.connect(**args, server_settings=settings)
+        except asyncpg.exceptions.TargetServerAttributeNotMatched:
+            driver = "refused"
+        else:
+            await bare.close()
+            driver = "opened"
+        conn = await rc._connect(args, settings)
+        try:
+            return driver, conn.get_settings().in_hot_standby, await conn.fetchval("SELECT 1")
+        finally:
+            await conn.close()
+    assert live.run(go()) == ("refused", "off", 1)
 
 
 def test_live_a_statement_ends_by_its_statement_timeout(live):
