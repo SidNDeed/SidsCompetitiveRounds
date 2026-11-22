@@ -76319,23 +76319,24 @@ def _qapply_held_check(row, body):
 
 
 async def _qapply_verdict(db, row, body) -> dict:
-    """The list's and the digest's verdict for one held row, from the READ form of the checks the
-    actions make (the bans, the signature, the service accounts, _ffa_report_verify, the record,
-    the game's claim, a lobby a ban ended and the gate), with no row lock or key; advisory: Accept
-    and Credit decide again under their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
+    """The list's and the digest's verdict for one held row: the READ form of the actions' checks (the
+    receipt and the 168 bound as _qapply_held, the bans, the signature, the service accounts, _ffa_report_verify,
+    the record, the game's claim, a lobby a ban ended, Credit's lobby test and the gate), with no row lock or key;
+    advisory: Accept and Credit decide again under their locks. {"can_accept", "accept_blocked_reason", "can_credit"}."""
     def no(key, credit=False, **kw):
         return {"can_accept": False, "accept_blocked_reason": _QAPPLY_TEXTS[key].format(**kw),
                 "can_credit": credit}
+    if (await db.execute(text(_QAPPLY_SQL_RECEIPT), {"qid": str(row["id"])})).scalar():  # R10: _qapply_held's checks, its order
+        return no("credited_before")
     key = _qapply_held_check(row, body)
-    if key is not None:
-        return no(key)
+    if key is not None: return no(key)  # noqa: E701 (one line: main.py's line keys stay put)
     report = body["report"]
-    if row["group_id"] is None:
-        return no("no_lobby")
+    if row["group_id"] is None: return no("no_lobby")  # noqa: E701
+    if (await db.execute(text(_QAPPLY_SQL_LOBBY_BEFORE_168), {"lid": str(row["group_id"]),
+            "bound": _QAPPLY_LOBBY_SETTLED_BEFORE})).scalar(): return no("settled_by_hand")  # noqa: E701
     lobby = (await db.execute(text(_QAPPLY_SQL_LOBBY_READ),
                               {"lid": str(row["group_id"])})).mappings().first()
-    if lobby is None:
-        return no("no_lobby")
+    if lobby is None: return no("no_lobby")  # noqa: E701
     # The actions' ban read in its read form (no key, no line), then the game's state as Accept reads it (F1).
     try:
         await _ban_gate_any_or_raise(db, report.reported_by_steam_id, [p.steam_id for p in report.players], None, log=False)
@@ -76362,8 +76363,7 @@ async def _qapply_verdict(db, row, body) -> dict:
         return no("lobby_state")
     # Credit's verifications, read form: the signature, the service accounts, _ffa_report_verify.
     canonical = _verify_ffa_hmac(report)
-    if not canonical:
-        return no("unsigned")
+    if not canonical: return no("unsigned")  # noqa: E701
     steams = [p.steam_id for p in report.players]
     try:
         await _assert_no_service_subject(db, affected_steam_ids=steams)
@@ -76384,9 +76384,9 @@ async def _qapply_verdict(db, row, body) -> dict:
         "lid": str(row["group_id"])})).scalars().all()
 
     def blocked(reason: str) -> dict:
-        can_credit = named is not None
+        can_credit = named is not None and _qapply_same_lobby(report, row)  # R10: Credit's lobby test
         if not can_credit:
-            reason = _QAPPLY_TEXTS["no_number"]
+            reason = _QAPPLY_TEXTS["no_number" if named is None else "incomplete"]
         elif credited:
             reason = _QAPPLY_TEXTS["sibling_credited"].format(g=int(credited[-1]))
         return {"can_accept": False, "accept_blocked_reason": reason, "can_credit": can_credit}
@@ -87199,3 +87199,12 @@ def _qapply_busy(route: str) -> HTTPException:
     sentence. Each route hands its own template."""
     print(f"[QAPPLY] busy route={route}")
     return HTTPException(503, _QAPPLY_TEXTS["busy"])
+
+
+def _qapply_same_lobby(report, row) -> bool:
+    """Credit's lobby test (_qapply_credit, the "incomplete" refusal), for the list's verdict (R10):
+    the report's lobby id, read as a UUID, is the held row's lobby."""
+    try:
+        return str(UUID(report.lobby_id)) == str(row["group_id"])
+    except (ValueError, TypeError):
+        return False

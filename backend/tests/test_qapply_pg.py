@@ -3356,3 +3356,117 @@ def test_seam_r7_the_bounds_comments_and_the_busy_line_say_what_the_code_does():
                 and n.func.id == "_qapply_busy"]
         assert [b.args[0].value for b in busy] == [path], (name, path)
     assert "[QAPPLY] busy route={route}" in inspect.getsource(main._qapply_busy)
+
+
+# ── STACK-SEAM-1 R10: the list's verdict makes every refusal the routes make, or names why not ──
+# A refusal key one of the actions raises (_QapplyRefused with a _QAPPLY_TEXTS key, in any function
+# of main.py that raises it) has its counterpart in _qapply_verdict, or stands in exactly one list here.
+R10_LOCK_ONLY = {
+    "admin": "the list route makes the same admin check itself, before any verdict",
+    "not_found": "the list reads rows that exist; a row deleted after the read is decided under the lock",
+    "held_applied": "the list reads pending rows only; a row applied after the read is decided under the lock",
+    "held_credited": "the list reads pending rows only; a row credited after the read is decided under the lock",
+    "reviewed": "the list reads pending rows only; a row reviewed after the read is decided under the lock",
+    "claimed": "the claim insert's own conflict, a sibling action between the read and the write",
+    "insert_race": "the game insert's own conflict, a report recorded between the read and the write",
+    "insert_failed": "the game insert's own failure, which no read can foresee",
+}
+# Credit's sentence for the claim the verdict reads, answered there with Accept's sentence for the same claim.
+R10_SAME_CLAIM = {"game_paid": "game_credited", "game_applied": "recorded"}
+# Credit's refusal of a game Accept can apply: the verdict's shape, can_credit False wherever can_accept is True.
+R10_SHAPE = {"can_accept"}
+
+
+def _r10_keys(tree=None):
+    tree = tree or _tree()
+    funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    (keys,) = [{k.value for k in n.value.keys} for n in tree.body if isinstance(n, ast.Assign)
+               and any(isinstance(x, ast.Name) and x.id == "_QAPPLY_TEXTS" for x in n.targets)]
+
+    def strs(node):
+        return {c.value for c in ast.walk(node) if isinstance(c, ast.Constant) and isinstance(c.value, str)} & keys
+
+    def text_keys(fn):
+        return set().union(*[strs(n.slice) for n in ast.walk(fn) if isinstance(n, ast.Subscript)
+                             and isinstance(n.value, ast.Name) and n.value.id == "_QAPPLY_TEXTS"])
+
+    raisers = {name for name, fn in funcs.items() if name != "_qapply_verdict" and any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_QapplyRefused" for n in ast.walk(fn))}
+    acts = set().union(*[text_keys(funcs[r]) for r in raisers])
+    v = funcs["_qapply_verdict"]
+    verdict = text_keys(v) | set().union(*[strs(c) for c in ast.walk(v) if isinstance(c, ast.Call)
+                                          and isinstance(c.func, ast.Name) and c.func.id == "no"])
+    return raisers, acts, verdict, funcs
+
+
+def _r10_sql_order(fn):
+    return [n.id for n in sorted((n for n in ast.walk(fn) if isinstance(n, ast.Name)
+                                  and n.id in ("_QAPPLY_SQL_RECEIPT", "_QAPPLY_SQL_LOBBY_BEFORE_168")),
+                                 key=lambda n: (n.lineno, n.col_offset))]
+
+
+def test_seam_r10_census_every_refusal_of_the_routes_has_its_verdict_or_its_reason():
+    raisers, acts, verdict, funcs = _r10_keys()
+    v = funcs["_qapply_verdict"]
+    assert {"_qapply_held", "_qapply_credit", "submit_ffa_match"} <= raisers, sorted(raisers)
+    assert {"credited_before", "settled_by_hand", "incomplete"} <= acts, sorted(acts)
+    named = set(R10_LOCK_ONLY) | set(R10_SAME_CLAIM) | R10_SHAPE
+    missing = acts - verdict
+    assert missing == named, ("R10 a refusal of the routes with no verdict and no reason", sorted(missing - named),
+                              "listed but not missing", sorted(named - missing))
+    assert set(R10_SAME_CLAIM.values()) <= verdict, ("R10 the claim's sentences", sorted(verdict))
+    last = ast.unparse(v.body[-1])
+    assert last.startswith("return") and "'can_accept': True" in last and "'can_credit': False" in last, last
+    # _qapply_held's two checks run in the verdict with the same SQL, in _qapply_held's order.
+    order, held = _r10_sql_order(v), _r10_sql_order(funcs["_qapply_held"])
+    assert order == held == ["_QAPPLY_SQL_RECEIPT", "_QAPPLY_SQL_LOBBY_BEFORE_168"], (order, held)
+
+
+def test_seam_r10_census_names_a_planted_refusal_and_a_dropped_verdict():
+    src = ast.unparse(_tree())
+    # A new refusal key raised by an action and read nowhere in the verdict.
+    planted = ast.parse(src)
+    planted.body.append(ast.parse("async def planted(db):\n    raise _QapplyRefused(409, _QAPPLY_TEXTS['bad_id'], {})\n").body[0])
+    _r, acts, verdict, _f = _r10_keys(planted)
+    assert "bad_id" in acts - verdict and "bad_id" not in R10_LOCK_ONLY
+    # The verdict's receipt check dropped: the census names the key.
+    cut = src.replace("return no('credited_before')", "pass")
+    assert cut != src
+    _r, acts, verdict, _f = _r10_keys(ast.parse(cut))
+    assert "credited_before" in acts - verdict
+    # The control: the tree as it stands.
+    _r, acts, verdict, _f = _r10_keys()
+    assert not ({"bad_id", "credited_before"} & (acts - verdict))
+
+
+def test_seam_r10_the_list_answers_the_receipt_and_the_168_bound_as_the_routes_do(monkeypatch):
+    bound = main._QAPPLY_LOBBY_SETTLED_BEFORE
+
+    async def body(env):
+        # The receipt: credited, then set back to pending by hand (the C3 case); both routes answer
+        # credited_before, and so does the list.
+        lob, qid = await closed_held(env)
+        await later_for(env, lob)
+        assert (await credit(env, qid)).status == 200
+        await env.conn.execute("UPDATE match_report_quarantine SET status = 'pending', reviewed_at = NULL"
+                               " WHERE id = $1", uuid.UUID(qid))
+        v = (await listing(env))[qid]
+        assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+            False, T["credited_before"], False), ("R10 the list reads the receipt", v)
+        assert (await credit(env, qid)).body == T["credited_before"], "R10 the route agrees"
+        # The 168 bound: a lobby made a second before it; both routes answer 410, the list says no.
+        for arm in ("accept", "credit"):
+            lob, qid = await closed_held(env)
+            if arm == "credit":
+                await later_for(env, lob)
+            await env.conn.execute("UPDATE ffa_lobbies SET created_at = $2 WHERE id = $1",
+                                   lob.lid, bound - _dt.timedelta(seconds=1))
+            v = (await listing(env))[qid]
+            assert (v["can_accept"], v["accept_blocked_reason"], v["can_credit"]) == (
+                False, T["settled_by_hand"], False), ("R10 the list reads the 168 bound", arm, v)
+            # The control: the same lobby made AT the bound; the list allows what the route does.
+            await env.conn.execute("UPDATE ffa_lobbies SET created_at = $2 WHERE id = $1", lob.lid, bound)
+            v = (await listing(env))[qid]
+            assert v["can_accept" if arm == "accept" else "can_credit"] is True, ("R10 control", arm, v)
+            assert (await (accept if arm == "accept" else credit)(env, qid)).status == 200, ("R10 control route", arm)
+    run_env(monkeypatch, body)

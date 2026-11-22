@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_list_quarantine",
-          "a608413b35bc5b005f60a2c643e91d0d34c0c002"
+          "f544c0d41337d27d8e77d073cee1a9607571052d"
         ],
         [
           "/api/v1/admin/quarantine/triage",
@@ -592,7 +592,7 @@
           ],
           "main",
           "internal_quarantine_digest",
-          "3d83f5c87426e97e7685e3c8774b909ae6e725c0"
+          "e006cbec17ae28f580cc180260908ddf66eafa02"
         ],
         [
           "/api/v1/internal/recent-flags",
