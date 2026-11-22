@@ -95,9 +95,40 @@ def _ddl_unknown(sql):
     return out
 
 
+# Every statement form that makes or changes a column (holder H3): ALTER of
+# a table, foreign table, view, type or domain; CREATE of a table in any
+# form (UNLOGGED, TEMP, IF NOT EXISTS, AS, OF, PARTITION OF), of a view or
+# materialized view, of a type or a domain; SELECT ... INTO a new table.
+# Case and line breaks do not matter; comments are not read.
+_COLUMN_MAKER = re.compile(
+    r"\bALTER\s+(?:FOREIGN\s+TABLE|TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
+    r"|\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+|FOREIGN\s+)?"
+    r"(?:TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
+    r"|\bINTO\s+(?:TEMPORARY|TEMP|UNLOGGED|TABLE)\b", re.I)
+_READ_CREATE = re.compile(r"^\s*CREATE TABLE \w+ \($")
+
+
+def _ddl_outside(sql):
+    """Every statement of `sql` that makes or changes a column and that the
+    readers above do not read, as "line N: text": anything the closed form
+    finds, except a `CREATE TABLE <name> (` line of _CREATE's own form.
+    LIMIT: a statement whose words are built at run time (concatenated
+    strings) and a SELECT ... INTO with no keyword after INTO are not seen."""
+    lines = sql.replace("\r\n", "\n").split("\n")
+    bare = "\n".join(re.sub(r"--.*$", "", s) for s in lines)
+    found = []
+    for m in _COLUMN_MAKER.finditer(bare):
+        i = bare.count("\n", 0, m.start())
+        if not _READ_CREATE.match(lines[i]):
+            found.append("line %d: %s" % (i + 1, lines[i].strip()))
+    return found
+
+
 def _disclosure_problems(sql, fixture, sentence):
     """Everything wrong between 427's DDL, the table and the sentence."""
     problems = ["a CREATE TABLE line the reader does not know: %s" % u for u in _ddl_unknown(sql)]
+    problems += ["a statement outside a CREATE TABLE body that makes or changes a column: %s" % u
+                 for u in _ddl_outside(sql)]
     tables = _ddl_columns(sql)
     if set(tables) != set(TABLES):
         problems.append("the DDL creates %s, not the three tables" % sorted(tables))
@@ -140,6 +171,32 @@ def test_every_column_of_the_three_tables_is_disclosed_or_bookkeeping():
     tables = _ddl_columns(sql)
     assert {t: len(c) for t, c in tables.items()} == {
         "steam_signin_facts": 14, "steam_family_shares": 5, "conn_markers": 9}, tables
+
+
+def test_the_disclosure_check_refuses_a_column_made_outside_a_create_table_body():
+    """Holder H3 (M2): the real 427 holds no such statement; each plant,
+    on the line after `-- DDL END`, is refused with its line named. (A
+    plain `CREATE TABLE <name> (` line is of the reader's own form: it is
+    read, and a fourth table is refused by the table-set check.)"""
+    sql, fixture = _read(MIGRATION_427), _fixture()
+    assert _ddl_outside(sql) == []
+    end = "    -- DDL END\n"
+    assert sql.count(end) == 1
+    line = sql[:sql.index(end)].count("\n") + 2
+    plants = ("ALTER TABLE conn_markers ADD COLUMN port BIGINT NULL;",
+              "alter table conn_markers add port bigint;",
+              "CREATE UNLOGGED TABLE alt_plant (a TEXT NOT NULL);",
+              "CREATE TEMP TABLE alt_plant (a TEXT NOT NULL);",
+              "CREATE TABLE IF NOT EXISTS alt_plant (a TEXT NOT NULL);",
+              "CREATE TABLE alt_plant AS SELECT 1 AS a;",
+              "CREATE VIEW alt_plant AS SELECT 1 AS a;",
+              "SELECT 1 AS a INTO TEMP alt_plant;",
+              "ALTER\n      TABLE conn_markers ADD port BIGINT;")
+    for plant in plants:
+        grown = sql.replace(end, end + "    " + plant + "\n", 1)
+        got = _disclosure_problems(grown, fixture, alt_signals.DISCLOSURE)
+        assert any(p.startswith("a statement outside a CREATE TABLE body that makes or changes a column:"
+                                " line %d: " % line) for p in got), (plant, got)
 
 
 def test_the_disclosure_check_fails_on_each_of_its_classes():

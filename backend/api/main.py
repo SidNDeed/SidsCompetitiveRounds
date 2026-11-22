@@ -17301,8 +17301,8 @@ async def _alt_retention_pass(session_factory=None, at=None) -> dict:
     batch that fails ends the batches; the pass still says what it deleted
     per table up to the failure, then counts the due rows left in a session
     and under limits of their own (or says the count could not be had), and
-    then raises the batch's exception. Says what it deleted on every pass,
-    and the due rows left when any are."""
+    then raises the batch's exception. A pass that ends, or whose batch
+    fails, says what it deleted and the due rows left when any are."""
     if session_factory is None:
         from database import async_session as session_factory
     t0 = time.monotonic()
@@ -17352,13 +17352,13 @@ async def _alt_retention_pass(session_factory=None, at=None) -> dict:
 async def alt_signals_retention_loop(clock=None) -> None:
     """The pass's own loop, started from lifespan on the PRIMARY only (every
     pass DELETEs). One `[ALT-RETENTION] pass armed` line at boot; the first
-    pass PASS_FIRST_DELAY_S after start; each later pass starts PASS_PERIOD_S
-    after the previous pass STARTED, on `clock` (time.monotonic unless a test
-    gives one). A pass that ran past the period is followed at once, and the
-    loop says so (`pass overran`). A pass that fails is caught here, counted
-    and said (`pass FAILED (<n> in a row)`), and the next runs on schedule;
-    `pass recovered` says when one gets through. _supervised is the backstop
-    for what escapes the loop."""
+    pass PASS_FIRST_DELAY_S after the loop starts, after a restart too. In
+    one process, a pass that ends within PASS_PERIOD_S of its start is
+    followed PASS_PERIOD_S after it STARTED, on `clock` (time.monotonic
+    unless a test gives one); one that ran past the period is followed at
+    once, and the loop says so (`pass overran`). A pass that fails is caught
+    here, counted and said (`pass FAILED (<n> in a row)`); `pass recovered`
+    says when one gets through. _supervised is the backstop for what escapes."""
     clock = clock or time.monotonic
     _alt_print("[ALT-RETENTION] pass armed: every %ds, rows past %d days, first pass in %ds"
                % (_alt_signals.PASS_PERIOD_S, _alt_signals.DUE_DAYS, _alt_signals.PASS_FIRST_DELAY_S))

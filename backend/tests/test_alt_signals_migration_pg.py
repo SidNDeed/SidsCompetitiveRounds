@@ -139,8 +139,48 @@ _DDL_COLUMN = re.compile(r"^\s*([a-z_]+)\s+(TEXT|TIMESTAMPTZ|VARCHAR\(8\)|BOOLEA
                          r"\s+(NOT NULL|NULL)\b")
 
 
+# Every statement form that makes or changes a column (holder H3): ALTER of
+# a table, foreign table, view, type or domain; CREATE of a table in any
+# form (UNLOGGED, TEMP, IF NOT EXISTS, AS, OF, PARTITION OF), of a view or
+# materialized view, of a type or a domain; SELECT ... INTO a new table.
+# Case and line breaks do not matter; comments are not read.
+_COLUMN_MAKER = re.compile(
+    r"\bALTER\s+(?:FOREIGN\s+TABLE|TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
+    r"|\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+|FOREIGN\s+)?"
+    r"(?:TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
+    r"|\bINTO\s+(?:TEMPORARY|TEMP|UNLOGGED|TABLE)\b", re.I)
+_PLAIN_CREATE = re.compile(r"^\s*CREATE TABLE [a-z_]+ \($")
+
+
+def _ddl_outside(text):
+    """Every statement of `text` that makes or changes a column and that
+    this file's DDL reader does not read, as "line N: text": anything the
+    closed form above finds, except a plain `CREATE TABLE <name> (` line
+    inside the DDL block. LIMIT: a statement whose words are built at run
+    time (concatenated strings) and a SELECT ... INTO with no keyword after
+    INTO are not seen."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    starts = [i for i, s in enumerate(lines) if s.strip() == "-- DDL START"]
+    ends = [i for i, s in enumerate(lines) if s.strip() == "-- DDL END"]
+    block = range(starts[0] + 1, ends[0]) if len(starts) == 1 and len(ends) == 1 else range(0)
+    bare = "\n".join(re.sub(r"--.*$", "", s) for s in lines)
+    out = []
+    for m in _COLUMN_MAKER.finditer(bare):
+        i = bare.count("\n", 0, m.start())
+        if i in block and _PLAIN_CREATE.match(lines[i]):
+            continue
+        out.append("line %d: %s" % (i + 1, lines[i].strip()))
+    return out
+
+
 def _ddl_columns(text):
-    """{table: [(column, type, nullable)]} read from 427's DDL block."""
+    """{table: [(column, type, nullable)]} read from 427's DDL block; a
+    statement outside the block's CREATE TABLE bodies that makes or changes
+    a column is refused, naming its line (H3)."""
+    outside = _ddl_outside(text)
+    if outside:
+        raise AssertionError("a statement outside a CREATE TABLE body that makes or changes a column: %s"
+                             % "; ".join(outside))
     out, current = {}, None
     for line in _ddl_lines(text):
         m = re.match(r"\s*CREATE TABLE ([a-z_]+) \($", line)
@@ -206,6 +246,38 @@ def test_each_reader_refuses_a_column_of_a_type_it_does_not_know():
     md.tables["conn_markers"].append_column(Column("port", BigInteger, nullable=True))
     with pytest.raises(AssertionError, match=r"conn_markers\.port BIGINT"):
         _orm_columns(md)
+
+
+# Plants of holder H3, each placed on the line after 427's `-- DDL END`.
+_OUTSIDE_PLANTS = ("ALTER TABLE conn_markers ADD COLUMN port BIGINT NULL;",
+                   "alter table conn_markers add port bigint;",
+                   "CREATE UNLOGGED TABLE alt_plant (a TEXT NOT NULL);",
+                   "CREATE TEMP TABLE alt_plant (a TEXT NOT NULL);",
+                   "CREATE TABLE IF NOT EXISTS alt_plant (a TEXT NOT NULL);",
+                   "CREATE TABLE alt_plant AS SELECT 1 AS a;",
+                   "CREATE TABLE alt_plant (",
+                   "CREATE VIEW alt_plant AS SELECT 1 AS a;",
+                   "SELECT 1 AS a INTO TEMP alt_plant;",
+                   "ALTER\n      TABLE conn_markers ADD port BIGINT;")
+
+
+def _plant_outside(text, plant):
+    end = "    -- DDL END\n"
+    assert text.count(end) == 1
+    line = text[:text.index(end)].count("\n") + 2
+    return text.replace(end, end + "    " + plant + "\n", 1), line
+
+
+def test_the_ddl_reader_refuses_a_column_made_outside_a_create_table_body():
+    """Holder H3 (M2): the real 427 holds no such statement; each plant is
+    refused with its line named, and a CREATE TABLE line of the reader's
+    own form is refused when it stands outside the DDL block."""
+    t = _text(F427)
+    assert _ddl_outside(t) == []
+    for plant in _OUTSIDE_PLANTS:
+        grown, line = _plant_outside(t, plant)
+        with pytest.raises(AssertionError, match=r"outside a CREATE TABLE body .*line %d: " % line):
+            _ddl_columns(grown)
 
 
 def test_the_orm_classes_match_427_column_for_column():

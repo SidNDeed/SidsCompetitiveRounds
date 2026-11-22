@@ -129,8 +129,10 @@ Press **F5** in-game to open the competitive menu. That's the hub for everything
   rows_set integer;
   final_text text;
 BEGIN
-  -- The row is locked before it is read (finding R2-1): a writer that
-  -- comes first makes this wait and then read what it committed.
+  -- The row is locked before it is read (finding R2-1). A writer that holds
+  -- it makes this wait, for at most the lock_timeout set above (5 s): when
+  -- the writer ends within it, this reads what the writer committed; past
+  -- it, this statement fails, the transaction aborts and nothing changes.
   PERFORM 1 FROM pending_channel_posts p
    WHERE p.channel_id = '1159243585309384805' AND p.sort_order = 1
      FOR NO KEY UPDATE;

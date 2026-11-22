@@ -426,7 +426,13 @@ def test_a_held_due_row_is_skipped_said_and_taken_by_the_next_pass(clean, capsys
     first, took, mid, second, after = rec._with(clean, body)
     assert mid == {k: (1, 0) for k in TABLES}, mid
     assert first["deleted"] == {k: 1 for k in TABLES} and first["left"] == {k: 1 for k in TABLES}, first
-    assert took < 0.9, took
+    # H4. Discriminator: the fixed batch skips the held rows (SKIP LOCKED);
+    # a batch that waits for them is ended by the pass's lock limit
+    # (A.PASS_LOCK_TIMEOUT_MS, 1.0 s) and raises. Margin: 0.1 s under that
+    # limit. Clock: the test's time.monotonic around the call; the broken
+    # wait is ended by the server's lock timer, which a test cannot give.
+    assert took < 0.9, ("H4: a skipped held row takes no wait; 0.9 s is 0.1 s under the 1.0 s pass lock limit"
+                        " (test's monotonic clock)", took)
     assert second["deleted"] == {k: 1 for k in TABLES} and second["left"] == {k: 0 for k in TABLES}, second
     assert after == {k: 0 for k in TABLES}, after
     lines = _alt_lines(capsys)
@@ -468,7 +474,14 @@ def test_the_statement_limit_ends_a_slow_batch_and_the_row_stays(clean, monkeypa
         return got.value, took, await _count(sm, "facts", sid)
 
     exc, took, n = rec._with(clean, body)
-    assert took < 2.5 and n == 1, (took, n, exc)
+    # H4. Discriminator: the pass's statement limit (set to 0.3 s here)
+    # cancels the batch whose delete sleeps 5 s in the fault trigger;
+    # without the limit the batch runs the whole 5 s (the pass's own 15 s
+    # limit is longer). Margin: 2.2 s above the 0.3 s limit, 2.5 s under the
+    # 5 s sleep. Clock: the test's time.monotonic; the cancel comes from the
+    # server's statement timer, which a test cannot give.
+    assert took < 2.5 and n == 1, ("H4: cancelled at the 0.3 s statement limit, not after the 5 s sleep;"
+                                   " bound 2.5 s (test's monotonic clock)", took, n, exc)
     assert "57014" in repr(exc) or "QueryCanceled" in repr(exc) or "canceling statement" in str(exc), repr(exc)
 
 
@@ -490,7 +503,14 @@ def test_the_lock_limit_ends_a_wait_on_a_held_table(clean):
         return got.value, took, await _count(sm, "facts", sid)
 
     exc, took, n = rec._with(clean, body)
-    assert took < 3.0 and n == 1, (took, n, exc)
+    # H4. Discriminator: the pass's lock limit (A.PASS_LOCK_TIMEOUT_MS,
+    # 1.0 s) ends the wait on the table the holder locks until after the
+    # pass returns; without it the wait lasts until the pass's 15 s
+    # statement limit. Margin: 2.0 s above the 1.0 s limit, 12 s under the
+    # 15 s one. Clock: the test's time.monotonic; the end comes from the
+    # server's lock timer, which a test cannot give.
+    assert took < 3.0 and n == 1, ("H4: ended at the 1.0 s pass lock limit, not at the 15 s statement limit;"
+                                   " bound 3.0 s (test's monotonic clock)", took, n, exc)
     assert "55P03" in repr(exc) or "LockNotAvailable" in repr(exc) or "lock timeout" in str(exc), repr(exc)
 
 
@@ -522,7 +542,18 @@ def test_pass_first_the_sign_in_waits_at_most_its_lock_limit_and_both_finish(cle
         return sign_in_took, pass_took, res, plan
 
     sign_in_took, pass_took, res, plan = rec._with(clean, body)
-    assert sign_in_took < 2.0, sign_in_took
+    # H4. Discriminator: the recording's limits (lock 0.5 s, statement 1.5 s)
+    # end the sign-in's wait on the row whose delete sleeps 3 s; with both
+    # limits gone the sign-in waits for the pass's sleep to end. The lock
+    # limit alone is not told apart here (the 1.5 s statement limit also
+    # ends the wait under 2.0 s): the record test's lock-limit holder tells
+    # it by SQLSTATE. Margin: 1.5 s above the 0.5 s lock limit, 0.5 s above
+    # the 1.5 s statement limit; the broken wait is the rest of the 3 s
+    # sleep. Clock: the test's time.monotonic; the server's timers end the
+    # wait, and a test cannot give them. The pass bound (6.0 s) is the 3 s
+    # sleep plus 3 s; it holds that the pass finishes, not a limit.
+    assert sign_in_took < 2.0, ("H4: the recording's limits end its wait (0.5 s lock, 1.5 s statement), not"
+                                " the pass's 3 s sleep; bound 2.0 s (test's monotonic clock)", sign_in_took)
     assert pass_took < 6.0 and res["deleted"]["facts"] == 1, (pass_took, res)
     assert "INSERT INTO steam_signin_facts" in plan.after()[-1] and plan.rollbacks == 1, plan.after()
     lines = _alt_lines(capsys, "[ALT-SIGNALS]")
@@ -555,7 +586,16 @@ def test_sign_in_first_the_pass_skips_the_row_and_both_finish(clean, env, capsys
         return pass_took, first, status, ans, rows, second, await _count(sm, "facts", prefix)
 
     pass_took, first, status, ans, rows, second, n = rec._with(clean, body)
-    assert pass_took < 0.9, pass_took
+    # H4. Discriminator: the fixed batch skips the row the sign-in holds
+    # (SKIP LOCKED); a batch that waits for it waits out the rest of the
+    # update's 1 s sleep. Margin: 0.9 s is about 0.1 s under that wait, so
+    # the time alone is thin; the second discriminator is the count on the
+    # next line: a pass that waited reads the row after the recording moved
+    # its last sight, and leaves no due row. Clock: the test's
+    # time.monotonic; the 1 s is the server's own sleep.
+    assert pass_took < 0.9, ("H4: a skipped held row takes no wait; 0.9 s against the rest of a 1 s sleep,"
+                             " the left count below is the second discriminator (test's monotonic clock)",
+                             pass_took)
     assert first["deleted"]["facts"] == 0 and first["left"]["facts"] == 1, first
     rec._like_baseline(status, ans)
     assert rows == [1, 1, 1], rows

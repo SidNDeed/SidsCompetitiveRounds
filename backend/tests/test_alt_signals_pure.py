@@ -344,7 +344,11 @@ def test_the_spelling_check_finds_a_plain_import_and_a_shared_name():
 BACKEND = Path(__file__).resolve().parents[1]
 # Published resolver service addresses the lane's tests use (Cloudflare,
 # Google Public DNS, Quad9); every other literal must lie in a
-# special-purpose range (not global) or be multicast.
+# special-purpose range (not global by the standard library's reading of
+# the special-purpose registries) or be multicast. Multicast (224.0.0.0/4,
+# ff00::/8) is NOT in those registries: it is admitted as its own class
+# because the code under test refuses it by its own rule
+# (api/alt_signals.py address_refusal, the is_multicast test).
 RESOLVERS = frozenset({"1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
                        "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112",
                        "2606:4700:4700::1111", "2606:4700:4700::1001"})
@@ -376,11 +380,37 @@ def _literal_class(tok):
     return None
 
 
+# An IPv6-looking token (holder H5): hex groups and at least two colons,
+# an optional dotted IPv4 tail, zone id and prefix length.
+_V6_TOKEN = re.compile(r"(?<![\w:.%])((?:[0-9A-Fa-f]{0,4}:){2,7}(?:[0-9A-Fa-f]{1,4}|\d{1,3}(?:\.\d{1,3}){3})?"
+                       r"(?:%\w+)?(?:/\d{1,3})?)(?![\w:.%])")
+
+
+def _v6_texts(name, src):
+    """(line, text) of every part of `src` the IPv6 scan reads: for a Python
+    file, each comment and each string (whole constants, longer strings and
+    f-string parts) by tokenize, so code such as a slice is not read as an
+    address; for any other file (the SQL files, the JSON fixture), every
+    line, comments included."""
+    if not name.endswith(".py"):
+        return list(enumerate(src.splitlines(), 1))
+    import io
+    import tokenize
+    kinds = {tokenize.COMMENT, tokenize.STRING} | {getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING)}
+    return [(t.start[0], t.string) for t in tokenize.generate_tokens(io.StringIO(src).readline)
+            if t.type in kinds]
+
+
 def _literals(name, src):
-    """Every address or network literal in `src`: each IPv4 token of every
-    line (comments included), and each Python string constant that parses
-    whole as an IPv6 address or network. A token that looks like an IPv4
-    address and does not parse is refused by name (an unknown form)."""
+    """Every address or network literal in `src`, both families, in every
+    form the lane's files hold (holder H5): each IPv4 token of every line
+    (comments, strings, SQL and JSON included); each IPv6 token of every
+    comment and string of a Python file and of every line of any other file.
+    A token that looks like an IPv4 address and does not parse is refused by
+    name (an unknown form). LIMIT: an IPv6-looking token that does not
+    parse is not an address to this scan and is skipped (a clock reading
+    such as 12:00:00 is such a token); an address built at run time from
+    parts (as the plants below are) is not a literal and is not read."""
     out = []
     for i, line in enumerate(src.splitlines(), 1):
         for m in _V4_TOKEN.finditer(line):
@@ -390,18 +420,18 @@ def _literals(name, src):
             except ValueError:
                 cls = "UNKNOWN FORM"
             out.append(("%s:%d" % (name, i), tok, cls))
-    if name.endswith(".py"):
-        for node in ast.walk(ast.parse(src)):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and ":" in node.value:
-                s = node.value.strip()
-                if not re.fullmatch(r"[0-9A-Fa-f:.]+(%\w+)?(/\d{1,3})?", s) or s.count(":") < 2:
-                    continue
-                try:
-                    cls = _literal_class(s)
-                except ValueError:
-                    continue
-                if ipaddress.ip_network(s.split("%")[0], strict=False).version == 6:
-                    out.append(("%s:%d" % (name, node.lineno), s, cls))
+    for start, text_ in _v6_texts(name, src):
+        for m in _V6_TOKEN.finditer(text_):
+            tok = m.group(1)
+            if tok.count(":") < 2:
+                continue
+            try:
+                net = ipaddress.ip_network(tok.split("%")[0], strict=False)
+                cls = _literal_class(tok)
+            except ValueError:
+                continue
+            if net.version == 6:
+                out.append(("%s:%d" % (name, start + text_.count("\n", 0, m.start())), tok, cls))
     return out
 
 
@@ -425,3 +455,18 @@ def test_the_literal_scan_refuses_an_unlisted_public_address_a_public_network_an
     got = {(tok, cls) for _where, tok, cls in _literals("plant.py", planted)}
     assert got == {(v4, None), (net, None), (bad, "UNKNOWN FORM"), (v6, None),
                    (doc, "special-purpose")}, got
+    # Holder H5: every form the lane's files hold, both families, each with
+    # its line: a Python comment, a longer string, an f-string part, an SQL
+    # line and comment, a JSON value; a slice in code is not an address.
+    step = ":" * 2 + "2"   # a slice step, built so that this file's own strings hold no such token
+    forms = {
+        "plant.py": ('x = [1, 2][%s]\n# resolver %s and %s\nE = "seen at %s today"\n'
+                     'F = f"{x} from %s"\n' % (step, v4, v6, v6, v6), {(2, v4), (2, v6), (3, v6), (4, v6)}),
+        "plant.sql": ("-- the lender %s\nSELECT '%s'::inet;\nSELECT '%s';\n" % (v6, v6, v4),
+                      {(1, v6), (2, v6), (3, v4)}),
+        "plant.json": ('{"a": "%s", "b": ["%s"]}\n' % (v6, v4), {(1, v6), (1, v4)}),
+    }
+    for name, (src, want) in forms.items():
+        got = _literals(name, src)
+        assert {(int(w.rsplit(":", 1)[1]), t) for w, t, _c in got} == want, (name, got)
+        assert all(c is None for _w, _t, c in got), (name, got)

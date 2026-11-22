@@ -1116,50 +1116,165 @@ def test_a_recording_prints_only_its_guarded_lines_and_the_admitted_ones(case, e
         assert not any(secret in ln for ln in said), secret
 
 
+def _alt_functions():
+    """Every function main defines whose name begins with _alt_, and the
+    retention loop: derived from the module, never listed by hand."""
+    import inspect
+    fns = [v for n, v in sorted(vars(main).items())
+           if (n.startswith("_alt_") or n == "alt_signals_retention_loop")
+           and inspect.isfunction(v) and v.__module__ == main.__name__]
+    return {f.__name__: f for f in fns}
+
+
+# The names a direct write would use: the standard streams, the logging
+# module, and every module-level name of main bound to a logging.Logger
+# (none today; derived in the test, so a logger main adds is read too).
+_STREAMS = frozenset({"stdout", "stderr", "__stdout__", "__stderr__"})
+_LOGGER_WORDS = frozenset({"logging", "logger", "log", "_log", "_logger", "LOG", "LOGGER"})
+
+
+def _direct_writes(src, loggers):
+    """Every place in the source `src` that writes past print(): a use of
+    sys.stdout or sys.stderr (or of those names imported bare), of the
+    logging module, or of a logger object by the names main uses."""
+    import ast
+    import textwrap
+    out = []
+    for n in ast.walk(ast.parse(textwrap.dedent(src))):
+        if isinstance(n, ast.Attribute) and n.attr in _STREAMS:
+            out.append((n.lineno, "stream " + n.attr))
+        elif isinstance(n, ast.Name) and (n.id in _STREAMS or n.id in _LOGGER_WORDS or n.id in loggers):
+            out.append((n.lineno, "name " + n.id))
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in n.names] + ([n.module] if isinstance(n, ast.ImportFrom) and n.module else [])
+            if any(m.split(".")[0] == "logging" for m in mods):
+                out.append((n.lineno, "import logging"))
+    return out
+
+
 def test_the_recordings_functions_print_only_through_the_guarded_logger():
-    """Finding R2-14 and claim C3, by the code: no function of the
-    recording, its abandon, its notice line, the retention pass or its loop
-    calls print() itself (a raising print inside the abandon's own guard
-    would change nothing the caller sees, so the runtime holders cannot
-    tell it from _alt_print); only _alt_print does."""
+    """Finding R2-14 and claims C3 and C32, by the code (holder H1). The
+    functions are DERIVED: every function of main whose name begins with
+    _alt_, and the retention loop. None of them but _alt_print calls print()
+    itself (a raising print inside the abandon's own guard would change
+    nothing the caller sees, so the runtime holders cannot tell it from
+    _alt_print), and none of them writes past print(): no sys.stdout or
+    sys.stderr, no logging, no logger object. LIMIT: a function they call
+    that is named otherwise (the ban helper, alt_signals.py) is not read
+    here; its print() calls are seen by the runtime holder above."""
     import ast
     import inspect
+    import logging
     import textwrap
-    for fn in (main._alt_record, main._alt_abandon, main._alt_notice_line,
-               main._alt_retention_pass, main.alt_signals_retention_loop):
+    fns = _alt_functions()
+    assert {"_alt_retention_batch", "_alt_retention_left"} <= set(fns), sorted(fns)
+    assert len(fns) == 15, (len(fns), sorted(fns))
+    loggers = {n for n, v in vars(main).items() if isinstance(v, logging.Logger)}
+    for name, fn in fns.items():
         tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
         bare = [n.lineno for n in ast.walk(tree)
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "print"]
-        assert bare == [], (fn.__name__, bare)
+        assert bare == ([] if name != "_alt_print" else bare), (name, bare)
+        assert _direct_writes(inspect.getsource(fn), loggers) == [], (name, _direct_writes(inspect.getsource(fn),
+                                                                                         loggers))
     tree = ast.parse(textwrap.dedent(inspect.getsource(main._alt_print)))
     assert [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "print"]
 
 
+def test_the_direct_write_census_refuses_each_form_it_reads():
+    """The plants of holder H1(b): each form is refused by name, and a
+    function that only calls _alt_print is not."""
+    plants = {
+        "stream stderr": "def f():\n    import sys\n    sys.stderr.write('x')\n",
+        "stream stdout": "def f():\n    import sys\n    print('x', file=sys.stdout)\n",
+        "name stderr": "def f():\n    from sys import stderr\n    stderr.write('x')\n",
+        "import logging": "def f():\n    import logging\n",
+        "name logging": "def f():\n    logging.warning('x')\n",
+        "name logger": "def f():\n    logger.info('x')\n",
+        "name _alt_plant_log": "def f():\n    _alt_plant_log.info('x')\n",
+    }
+    for want, src in plants.items():
+        got = _direct_writes(src, {"_alt_plant_log"})
+        assert any(w == want for _l, w in got), (want, got)
+    assert _direct_writes("def f():\n    _alt_print('x')\n", {"_alt_plant_log"}) == []
+
+
 # -- the commands the driver sends under the production pool (finding R2-12) ------
 
+# The public methods of asyncpg.Connection, in three closed lists (holder
+# H2): those that send a command (each logged by _Wire under its own name),
+# those whose commands reach the server through one of the first list (so
+# they are logged there), and those that send none. A public method on no
+# list fails test_the_wire_lists_every_public_method_of_the_connection.
+_WIRE_SENDS = ("add_listener", "close", "copy_from_query", "copy_from_table", "copy_records_to_table",
+               "copy_to_table", "cursor", "execute", "executemany", "fetch", "fetchmany", "fetchrow",
+               "fetchval", "prepare", "remove_listener", "reset", "reset_type_codec",
+               "set_builtin_type_codec", "set_type_codec")
+_WIRE_THROUGH = {"transaction": "its start, commit and rollback send through execute"}
+_WIRE_QUIET = {
+    "add_log_listener": "registers a callback", "add_query_logger": "registers a callback",
+    "add_termination_listener": "registers a callback", "remove_log_listener": "drops a callback",
+    "remove_query_logger": "drops a callback", "remove_termination_listener": "drops a callback",
+    "query_logger": "a context manager over a callback", "get_reset_query": "builds a string",
+    "get_server_pid": "a stored value", "get_server_version": "a stored value",
+    "get_settings": "a stored value", "is_closed": "a stored state", "is_in_transaction": "a stored state",
+    "reload_schema_state": "drops the client's own caches", "terminate": "closes the socket, no command",
+}
+# The kinds a recording under the production pool may log: anything else
+# (fetchval, fetch, executemany, a cursor, a copy) is a command sent by a
+# path the test does not know, and it is named.
+_WIRE_KNOWN = frozenset({"execute", "fetchrow", "prepare", "bind"})
+
+
+def _wire_method(name):
+    import inspect
+    real = getattr(asyncpg.Connection, name)
+    if inspect.iscoroutinefunction(real):
+        async def logged(self, *args, **kw):
+            if _Wire.log is not None:
+                _Wire.log.append((name, args[0] if args and isinstance(args[0], str) else ""))
+            return await real(self, *args, **kw)
+    else:
+        def logged(self, *args, **kw):
+            if _Wire.log is not None:
+                _Wire.log.append((name, args[0] if args and isinstance(args[0], str) else ""))
+            return real(self, *args, **kw)
+    logged.__name__ = logged.__qualname__ = name
+    return logged
+
+
 class _Wire(asyncpg.Connection):
-    """An asyncpg connection that logs, while `log` is a list, every command
-    the driver sends on it: simple-protocol commands (execute: BEGIN,
-    COMMIT, ROLLBACK), the pool's ping (fetchrow), each preparation
-    (prepare) and, through the patch below, each bound execution of a
-    prepared statement (bind)."""
+    """An asyncpg connection that logs, while `log` is a list, the commands
+    the driver sends on it, each under the name of the public method that
+    sent it (_WIRE_SENDS): simple-protocol commands (execute: BEGIN, COMMIT,
+    ROLLBACK), the pool's ping (fetchrow), each preparation (prepare), any
+    fetch, fetchval, executemany, cursor or copy; and, through the patch in
+    the test below, each bound execution of a prepared statement (bind).
+    What is seen: the connection's public entry points and a prepared
+    statement's bound execution (PreparedStatement.fetch). LIMIT: a command
+    sent by another object (a prepared statement's other methods, a cursor
+    object's own fetches, the protocol called directly) is not seen; a
+    prepared statement that is never bound is (the last assert below)."""
 
     log = None
 
-    async def execute(self, query, *args, timeout=None):
-        if _Wire.log is not None:
-            _Wire.log.append(("execute", query))
-        return await super().execute(query, *args, timeout=timeout)
 
-    async def fetchrow(self, query, *args, timeout=None, record_class=None):
-        if _Wire.log is not None:
-            _Wire.log.append(("fetchrow", query))
-        return await super().fetchrow(query, *args, timeout=timeout, record_class=record_class)
+for _name in _WIRE_SENDS:
+    setattr(_Wire, _name, _wire_method(_name))
+del _name
 
-    async def prepare(self, query, *, name=None, timeout=None, record_class=None):
-        if _Wire.log is not None:
-            _Wire.log.append(("prepare", query))
-        return await super().prepare(query, name=name, timeout=timeout, record_class=record_class)
+
+def test_the_wire_lists_every_public_method_of_the_connection():
+    """Holder H2: the three lists are derived against the driver's class:
+    every public method of asyncpg.Connection is on exactly one, and each
+    sending one is logged by _Wire under its own name."""
+    public = {n for n in dir(asyncpg.Connection) if not n.startswith("_")
+              and callable(getattr(asyncpg.Connection, n))}
+    lists = [set(_WIRE_SENDS), set(_WIRE_THROUGH), set(_WIRE_QUIET)]
+    assert public == set().union(*lists), sorted(public ^ set().union(*lists))
+    assert sum(len(s) for s in lists) == len(public), lists
+    for n in _WIRE_SENDS:
+        assert _Wire.__dict__[n].__name__ == n and _Wire.__dict__[n] is not asyncpg.Connection.__dict__[n], n
 
 
 def test_the_commands_the_driver_sends_for_one_recording_under_the_production_pool(case, env, monkeypatch):
@@ -1211,7 +1326,9 @@ def test_the_commands_the_driver_sends_for_one_recording_under_the_production_po
 
     status, ans, log = _run(go())
     _like_baseline(status, ans)
-    commits = [i for i, (k, q) in enumerate(log) if k == "execute" and q.strip().upper().startswith("COMMIT")]
+    unknown = [(k, q) for k, q in log if k not in _WIRE_KNOWN]
+    assert unknown == [], unknown
+    commits =[i for i, (k, q) in enumerate(log) if k == "execute" and q.strip().upper().startswith("COMMIT")]
     assert len(commits) == 2, log
     after = log[commits[0] + 1:commits[1] + 1]
     sent = [(k, q) for k, q in after if k != "prepare"]
