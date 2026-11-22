@@ -98,7 +98,8 @@ def _ddl_unknown(sql):
 # Every statement form that makes or changes a column (holder H3): ALTER of
 # a table, foreign table, view, type or domain; CREATE of a table in any
 # form (UNLOGGED, TEMP, IF NOT EXISTS, AS, OF, PARTITION OF), of a view or
-# materialized view, of a type or a domain; SELECT ... INTO a new table.
+# materialized view, of a type or a domain; SELECT ... INTO TEMP, UNLOGGED
+# or TABLE.
 # Case and line breaks do not matter; comments are not read.
 _COLUMN_MAKER = re.compile(
     r"\bALTER\s+(?:FOREIGN\s+TABLE|TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
@@ -191,7 +192,18 @@ def test_the_disclosure_check_refuses_a_column_made_outside_a_create_table_body(
               "CREATE TABLE alt_plant AS SELECT 1 AS a;",
               "CREATE VIEW alt_plant AS SELECT 1 AS a;",
               "SELECT 1 AS a INTO TEMP alt_plant;",
-              "ALTER\n      TABLE conn_markers ADD port BIGINT;")
+              "ALTER\n      TABLE conn_markers ADD port BIGINT;",
+              "CREATE TABLE alt_plant OF alt_type;",
+              "CREATE TABLE alt_plant PARTITION OF conn_markers FOR VALUES IN (1);",
+              "CREATE FOREIGN TABLE alt_plant (a TEXT) SERVER alt_server;",
+              "ALTER FOREIGN TABLE alt_plant ADD COLUMN b TEXT;",
+              "CREATE OR REPLACE VIEW alt_plant AS SELECT 1 AS a;",
+              "CREATE MATERIALIZED VIEW alt_plant AS SELECT 1 AS a;",
+              "ALTER VIEW alt_plant RENAME COLUMN a TO b;",
+              "CREATE TYPE alt_type AS (a TEXT);",
+              "ALTER TYPE alt_type ADD ATTRIBUTE b TEXT;",
+              "CREATE DOMAIN alt_domain AS TEXT;",
+              "ALTER DOMAIN alt_domain SET NOT NULL;")
     for plant in plants:
         grown = sql.replace(end, end + "    " + plant + "\n", 1)
         got = _disclosure_problems(grown, fixture, alt_signals.DISCLOSURE)
