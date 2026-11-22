@@ -6971,7 +6971,8 @@ def test_r3_medium5_the_code_only_preflight_runs_exactly_phase_4s_forms(monkeypa
     named = {r.split(": ", 1)[1] for r in ran if r.startswith("form: ")}
     lists = set(rt.CODE_LIST) if any(r.startswith("phase 4: ") for r in ran) else set()
     want =_R3_CODE_ONLY_FORMS | ({"cat-file-batch", "ls-tree-api", "closure-is-ancestor",
-                                   "closure-ls-remote-main"} & set(rt.GIT_FORMS))
+                                   "closure-ls-remote-main", "closure-cat-file-commit",
+                                   "closure-first-parent"} & set(rt.GIT_FORMS))
     assert named | lists == want, sorted((named | lists) ^ want)
 
 

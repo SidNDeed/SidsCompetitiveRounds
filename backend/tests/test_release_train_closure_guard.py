@@ -131,7 +131,11 @@ def _bind(monkeypatch, rt, scratch, tip, boxes, tmp_path, change=None, rows=None
     monkeypatch.setattr(rt, "ALL_SQL", [])
     monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "state" / "train-state.json"))
     monkeypatch.setattr(rt, "health_json", boxes.health_json)
-    monkeypatch.setattr(rt, "closure_base", lambda: (base or scratch.base, "state"))
+    monkeypatch.setattr(rt, "closure_base", lambda st: _taken(base or scratch.base))
+
+
+def _taken(base, prior=None):
+    return {"base": base, "from": "boxes-head", "relation": "equal", "prior": prior}
 
 
 def _rw(rt, rev):
@@ -280,7 +284,13 @@ def test_iii_a_build_file_changed_needs_its_sha256_in_the_key(world, monkeypatch
     monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
     with pytest.raises(rt.Fail) as exc:
         _predict(rt, tip, base)
-    assert "(iii) backend/api/Dockerfile" in str(exc.value), str(exc.value)
+    assert "(iii) backend/api/Dockerfile differ(s)" in str(exc.value), str(exc.value)
+    assert "the entry holds no build part" in str(exc.value), str(exc.value)
+    monkeypatch.setattr(rt, "CLOSURE_CHANGE", {"build": {"backend/api/Dockerfile": "0" * 64}})
+    with pytest.raises(rt.Fail) as exc:
+        _predict(rt, tip, base)
+    assert "(iii) backend/api/Dockerfile differs at" in str(exc.value), str(exc.value)
+    assert "closure_change.build does not name its sha256" in str(exc.value), str(exc.value)
     key = {"build": {"backend/api/Dockerfile": hashlib.sha256(body).hexdigest()}}
     monkeypatch.setattr(rt, "CLOSURE_CHANGE", rt.closure_change_form("test", key))
     assert _predict(rt, tip, base) == base_word
@@ -314,8 +324,10 @@ def test_iv_a_store_on_the_evaluator_from_outside_is_refused(world, monkeypatch)
 def test_iv_mains_backend_api_holds_no_form_the_census_refuses():
     rt = _release_train()
     paths = [p.relative_to(API).as_posix() for p in API.rglob("*.py")]
-    count, hits = rt.closure_census(str(API), paths, list(EVALUATOR))
+    count, hits, unfollowed = rt.closure_census(str(API), paths, list(EVALUATOR))
     assert count >= 30 and hits == [], hits[:5]
+    assert set(unfollowed) == set(rt.CLOSURE_UNFOLLOWED)
+    print("files read %d; uses not followed by form %s" % (count, unfollowed))
 
 
 def test_the_base_must_be_an_ancestor_of_the_judged_tree(world, monkeypatch):
@@ -327,7 +339,7 @@ def test_the_base_must_be_an_ancestor_of_the_judged_tree(world, monkeypatch):
     scratch.git("checkout", "-q", "lane")
     with pytest.raises(rt.Fail) as exc:
         _predict(rt, lane, other)
-    assert "not an ancestor" in str(exc.value), str(exc.value)
+    assert "not an ancestor" in str(exc.value) and "name it with --boxes-head" in str(exc.value), str(exc.value)
 
 
 # ---------------------------------------------------------------- the table (A-1)
@@ -383,7 +395,7 @@ def _cell_world(monkeypatch, rt, c, saved):
     monkeypatch.setattr(rt, "HEALTH_EXPECT", _rows(new))
     words = {TIP: new, BASE: O_W, PRE: O_W, CODE: new}
     monkeypatch.setattr(rt, "closure_prediction", lambda rev, anc, base, what: words[rev])
-    monkeypatch.setattr(rt, "closure_base", lambda: (BASE, "state"))
+    monkeypatch.setattr(rt, "closure_base", lambda st: _taken(BASE))
     health = {PRIMARY: w[c["P"]], STANDBY: w[c["Sb"]]}
 
     def hj(host):
@@ -395,7 +407,8 @@ def _cell_world(monkeypatch, rt, c, saved):
     st = {}
     if c["rec"] != "absent":
         st[rt.CLOSURE_STATE_KEY] = {"from": O_W, "to": new if c["rec"] == "valid" else X_W, "base": BASE,
-                                    "tip": TIP, "recorded_at": "2026-11-22T00:00:00Z"}
+                                    "tip": TIP, "recorded_at": "2026-11-22T00:00:00Z", "base_from": "boxes-head",
+                                    "base_relation": "equal", "unfollowed": dict.fromkeys(rt.CLOSURE_UNFOLLOWED, 0)}
     if c["pre"]:
         st["precursor_sha"] = PRE
     if c["code"]:
@@ -767,9 +780,11 @@ def test_the_base_is_the_code_sha_of_the_newest_verified_state_file_printed_whol
     _state_files(monkeypatch, rt, scratch, {"a-old": {"verified": True, "code_sha": scratch.base},
                                             "b-new": {"verified": True, "code_sha": later},
                                             "c-open": {"code_sha": "c" * 40}, "d-bad": "{not json"})
-    assert rt.closure_base() == (later, "state")
+    got = rt.closure_base({})
+    assert (got["base"], got["from"]) == (later, "state")
     out = capsys.readouterr().out
-    assert ("BASE %s is the code_sha of the newest verified state file (batch b-new; 1 unreadable)" % later) in out
+    assert ("BASE %s is the code_sha of the newest verified state file (batch b-new; 1 unreadable); a run needs "
+            "--boxes-head" % later) in out
 
 
 def test_two_verified_state_files_on_diverging_lines_are_refused(world, monkeypatch):
@@ -781,7 +796,7 @@ def test_two_verified_state_files_on_diverging_lines_are_refused(world, monkeypa
     _state_files(monkeypatch, rt, scratch, {"a": {"verified": True, "code_sha": lane},
                                             "b": {"verified": True, "code_sha": other}})
     with pytest.raises(rt.ClosureRefusal) as exc:
-        rt.closure_base()
+        rt.closure_base({})
     assert "neither of which is an ancestor" in str(exc.value)
 
 
@@ -789,10 +804,11 @@ def test_without_a_verified_state_file_the_base_is_origins_main_declared(world, 
     rt, scratch, base_word = world
     _state_files(monkeypatch, rt, scratch, {"c-open": {"code_sha": "c" * 40}})
     monkeypatch.setattr(rt, "_git_line", lambda argv: "%s\trefs/heads/main" % scratch.base)
-    assert rt.closure_base() == (scratch.base, "origin")
+    got = rt.closure_base({})
+    assert (got["base"], got["from"]) == (scratch.base, "origin")
     out = capsys.readouterr().out
     assert ("BASE %s is origin's main, a declared inference: no verified state file of this tool can be read "
-            "(0 unreadable)" % scratch.base) in out
+            "(0 unreadable); a run needs --boxes-head" % scratch.base) in out
 
 
 @pytest.mark.parametrize("what,want", [("tip", "no reviewed_tip is pinned as a full commit id"),
@@ -885,3 +901,264 @@ def test_a_judge_without_a_closure_record_refuses_by_its_fixed_line(judge):
         else:
             rt.closure_judge_bot({})
     assert "(%s) no closure record" % judge in str(exc.value)
+
+
+# ---------------------------------------------------------------- the base is the operator's word (41-Q1 point 2)
+
+
+@pytest.fixture
+def line(tmp_path, monkeypatch):
+    rt = _release_train()
+    scratch = Scratch(tmp_path / "scratch")
+    monkeypatch.setattr(rt, "REPO", str(scratch.repo))
+    scratch.git("checkout", "-q", "main")
+    m1 = scratch.commit({"main.py": b"# m1\n"}, "m1")
+    scratch.git("checkout", "-q", "-b", "side")
+    side = scratch.commit({"side.py": b"# side\n"}, "side")
+    scratch.git("checkout", "-q", "main")
+    scratch.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+    m2 = scratch.git("rev-parse", "HEAD")
+    scratch.git("checkout", "-q", "lane")
+    lane = scratch.commit({"lane.py": b"# lane\n"})
+    monkeypatch.setattr(rt, "_closure_origin_main", lambda: m2)
+    _state_files(monkeypatch, rt, scratch, {})
+    return rt, scratch, {"base": scratch.base, "m1": m1, "side": side, "m2": m2, "lane": lane}
+
+
+def test_a_run_with_go_and_without_the_word_is_refused_naming_the_way(line, monkeypatch):
+    rt, scratch, c = line
+    monkeypatch.setattr(rt, "CLOSURE_GO", True)
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_base({})
+    assert "a run with --go needs --boxes-head, the full sha read as HEAD on both boxes; read it" in str(exc.value)
+
+
+def test_the_command_line_refuses_a_run_without_the_word_before_any_token(monkeypatch, tmp_path, capsys):
+    rt = _release_train()
+    events = []
+    _main_world(monkeypatch, rt, tmp_path, events, ["run", "--go", "--only", "deploy-precursor"])
+    monkeypatch.setattr(rt, "STATE_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(rt, "REVIEWED_TIP", TIP)
+    assert rt.main() == 1
+    out = capsys.readouterr().out
+    assert events == ["preflight"] and "needs --boxes-head" in out and "before a train token was written" in out, (
+        events, out)
+
+
+@pytest.mark.parametrize("argv,go", [(["run", "--go"], True), (["run"], False), (["plan", "--go"], False),
+                                     (["check"], False)])
+def test_the_command_line_hands_the_word_and_the_go_to_the_base_function(monkeypatch, tmp_path, argv, go):
+    rt = _release_train()
+    _main_world(monkeypatch, rt, tmp_path, [], argv + ["--boxes-head", "9" * 40])
+
+    def stop():
+        raise rt.Fail("stopped here")
+    monkeypatch.setattr(rt, "closure_load_state", stop)
+    assert rt.main() == 1
+    assert (rt.CLOSURE_BOXES_HEAD, rt.CLOSURE_GO) == ("9" * 40, go)
+
+
+@pytest.mark.parametrize("which,want", [
+    ("short", "--boxes-head is not 40 hex; give the full sha read as HEAD on both boxes"),
+    ("upper", "--boxes-head is not 40 hex; give the full sha read as HEAD on both boxes"),
+    ("missing", "is not a commit of this repository; fetch origin, then run again"),
+    ("lane", "does not stand on the first-parent line of origin's main"),
+    ("side", "does not stand on the first-parent line of origin's main"),
+    ("origin", "origin's main eeeeeeeeeeee is not a commit of this repository; fetch origin, then run again"),
+])
+def test_each_refusal_of_the_word_names_the_way(line, monkeypatch, which, want):
+    rt, scratch, c = line
+    word = {"short": c["m1"][:12], "upper": c["m1"].upper(), "missing": "f" * 40, "origin": c["m1"]}.get(which)
+    monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", word or c[which])
+    if which == "origin":
+        monkeypatch.setattr(rt, "_closure_origin_main", lambda: "e" * 40)
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_base({})
+    assert want in str(exc.value), str(exc.value)
+    if which in ("lane", "side"):
+        assert "read HEAD on both boxes again" in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize("rec,word,want", [
+    ("m2", "m2", "equal"), ("m1", "m2", "ahead by 1"), ("m2", "base", "behind by 2"),
+    (None, "m1", "no verified record"), ("lane", "m2", "the newest verified record is off the first-parent line")])
+def test_the_words_relation_to_the_newest_verified_record_is_printed_and_never_refuses(line, monkeypatch, capsys,
+                                                                                       rec, word, want):
+    rt, scratch, c = line
+    _state_files(monkeypatch, rt, scratch, {"a": {"verified": True, "code_sha": c[rec]}} if rec else {})
+    monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", c[word])
+    monkeypatch.setattr(rt, "CLOSURE_GO", True)
+    assert rt.closure_base({}) == {"base": c[word], "from": "boxes-head", "relation": want, "prior": None}
+    assert ("BASE %s is --boxes-head; to the newest verified record %s: %s"
+            % (c[word], c[rec] if rec else "(none)", want)) in capsys.readouterr().out
+
+
+def test_check_and_plan_take_the_word_when_it_is_given_and_carry_the_newest_records_numbers(line, monkeypatch):
+    rt, scratch, c = line
+    numbers = {"call": 1, "container": 0, "return": 2, "attribute": 0}
+    _state_files(monkeypatch, rt, scratch, {"a": {"verified": True, "code_sha": c["m2"],
+                                                  rt.CLOSURE_STATE_KEY: {"unfollowed": numbers}}})
+    monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", c["m1"])
+    got = rt.closure_base({})
+    assert (got["base"], got["from"], got["prior"]) == (c["m1"], "boxes-head", numbers)
+    monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", None)
+    got = rt.closure_base({})
+    assert (got["base"], got["from"], got["prior"]) == (c["m2"], "state", numbers)
+
+
+def test_a_resumed_run_takes_the_base_from_its_record_and_a_word_given_again_must_equal_it(line, monkeypatch,
+                                                                                          capsys):
+    rt, scratch, c = line
+    st = {"code_sha": c["m2"], rt.CLOSURE_STATE_KEY: {"base": c["m1"], "base_relation": "equal"}}
+    monkeypatch.setattr(rt, "CLOSURE_GO", True)
+    for word in (None, c["m1"]):
+        monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", word)
+        assert rt.closure_base(st) == {"base": c["m1"], "from": "record", "relation": "equal", "prior": None}
+        assert "BASE %s is the base this run recorded" % c["m1"] in capsys.readouterr().out
+    monkeypatch.setattr(rt, "CLOSURE_BOXES_HEAD", c["m2"])
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_base(st)
+    assert ("--boxes-head is not the base %s this run recorded; give the recorded base or leave the word out"
+            % c["m1"]) in str(exc.value)
+
+
+def test_the_record_stores_where_the_base_came_from_its_relation_and_the_numbers(monkeypatch):
+    rt = _release_train()
+    cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="F")
+    saved = []
+    st = _cell_world(monkeypatch, rt, cell, saved)
+    monkeypatch.setattr(rt, "closure_base", lambda st: dict(_taken(BASE), relation="ahead by 1"))
+    rt.closure_guard(st, "start", write=True, reach=())
+    rec = saved[0][rt.CLOSURE_STATE_KEY]
+    assert (rec["base"], rec["base_from"], rec["base_relation"]) == (BASE, "boxes-head", "ahead by 1")
+    assert rec["unfollowed"] == dict.fromkeys(rt.CLOSURE_UNFOLLOWED, 0)
+    assert rt._closure_record_ok(rec, N_W)
+    for k, bad in (("base_from", "state"), ("base_relation", None), ("unfollowed", {"call": 0}),
+                   ("unfollowed", dict(rec["unfollowed"], call=-1))):
+        assert not rt._closure_record_ok(dict(rec, **{k: bad}), N_W), k
+
+
+# ---------------------------------------------------------------- (iv): the closed form lists (41-Q1 point 1)
+
+
+def _census(tmp_path, body):
+    api = tmp_path / "api"
+    api.mkdir(exist_ok=True)
+    (api / "review_rules.py").write_text("TABLE = {}\nLIST = []\n", encoding="utf-8")
+    (api / "main.py").write_text(body, encoding="utf-8")
+    rt = _release_train()
+    return rt, rt.closure_census(str(api), ["review_rules.py", "main.py"], ["review_rules.py"])
+
+
+RR = "import review_rules as rr\n"
+READ_FORMS = {
+    "an attribute read": RR + "if rr.TABLE:\n    pass\n",
+    "a subscript read": RR + "x = rr.TABLE['k'] == 1\n",
+    "a call at depth 1": RR + "rr.review_eval()\n",
+    "a read through an assignment alias": RR + "W = rr.TABLE\nif W['k']:\n    pass\n",
+    "a read through an import-as alias": "import review_rules as R\nif R.LIST:\n    pass\n",
+    "a read through a from-import alias": "from review_rules import TABLE\nif TABLE['k']:\n    pass\n",
+}
+WRITE_FORMS = {
+    "a store": RR + "rr.TABLE = {}\n",
+    "a delete": RR + "del rr.TABLE\n",
+    "an augmented store": RR + "rr.LIST += [1]\n",
+    "a call below depth 1": RR + "rr.LIST.append(1)\n",
+    "the first argument of setattr": RR + "setattr(rr, 'TABLE', {})\n",
+    "the first argument of delattr": RR + "delattr(rr, 'TABLE')\n",
+    "a subscript store through an assignment alias": RR + "W = rr.TABLE\nW['k'] = 1\n",
+    "a store through an import-as alias": "import review_rules as R\nR.TABLE = {}\n",
+    "a delete through a from-import alias": "from review_rules import TABLE\ndel TABLE['k']\n",
+    "an augmented store through a from-import-as alias": "from review_rules import LIST as L\nL += [1]\n",
+}
+UNKNOWN_FORMS = {
+    "a tuple target": RR + "a, b = rr.LIST\n",
+    "an annotated alias": RR + "W: dict = rr.TABLE\n",
+    "an assignment expression": RR + "if (W := rr.TABLE):\n    pass\n",
+}
+UNFOLLOWED_FORMS = (
+    ("call", RR + "print(rr.TABLE)\n"),
+    ("call", RR + "print(x=rr.TABLE)\n"),
+    ("container", RR + "L = [rr.TABLE]\n"),
+    ("container", RR + "d = {}\nd['k'] = rr.TABLE\n"),
+    ("return", RR + "def f():\n    return rr.TABLE\n"),
+    ("attribute", RR + "class O:\n    pass\nO.t = rr.TABLE\n"),
+)
+UNCOUNTED_FORMS = {
+    "a loop's target": RR + "for x in rr.LIST:\n    x.append(1)\n",
+    "the value a call through the evaluator returns": RR + "rr.review_eval()['k'] = 1\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(READ_FORMS))
+def test_iv_each_read_form_passes(tmp_path, form):
+    rt, (count, hits, unfollowed) = _census(tmp_path, READ_FORMS[form])
+    assert count == 1 and hits == [] and sum(unfollowed.values()) == 0, (form, hits, unfollowed)
+
+
+@pytest.mark.parametrize("form", sorted(WRITE_FORMS))
+def test_iv_each_write_form_is_refused(tmp_path, form):
+    rt, (count, hits, unfollowed) = _census(tmp_path, WRITE_FORMS[form])
+    assert count == 1 and hits, form
+
+
+@pytest.mark.parametrize("form", sorted(UNKNOWN_FORMS))
+def test_iv_a_binding_form_the_census_does_not_know_is_a_hit(tmp_path, form):
+    rt, (count, hits, unfollowed) = _census(tmp_path, UNKNOWN_FORMS[form])
+    assert [h[2] for h in hits] == ["a name of the evaluator bound by a form the census does not know"], (form, hits)
+
+
+@pytest.mark.parametrize("form,body", UNFOLLOWED_FORMS)
+def test_iv_each_unfollowed_form_passes_and_is_counted(tmp_path, form, body):
+    rt, (count, hits, unfollowed) = _census(tmp_path, body)
+    assert hits == [] and unfollowed == dict(dict.fromkeys(rt.CLOSURE_UNFOLLOWED, 0), **{form: 1}), (body, hits,
+                                                                                                    unfollowed)
+
+
+@pytest.mark.parametrize("form", sorted(UNCOUNTED_FORMS))
+def test_iv_a_form_neither_followed_nor_counted_passes(tmp_path, form):
+    rt, (count, hits, unfollowed) = _census(tmp_path, UNCOUNTED_FORMS[form])
+    assert hits == [] and sum(unfollowed.values()) == 0, (form, hits, unfollowed)
+
+
+def test_the_disclosure_line_shows_the_numbers_and_the_newest_records_and_never_refuses(monkeypatch, capsys):
+    rt = _release_train()
+    cell = dict(rec="absent", pre=False, code=False, P="O", Sb="O", key="valid", call="F")
+    saved = []
+    st = _cell_world(monkeypatch, rt, cell, saved)
+    counts = {"call": 3, "container": 2, "return": 1, "attribute": 0}
+    rt.CLOSURE_SEEN[TIP] = {"differs": [], "unfollowed": dict(counts)}
+    monkeypatch.setattr(rt, "closure_base", lambda st: _taken(BASE, dict(counts, call=2)))
+    rt.closure_guard(st, "start", write=True, reach=())
+    out = capsys.readouterr().out
+    assert ("6 use(s) of the evaluator not followed at the reviewed tip: 3 handed to a call, 2 put in a container, "
+            "1 returned, 0 bound as an attribute of another object; a disclosure, not a refusal; the newest verified "
+            "record holds call 2, container 2, return 1, attribute 0") in out, out
+    assert saved[0][rt.CLOSURE_STATE_KEY]["unfollowed"] == counts
+    monkeypatch.setattr(rt, "closure_base", lambda st: _taken(BASE, dict(counts)))
+    rt.closure_guard({}, "check")
+    out = capsys.readouterr().out
+    assert "6 use(s) of the evaluator not followed" in out and "newest verified record holds" not in out, out
+
+
+def test_the_disclosure_counts_the_census_of_the_reviewed_tip(world, monkeypatch, tmp_path, capsys):
+    rt, scratch, base_word = world
+    tip = scratch.commit({"main.py": b"import review_rules as rr\nprint(rr.CODE_DOMAIN)\n"})
+    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path)
+    rt.closure_guard({}, "check")
+    assert ("1 use(s) of the evaluator not followed at the reviewed tip: 1 handed to a call, 0 put in a container"
+            in capsys.readouterr().out)
+
+
+# ---------------------------------------------------------------- a build-only change (41-Q1 point 4)
+
+
+def test_iii_a_build_part_with_no_build_file_differing_is_refused_naming_its_files(world, monkeypatch, tmp_path):
+    rt, scratch, base_word = world
+    tip = scratch.commit({"main.py": b"# no build change\n"})
+    _bind(monkeypatch, rt, scratch, tip, Boxes(base_word), tmp_path,
+          change={"build": {"backend/api/Dockerfile": "0" * 64}})
+    with pytest.raises(rt.ClosureRefusal) as exc:
+        rt.closure_guard({}, "check")
+    assert ("(iii) the entry's build part names backend/api/Dockerfile and no build file differs at the reviewed tip"
+            in str(exc.value)), str(exc.value)
