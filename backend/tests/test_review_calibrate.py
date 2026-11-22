@@ -14,22 +14,28 @@ statement recorder); they FAIL rather than skip when
 SEAT_EVIDENCE_TEST_PG_DSN is unset, unless SEAT_EVIDENCE_TEST_PG_OPTOUT=1
 waives it (seat_evidence_pg.require_live_pg).
 
-THE APPROVED SHAPE (shape_faults): a statement's kind is one of BEGIN,
-ROLLBACK, SELECT, WITH, SHOW; every name followed by a parenthesis is an
-approved function, an SQL word, or a CTE the statement itself declares with
-WITH RECURSIVE; no write word, no row lock. Approved functions: the ones the
-tool's and the passes' read helpers use (APPROVED_FUNCTIONS) and three the
-driver and the SQL dialect use on their own (DRIVER_FUNCTIONS: version and
-current_schema from the dialect's first-connect initialization, array_agg
-from the driver's type introspection). set_config and current_setting are on
-no list.
+THE APPROVED SHAPE (shape_faults): the statement is read by one tokenizer,
+left to right, that knows string literals ('', E'' and dollar-quoted),
+quoted identifiers, comments (-- and nested /* */) and parameters, so a
+comment marker inside a string is a string and a quoted name is a name. One
+statement only (a semicolon may only end it); its kind is one of BEGIN,
+ROLLBACK, SELECT, WITH, SHOW; every name followed by a parenthesis, quoted or
+not, schema-qualified or not, is a call unless it is an SQL word (unquoted
+only) or the name of a CTE AT ITS OWN DECLARATION (`WITH [RECURSIVE] name(
+columns ) AS (`); a call names an approved function; no write word, no row
+lock. A function that shares a CTE's name is a call like any other.
+Approved functions: the ones the tool's and the passes' read helpers use
+(APPROVED_FUNCTIONS) and three the driver and the SQL dialect use on their
+own (DRIVER_FUNCTIONS: version and current_schema from the dialect's
+first-connect initialization, array_agg from the driver's type
+introspection). set_config and current_setting are on no list.
 """
 
+import ast
 import asyncio
 import builtins
 import contextlib
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -38,6 +44,7 @@ import subprocess
 import sys
 import time
 import types
+import zoneinfo
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -179,14 +186,17 @@ class FakeFetch:
     that count just before each item is handed out; `closed` lists the
     domains whose item generator was closed."""
 
-    def __init__(self, by_domain, before=None):
+    def __init__(self, by_domain, before=None, hang=None):
         self.by_domain = by_domain
         self.before = before
+        self.hang = hang               # a domain whose selection never returns
         self.now = 0
         self.closed = []
 
-    async def totals(self):
-        return {d: len(self.by_domain.get(d, ())) for d in rc.DOMAINS}
+    async def total(self, domain):
+        if domain == self.hang:
+            await asyncio.sleep(3600)
+        return len(self.by_domain.get(domain, ()))
 
     async def items(self, domain, rs):
         try:
@@ -302,6 +312,48 @@ def test_the_full_ruleset_would_change_the_counts(planted, monkeypatch):
     assert whole[ID_DUP][2] == 1 and alone[ID_DUP][2] == 0
 
 
+def test_evaluated_counts_every_call_of_the_evaluator_a_game_without_subjects_included(planted):
+    """[15] the definition of `evaluated`: every call, whatever it finds. A
+    card game with no hand is evaluated once by each card.hand rule and fires
+    none; a raising rule's call is evaluated and counted as one error."""
+    _path, rs = planted
+    tally = run(rc.walk(rs, FakeFetch({"card": [("game", (view(), DAY0)),
+                                                 ("game", (view(hand(spx="text")), DAY0))]})))
+    got = counts(tally)
+    assert got[ID_DUP] == (2, 0, 0) and got[ID_HELD] == (2, 0, 0)
+    assert got[ID_RAISE] == (2, 0, 1)
+
+
+def test_a_call_that_raises_is_evaluated_once_and_counted_as_one_error(planted):
+    """[15] the definition of `errors`: an exception of the evaluator's call
+    is one error and the game stays evaluated; the rule errors a call
+    reports are added."""
+    _path, rs = planted
+    tally = rc.Tally(rs)
+    rule = next(r for r in tally.rules if r.id == ID_DUP)
+
+    def raises(_one):
+        raise ValueError("planted")
+    tally._count(rule, raises)
+    assert counts(tally)[ID_DUP] == (1, 0, 1)
+    tally._count(rule, lambda _one: ([], {ID_DUP}, 2))
+    assert counts(tally)[ID_DUP] == (2, 1, 3)
+
+
+def test_fired_counts_a_note_rule_and_each_rule_line_names_its_class(tmp_path):
+    """[15] the definition of `fired`: the rule is in the call's fired set,
+    flag or note alike; the line says which class the rule is."""
+    doc = planted_doc()
+    doc["rules"][0]["effect"] = "note"
+    root, rev = build_planted(tmp_path, doc)
+    rs = rr.load_dir(os.path.join(root, "rules-" + rev))
+    tally = run(rc.walk(rs, FakeFetch(planted_items())))
+    assert counts(tally)[ID_DUP] == (3, 1, 0) and counts(tally)[ID_HELD] == (3, 1, 0)
+    lines = rc.render(tally)
+    assert "rule %s scope=card class=note evaluated=3 fired=1 errors=0" % ID_DUP in lines
+    assert "rule %s scope=card class=flag evaluated=3 fired=1 errors=0" % ID_HELD in lines
+
+
 def test_the_one_rule_copy_holds_only_that_rule_and_leaves_the_ruleset_alone(planted):
     _path, rs = planted
     before = [r.id for r in rs.rules]
@@ -321,23 +373,83 @@ def test_skipped_games_are_counted_by_word_and_never_as_walked(planted):
     assert "domain card walked=3 windows=1 skipped=2 nomatch=1 purged=1" in lines
     assert "domain identity walked=2 skipped=1 unnamed=1" in lines
     assert "domain combat walked=2 skipped=0" in lines
-    assert "rule %s scope=card evaluated=3 fired=0 errors=1" % ID_RAISE in lines
+    assert "rule %s scope=card class=flag evaluated=3 fired=0 errors=1" % ID_RAISE in lines
+    assert "ambiguous (tied earliest match, not counted): card 0, identity 0, combat 0" in lines
     assert "game and sitting rules not counted: 1" in lines
 
 
+REPORT_FIXED = 1 + 1 + len(rc.DOMAINS) + 1 + 1 + 1   # summary, fired line, domains, ambiguous, uncounted, end
+
+
 def test_the_report_ends_with_its_end_line_once_and_the_count_lines_are_unchanged(planted):
-    """[13]: the last line is `report end`, exactly once; the lines before it
-    are the summary, one per counted rule, one per domain and the uncounted
-    line, in that order."""
+    """The last line is `report end`, exactly once; the lines before it are
+    the summary, the line on fired, one per counted rule, one per domain, the
+    ambiguous line and the uncounted line, in that order."""
     _path, rs = planted
     tally = run(rc.walk(rs, FakeFetch(planted_items())))
     lines = rc.render(tally)
     assert _tail(lines) == "report end" and lines.count("report end") < 2
-    assert len(lines) == 1 + len(tally.rules) + len(rc.DOMAINS) + 1 + 1
+    assert len(lines) == REPORT_FIXED + len(tally.rules)
     assert lines[0] == ("run whole: games read 10 of 10 (card 5 of 5, identity 3 of 3, "
                         "combat 2 of 2)")
-    assert [ln.split()[1] for ln in lines[1:1 + len(tally.rules)]] == [r.id for r in tally.rules]
+    assert lines[1] == "fired counts flag and note rules alike; each rule line names its class"
+    assert [ln.split()[1] for ln in lines[2:2 + len(tally.rules)]] == [r.id for r in tally.rules]
+    assert lines[-3].startswith("ambiguous (tied earliest match, not counted): ")
     assert lines[-2] == "game and sitting rules not counted: 1"
+
+
+class _Writes:
+    """A standard output that records every write CALL."""
+
+    def __init__(self):
+        self.calls = []
+
+    def write(self, s):
+        self.calls.append(s)
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+@pytest.mark.parametrize("case", ["report", "count-failure"])
+def test_a_run_writes_its_output_in_exactly_one_write_call(rooted, no_db, monkeypatch, case):
+    """[14] (METHOD 1): main() makes ONE write call for the whole run, the
+    count report (header to `report end`) or the one fixed line of a failure
+    that comes after the revision loaded (no header before it)."""
+    path, rs = rooted
+    if case == "count-failure":
+        from sqlalchemy.exc import OperationalError
+
+        async def failing(rs_, days, deadline_at=None):
+            raise OperationalError("SELECT 1", {}, Exception(TOKEN))
+        monkeypatch.setattr(rc, "_run", failing)
+    out = _Writes()
+    monkeypatch.setattr(sys, "stdout", out)
+    code = call_main(["--revision", path, "--days", "23"])
+    monkeypatch.undo()
+    assert len(out.calls) == 1, len(out.calls)
+    if case == "report":
+        assert code == 0
+        assert out.calls[0].startswith("revision %s days 23 " % rs.rev)
+        assert out.calls[0].endswith("\nreport end\n")
+    else:
+        assert code == rc.EXIT_FAILED and out.calls == ["failed (database)\n"]
+
+
+def test_a_cancelled_selection_reads_unknown_and_keeps_the_finished_totals(planted):
+    """[13]: the walk is cancelled while the identity selection runs: the card
+    total (finished) is kept, identity and combat read `unknown`, and no
+    denominator is made up from what was read."""
+    _path, rs = planted
+    tally = rc.Tally(rs)
+    fetch = FakeFetch(planted_items(), hang="identity")
+    run(rc.bounded(rc.walk(rs, fetch, tally=tally), tally, time.monotonic() + 0.3))
+    assert tally.cut == "deadline"
+    assert tally.totals == {"card": 5, "identity": None, "combat": None}
+    head = rc.render(tally)[0]
+    assert head.startswith("run cut (deadline): games read 0 of unknown (card 0 of 5, "
+                           "identity 0 of unknown, combat 0 of unknown); "), head
 
 
 # -- the card windows -----------------------------------------------------------------------
@@ -474,39 +586,153 @@ SQL_WORDS = frozenset({
     "and", "or", "in", "as", "on", "not", "distinct", "over", "values", "from", "where",
     "select", "when", "then", "else", "case", "join", "by", "is", "all", "union"})
 
-_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COPY"
-                    r"|COMMIT|LOCK|NOTIFY|LISTEN|CALL|DO|SET|RESET|DISCARD|PREPARE|EXECUTE)\b", re.I)
-_LOCK = re.compile(r"\bFOR\s+(NO\s+KEY\s+UPDATE|UPDATE|SHARE|KEY\s+SHARE)\b", re.I)
-_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
-_STRING = re.compile(r"'(?:[^']|'')*'")
-_QIDENT = re.compile(r'"(?:[^"]|"")*"')
-_CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-_CTE = re.compile(r"\bRECURSIVE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.I)
-_SHOW = re.compile(r"SHOW(\s+[A-Za-z_]+)+\s*;?", re.I)     # a setting's name, words only
+WRITE_WORDS = frozenset({
+    "insert", "update", "delete", "merge", "create", "alter", "drop", "truncate", "grant", "revoke",
+    "copy", "commit", "lock", "notify", "listen", "call", "do", "set", "reset", "discard",
+    "prepare", "execute"})
+LOCK_TAILS = (("update",), ("share",), ("no", "key", "update"), ("key", "share"))
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_PARAM = re.compile(r"\$[0-9]+")
+
+
+def sql_tokens(sql):
+    """The statement as (kind, text) tokens, read left to right once:
+    `word` (unquoted, lower-cased), `qident` (a quoted identifier's name as
+    written), `string` ('', E'' with backslash escapes, dollar-quoted),
+    `param`, `number`, `punct`; comments (-- to the line's end, nested /* */)
+    are dropped; `fault` for an unterminated string, identifier or comment."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif sql.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            if depth:
+                return out + [("fault", "unterminated comment")]
+            i = j
+        elif ch == "'" or (ch in "eE" and sql.startswith("'", i + 1)):
+            esc = ch != "'"
+            j = i + (2 if esc else 1)
+            while True:
+                if j >= n:
+                    return out + [("fault", "unterminated string")]
+                if esc and sql[j] == "\\":
+                    j += 2
+                elif sql[j] == "'" and sql.startswith("'", j + 1):
+                    j += 2
+                elif sql[j] == "'":
+                    break
+                else:
+                    j += 1
+            out.append(("string", sql[i:j + 1]))
+            i = j + 1
+        elif ch == '"':
+            j, name = i + 1, []
+            while True:
+                if j >= n:
+                    return out + [("fault", "unterminated identifier")]
+                if sql[j] == '"' and sql.startswith('"', j + 1):
+                    name.append('"')
+                    j += 2
+                elif sql[j] == '"':
+                    break
+                else:
+                    name.append(sql[j])
+                    j += 1
+            out.append(("qident", "".join(name)))
+            i = j + 1
+        elif ch == "$" and _DOLLAR_TAG.match(sql, i):
+            tag = _DOLLAR_TAG.match(sql, i).group(0)
+            j = sql.find(tag, i + len(tag))
+            if j < 0:
+                return out + [("fault", "unterminated string")]
+            out.append(("string", sql[i:j + len(tag)]))
+            i = j + len(tag)
+        elif ch == "$" and _PARAM.match(sql, i):
+            m = _PARAM.match(sql, i)
+            out.append(("param", m.group(0)))
+            i = m.end()
+        elif _WORD.match(sql, i):
+            m = _WORD.match(sql, i)
+            out.append(("word", m.group(0).lower()))
+            i = m.end()
+        elif _NUMBER.match(sql, i):
+            m = _NUMBER.match(sql, i)
+            out.append(("number", m.group(0)))
+            i = m.end()
+        else:
+            out.append(("punct", ch))
+            i += 1
+    return out
+
+
+def _closing(toks, i):
+    """The index of the parenthesis that closes the one at toks[i]."""
+    depth = 0
+    for j in range(i, len(toks)):
+        if toks[j] == ("punct", "("):
+            depth += 1
+        elif toks[j] == ("punct", ")"):
+            depth -= 1
+            if depth == 0:
+                return j
+    return None
+
+
+def _declares_cte(toks, i):
+    """toks[i] is a CTE's name AT ITS DECLARATION: after WITH, RECURSIVE or a
+    comma, then its column list, then AS."""
+    if i == 0 or toks[i - 1] not in (("word", "with"), ("word", "recursive"), ("punct", ",")):
+        return False
+    j = _closing(toks, i + 1)
+    return j is not None and j + 1 < len(toks) and toks[j + 1] == ("word", "as")
 
 
 def shape_faults(sql):
-    """Every way `sql` is off the approved shape (empty: approved). Strings,
-    quoted identifiers and comments are removed first, so a word inside a
-    literal is not read as a call."""
-    s = _QIDENT.sub(" ", _STRING.sub(" ", _COMMENT.sub(" ", sql)))
-    words = s.split()
-    faults = []
-    kind = words[0].upper().rstrip(";") if words else ""
+    """Every way `sql` is off the approved shape (empty: approved)."""
+    toks = sql_tokens(sql)
+    faults = [t[1] for t in toks if t[0] == "fault"]
+    toks = [t for t in toks if t[0] != "fault"]
+    semis = [i for i, t in enumerate(toks) if t == ("punct", ";")]
+    if semis and semis != [len(toks) - 1]:
+        faults.append("two statements")
+    kind = toks[0][1].upper() if toks and toks[0][0] == "word" else ""
     if kind not in APPROVED_KINDS:
         faults.append("kind " + kind)
-    ctes = {m.group(1).lower() for m in _CTE.finditer(s)}
-    for m in _CALL.finditer(s):
-        name = m.group(1).lower()
-        if not (name in APPROVED_FUNCTIONS or name in DRIVER_FUNCTIONS or name in SQL_WORDS
-                or name in ctes):
+    known = APPROVED_FUNCTIONS | DRIVER_FUNCTIONS
+    for i, (tk, name) in enumerate(toks):
+        if tk not in ("word", "qident") or i + 1 >= len(toks) or toks[i + 1] != ("punct", "("):
+            continue
+        if tk == "word" and name in SQL_WORDS:
+            continue
+        if _declares_cte(toks, i):
+            continue
+        if name not in known:
             faults.append("function " + name)
-    if kind != "SHOW" and _WRITE.search(s):
-        faults.append("write word " + _WRITE.search(s).group(1))
-    if kind == "SHOW" and not _SHOW.fullmatch(s.strip()):
-        faults.append("show form")
-    if _LOCK.search(s):
-        faults.append("row lock")
+    words = [t[1] for t in toks if t[0] == "word"]
+    if kind == "SHOW":
+        if not all(t[0] == "word" for t in toks[1:len(toks) - (1 if semis else 0)]) or len(words) < 2:
+            faults.append("show form")
+    else:
+        hit = [w for w in words if w in WRITE_WORDS]
+        if hit:
+            faults.append("write word " + hit[0])
+    for i, w in enumerate(words):
+        if w == "for" and any(tuple(words[i + 1:i + 1 + len(t)]) == t for t in LOCK_TAILS):
+            faults.append("row lock")
     return faults
 
 
@@ -514,7 +740,7 @@ def tool_statements():
     """Every SQL text the tool's module holds."""
     out = [rc._GAMES_SQL.format(t=t) for t in rc._TABLES.values()]
     out += [rc._CARD_ROWS.text, rc._CARD_MATCH.text, rc._ICE_ROWS.text, rc._ICE_MATCH.text,
-            rc._COMBAT_ROWS.text, rc._COMBAT_MATCH.text, rc._AT_SQL]
+            rc._COMBAT_ROWS.text, rc._COMBAT_MATCH.text, rc._AT_SQL, rc._NOW_SQL]
     out += [rc.cohort_sql(d) for d in rc.DOMAINS]
     return out
 
@@ -529,7 +755,8 @@ def test_the_shape_check_refuses_every_unlisted_kind_function_write_and_lock():
                 "SELECT * FROM x FOR UPDATE", "SELECT * FROM x FOR NO KEY UPDATE",
                 "SELECT * FROM x FOR SHARE", "LOCK TABLE x", "CALL p()", "NOTIFY x",
                 "WITH d AS (DELETE FROM t RETURNING 1) SELECT 1", "TRUNCATE x",
-                "SHOW jit; SET jit = on", "SELECT lo_import('/x')", "SELECT dblink('x', 'y')"):
+                "SHOW jit; SET jit = on", "SELECT lo_import('x')", "SELECT dblink('x', 'y')",
+                "SELECT 1; SELECT 2", "SELECT pg_catalog.set_config('jit', 'off', false)"):
         assert shape_faults(sql), sql
     for sql in tool_statements():
         assert shape_faults(sql) == [], (sql[:80], shape_faults(sql))
@@ -540,6 +767,36 @@ def test_the_shape_check_refuses_every_unlisted_kind_function_write_and_lock():
     # a word inside a literal is not a call; outside one it is
     assert shape_faults("SELECT to_char(now(), 'set_config(x)')") == []
     assert shape_faults("SELECT to_char(now(), 'x'), set_config('a', 'b', false)") != []
+
+
+@pytest.mark.parametrize("sql", [
+    'SELECT "pg_advisory_lock"(1)',
+    "SELECT \"set_config\"('jit','off',false)",
+    "SELECT '--', pg_advisory_lock(1)",
+    "SELECT '/*', pg_advisory_lock(1), '*/'",
+    "SELECT $$ -- $$, pg_advisory_lock(1)",
+    "SELECT E'\\' --', pg_advisory_lock(1)",
+    "WITH RECURSIVE tree(oid) AS (SELECT 1) SELECT tree(1) FROM tree",
+    "WITH RECURSIVE pg_advisory_lock(n) AS (SELECT 1) SELECT pg_advisory_lock(1)",
+], ids=["quoted-call", "quoted-set-config", "comment-marker-in-string", "block-marker-in-string",
+        "dollar-quoted", "escape-string", "function-named-like-a-cte", "cte-named-like-a-function"])
+def test_the_shape_check_reads_quoting_string_bounds_and_function_identity(sql):
+    """[6]: the three probes the round named (a quoted function name, a
+    quoted set_config, a comment marker inside a string) and their kin are
+    off the shape; a function that shares a CTE's name is a call."""
+    assert any(f.startswith("function ") for f in shape_faults(sql)), (sql, shape_faults(sql))
+
+
+def test_the_shape_check_allows_a_cte_name_only_at_its_own_declaration():
+    """Control of the CTE allowance: the declared CTE with its column list is
+    not a call, the driver's introspection shape is approved, and an
+    approved function written quoted is that function."""
+    assert shape_faults("WITH RECURSIVE tree(oid, depth) AS (SELECT array_agg(a) FROM t "
+                        "WHERE a = any($1::oid[])) SELECT * FROM tree") == []
+    assert shape_faults("WITH a(x) AS (SELECT 1), b(y) AS (SELECT 2) SELECT * FROM a, b") == []
+    assert shape_faults('SELECT "now"()') == []
+    assert shape_faults("SELECT 'it''s', $q$ a ' b $q$, E'\\'' FROM t") == []
+    assert shape_faults("SELECT 1 -- a comment with set_config(\n") == []
 
 
 def test_every_sql_text_of_the_tool_is_an_approved_shape():
@@ -590,6 +847,7 @@ MATCH_C = "70000000-0000-0000-0000-0000000fa0c1"
 MATCH_I = "70000000-0000-0000-0000-0000000fa0c2"
 MATCH_B = "70000000-0000-0000-0000-0000000fa0c3"
 ENDED = datetime(2026, 3, 7, 18, 45, tzinfo=timezone.utc)
+NOW_AT = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)     # 2026-03-08: a clock change in America/Los_Angeles
 
 
 def full_game_dump():
@@ -631,14 +889,18 @@ class RecordingSession:
         self.log.append((sql, params))
         return FakeResult(self._answer(sql, params or {}))
 
+    now = NOW_AT
+
     def _answer(self, sql, b):
-        if sql.startswith("WITH cand AS") and "make_interval(days" in sql:
+        if sql == rc._NOW_SQL:
+            return [{"now": self.now}]
+        if sql.startswith("WITH cand AS") and "CAST(:cut AS timestamptz)" in sql:
             table = sql.split(" FROM ", 1)[1].split()[0]
             key, mid = {"card_evidence": (KEY_C, MATCH_C),
                         "identity_clock_evidence": (KEY_I, MATCH_I),
                         "combat_evidence": (KEY_B, MATCH_B)}[table]
-            assert set(b) == {"days", "lag"}
-            return [{"k": key, "lo": LO, "hi": HI, "mid": mid, "recent": True}]
+            assert set(b) == {"cut", "lag"}
+            return [{"k": key, "lo": LO, "hi": HI, "mid": mid, "recent": True, "tied": False}]
         if "FROM card_evidence WHERE" in sql:
             assert b["k"] == KEY_C
             return [{"id": 1, "seat_player_id": LO, "other_player_id": HI, "attach_key": ROOM_C,
@@ -695,7 +957,7 @@ def test_every_statement_the_walk_sends_is_an_approved_shape_and_it_ends_with_a_
     assert {d: v["walked"] for d, v in tally.domains.items()} == {"card": 1, "identity": 1,
                                                                     "combat": 1}
     selections = [b for s, b in sess.log if s.startswith("WITH cand AS")]
-    assert len(selections) == 3 and all(b["days"] == 41 for b in selections)
+    assert len(selections) == 3 and all(b["cut"] == NOW_AT - timedelta(days=41) for b in selections)
     assert counts(tally)[ID_CMB] == (1, 1, 0)
     out = "\n".join(rc.render(tally) + [printed.out, printed.err])
     for ident in (KEY_C, KEY_I, KEY_B, ROOM_C, ROOM_I, ROOM_B, LO, HI, MATCH_C, MATCH_I, MATCH_B,
@@ -717,11 +979,65 @@ def test_a_game_whose_canonical_match_is_old_or_missing_is_skipped_by_its_word(p
                 if word == "nomatch":
                     rows[0]["mid"] = None
                     rows[0]["recent"] = None
+                    rows[0]["tied"] = None
             return rows
     sess = S()
     tally = run(rc.walk_db(rs, lambda: sess, 41))
     assert tally.domains["card"] == {"walked": 0, "skipped": {word: 1}}
     assert not any("FROM card_evidence WHERE" in s for s, _b in sess.log)
+
+
+def test_a_game_whose_earliest_eligible_matches_tie_is_counted_ambiguous_and_nowhere_else(planted):
+    """[10]: the selection says the game's earliest eligible match is tied.
+    The tool does not choose: the game is counted on the ambiguous line, is
+    neither walked nor skipped, and is not read further."""
+    _path, rs = planted
+
+    class S(RecordingSession):
+        def _answer(self, sql, b):
+            rows = super()._answer(sql, b)
+            if sql.startswith("WITH cand AS") and "card_evidence" in sql.split(" FROM ", 1)[1][:20]:
+                rows[0]["tied"] = True
+            return rows
+    sess = S()
+    tally = run(rc.walk_db(rs, lambda: sess, 41))
+    assert tally.ambiguous == {"card": 1, "identity": 0, "combat": 0}
+    assert tally.domains["card"] == {"walked": 0, "skipped": {}}
+    assert counts(tally)[ID_DUP] == (0, 0, 0)
+    assert not any("FROM card_evidence WHERE" in s for s, _b in sess.log)
+    lines = rc.render(tally)
+    assert "ambiguous (tied earliest match, not counted): card 1, identity 0, combat 0" in lines
+    assert lines[0].startswith("run whole: games read 3 of 3 (card 1 of 1, ")
+
+
+def test_the_selection_states_the_tie_and_a_total_order_in_its_statement():
+    """[10]: the canonical pick orders by the match id after the end time
+    (one result under every plan) and the statement returns whether the
+    earliest end is shared; the cohort's statement the same."""
+    for sql in [rc._GAMES_SQL.format(t="card_evidence"), rc.cohort_sql("card")]:
+        flat = " ".join(sql.split())
+        assert "ORDER BY x.k, x.lo, x.hi, x.ended, x.mid" in flat
+        assert "AND y.ended = x.ended) AS ties" in flat
+
+
+@pytest.mark.parametrize("now", [NOW_AT, NOW_AT.astimezone(timezone(timedelta(hours=-7))),
+                                 NOW_AT.astimezone(zoneinfo.ZoneInfo("America/Los_Angeles"))],
+                         ids=["utc", "offset", "zone-across-a-clock-change"])
+def test_the_days_cutoff_is_computed_in_utc_and_bound_as_a_time_stamp_with_zone(planted, now):
+    """[11]: the cutoff is the database's now() in UTC less days x 86400 s,
+    bound as a parameter cast to timestamptz; no statement does day
+    arithmetic in the session's zone. NOW_AT is a day after a clock change
+    in America/Los_Angeles: wall-clock arithmetic there gives 13:00Z, not
+    12:00Z."""
+    _path, rs = planted
+    sess = RecordingSession()
+    sess.now = now
+    run(rc.walk_db(rs, lambda: sess, 1))
+    cuts = [b["cut"] for s, b in sess.log if s.startswith("WITH cand AS")]
+    assert cuts == [datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)] * 3
+    assert all(c.utcoffset() == timedelta(0) for c in cuts)
+    for sql in [rc._GAMES_SQL.format(t="card_evidence")] + [rc.cohort_sql(d) for d in rc.DOMAINS]:
+        assert "make_interval(days" not in sql and "CAST(:cut AS timestamptz)" in sql
 
 
 def test_a_purged_record_is_skipped_by_its_own_word(planted):
@@ -755,27 +1071,73 @@ def test_a_combat_game_whose_fault_rebuild_raises_is_not_evaluated_as_the_pass_d
 # -- the connection's startup parameters ------------------------------------------------------
 
 def test_the_connection_is_read_only_from_its_startup_parameters():
+    """[9] (METHOD 2): the statement and idle timeouts are the deadline's
+    seconds, never more than the deadline."""
     s = rc.server_settings(41)
-    ms = str((41 + rc.CANCEL_SLACK_S) * 1000)
+    ms = str(41 * 1000)
     assert s == {"default_transaction_read_only": "on",
                  "default_transaction_isolation": "repeatable read",
                  "statement_timeout": ms, "idle_in_transaction_session_timeout": ms,
                  "jit": "off"}
 
 
-def test_an_address_with_options_is_refused_before_any_connection():
+def test_the_seconds_left_are_rounded_up_and_never_more_than_the_deadline():
+    for left in (0.0, 0.2, 6.999, 7.0):
+        got = rc._remaining_s(time.monotonic() + left)
+        assert 1 <= got <= max(1, 7), (left, got)
+    assert rc._remaining_s(time.monotonic() + 1199.5) <= 1200
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql+asyncpg://calib@127.0.0.1:1/calib?sslmode=disable",
+    "postgresql+asyncpg://calib@127.0.0.1/calib",
+    "postgresql+asyncpg://127.0.0.1:1/calib",
+    "postgresql+asyncpg://calib@127.0.0.1:1",
+    "postgresql+asyncpg://calib@:1/calib",
+], ids=["option", "no-port", "no-user", "no-database", "no-host"])
+def test_an_address_with_options_or_without_a_part_is_refused_before_any_connection(url):
+    """[5]: the connection is built from the address's explicit parts; one
+    the driver would fill from the environment is refused."""
     with pytest.raises(rc.ConfigRefused):
-        rc.session_factory(5, url="postgresql+asyncpg://calib@127.0.0.1:1/calib?sslmode=disable")
+        rc.session_factory(5, url=url)
+
+
+def test_the_drivers_environment_is_out_of_the_process_while_it_connects(monkeypatch):
+    """[5]: every variable of _DRIVER_ENV planted; the driver's connect sees
+    none of them, and each is back after the connect returns."""
+    import asyncpg
+    for k in rc._DRIVER_ENV:
+        monkeypatch.setenv(k, "planted")
+    seen = {}
+
+    class Conn:
+        _server_caps = types.SimpleNamespace(_replace=lambda **k: "caps")
+        _protocol = None
+
+    async def fake_connect(**kw):
+        seen.update({k: os.environ.get(k) for k in rc._DRIVER_ENV})
+        seen["kw"] = sorted(kw)
+        return Conn()
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+    run(rc._connect({"host": "127.0.0.1", "port": 1, "user": "calib", "database": "calib"},
+                    rc.server_settings(5)))
+    assert {k: seen[k] for k in rc._DRIVER_ENV} == dict.fromkeys(rc._DRIVER_ENV)
+    assert seen["kw"] == ["database", "host", "port", "server_settings", "user"]
+    assert all(os.environ.get(k) == "planted" for k in rc._DRIVER_ENV)
 
 
 def test_the_outer_bound_leaves_room_for_the_tools_own_slack():
-    """[9]: the server verb's limit (deadline + VERB_SLACK_S, then a kill
-    VERB_KILL_AFTER_S later) is later than the tool's own latest end
-    (deadline + CANCEL_SLACK_S + CLOSE_SLACK_S), and the contract text names
-    both."""
-    assert rc.VERB_SLACK_S > rc.CANCEL_SLACK_S + rc.CLOSE_SLACK_S and rc.VERB_KILL_AFTER_S > 0
-    doc = rc.__doc__
-    for name in ("VERB_SLACK_S", "VERB_KILL_AFTER_S", "CANCEL_SLACK_S", "timeout -s TERM -k"):
+    """[8] (METHOD 2): the server verb's limit (deadline + VERB_SLACK_S, then
+    a kill VERB_KILL_AFTER_S later) is later than the tool's report bound
+    (deadline + REPORT_SLACK_S, when the work yields), and the module text
+    names both and states the statement bound."""
+    assert rc.REPORT_SLACK_S == rc.CANCEL_SLACK_S + rc.CLOSE_SLACK_S + 1
+    assert rc.VERB_SLACK_S > rc.REPORT_SLACK_S and rc.VERB_KILL_AFTER_S > 0
+    doc = " ".join(rc.__doc__.split())
+    for name in ("VERB_SLACK_S", "VERB_KILL_AFTER_S", "REPORT_SLACK_S", "timeout -s TERM -k",
+                 "THE ABSOLUTE BOUND of a run is the server verb's outer time limit",
+                 "can therefore run for one statement timeout more",
+                 "A kill before the one write leaves nothing"):
         assert name in doc, name
 
 
@@ -786,7 +1148,8 @@ CUT_HEAD = ("run cut (deadline): games read 4 of 10 (card 4 of 5, identity 0 of 
 
 
 def _reads_as_whole(line):
-    return line.startswith(("run whole", "rule ", "domain ", "game and sitting"))
+    return line.startswith(("run whole", "rule ", "domain ", "game and sitting", "fired ",
+                            "ambiguous "))
 
 
 def test_a_run_its_deadline_ends_says_it_was_cut_and_no_count_reads_as_whole(planted):
@@ -798,10 +1161,10 @@ def test_a_run_its_deadline_ends_says_it_was_cut_and_no_count_reads_as_whole(pla
     assert tally.domains["identity"]["walked"] == tally.domains["combat"]["walked"] == 0
     lines = rc.render(tally)
     assert lines[0] == CUT_HEAD
-    assert len(lines) == 1 + len(tally.rules) + len(rc.DOMAINS) + 1 + 1
+    assert len(lines) == REPORT_FIXED + len(tally.rules)
     assert all(line.startswith("cut ") for line in _middle(lines)) and _tail(lines) == "report end"
     assert not any(_reads_as_whole(line) for line in lines)
-    assert "cut rule %s scope=card evaluated=3 fired=1 errors=0" % ID_DUP in lines
+    assert "cut rule %s scope=card class=flag evaluated=3 fired=1 errors=0" % ID_DUP in lines
     assert "cut domain card walked=3 windows=0 skipped=1 nomatch=1" in lines
 
 
@@ -911,16 +1274,17 @@ class SlowSession:
 @pytest.mark.parametrize("swallow", [False, True], ids=["cancellable", "swallows-cancel"])
 def test_a_slow_statement_ends_the_run_at_the_deadline_plus_the_named_slack(
         rooted, monkeypatch, capfd, swallow):
-    """[9]: --deadline-s 1 over a statement that never answers. main()
-    returns 0 within 1 + CANCEL_SLACK_S + 1 seconds (the task is cancelled
-    at the deadline); a statement that swallows the cancellation is
-    abandoned after CANCEL_SLACK_S and the engine's disposal is cut after
-    CLOSE_SLACK_S, so main() returns within 1 + CANCEL_SLACK_S +
-    CLOSE_SLACK_S + 1. Either way the first count line says `run cut
-    (deadline)` and the last is `report end`."""
+    """[8] (METHOD 2), the claim as the module states it: when the work
+    yields, the report is out by the deadline plus REPORT_SLACK_S.
+    --deadline-s 1 over a statement that never answers, and in both cases an
+    engine whose disposal never ends (cut after CLOSE_SLACK_S); with
+    `swallow` the statement also swallows every cancellation (abandoned
+    after CANCEL_SLACK_S). Either way main()
+    returns within 1 + REPORT_SLACK_S, the first line is the header, the
+    second `run cut (deadline)` and the last `report end`."""
     path, rs = rooted
-    bound = 1 + rc.CANCEL_SLACK_S + (rc.CLOSE_SLACK_S if swallow else 0) + 1
-    eng = _StandInEngine(slow=swallow)
+    bound = 1 + rc.REPORT_SLACK_S
+    eng = _StandInEngine(slow=True)
     sess = SlowSession(swallow, guard_s=bound + 2)
     monkeypatch.setattr(rc, "session_factory", lambda d, **k: (eng, lambda: sess))
     capfd.readouterr()
@@ -959,34 +1323,42 @@ def _arg(argv, token):
     return build
 
 
-ARG_ROWS = [
+# THE CENSUS ([7]): exactly one row per distinct refusal and failure branch of
+# the module (a branch: a decisive line, test_the_census_has_one_row_per_branch
+# reads them from the source), each row the only census row through at least
+# one of them. The VARIANTS run the same branches with other values; they are
+# held to the same output and are not the census.
+ARG_CENSUS = [
+    ("argument-not-text", "arguments", _arg(["--cohort", "--days", 5, TOKEN], TOKEN)),
     ("unknown-option", "arguments", _arg(["--cohort", "--days", "5", "--" + TOKEN], TOKEN)),
-    ("missing-value", "arguments", _arg(["--revision", "/x/" + TOKEN, "--days"], TOKEN)),
+    ("missing-value", "arguments", _arg(["--revision", "x" + TOKEN, "--days"], TOKEN)),
     ("repeated-option", "arguments", _arg(["--cohort", "--days", "5", "--days", TOKEN], TOKEN)),
-    ("repeated-flag", "arguments", _arg(["--cohort", "--days", "5", "--cohort", TOKEN], TOKEN)),
     ("no-mode", "arguments", _arg(["--days", "5", "--deadline-s", TOKEN], TOKEN)),
-    ("two-modes", "arguments", _arg(["--cohort", "--revision", TOKEN, "--days", "5"], TOKEN)),
     ("foreign-option", "arguments", _arg(["--cohort", "--days", "5", "--rev", TOKEN], TOKEN)),
+    ("days-text", "days", _arg(["--cohort", "--days", TOKEN], TOKEN)),
+    ("deadline-text", "deadline", _arg(["--cohort", "--days", "5", "--deadline-s", TOKEN], TOKEN)),
+    ("rev-text", "rev", _arg(_check_argv(rev=TOKEN), TOKEN)),
+    ("at-text", "at", _arg(_check_argv(at="2026-03-05T" + TOKEN), TOKEN)),
+    ("digest-text", "digest", _arg(_check_argv(digest=TOKEN + "a" * 56), TOKEN)),
+]
+ARG_VARIANTS = [
+    ("repeated-flag", "arguments", _arg(["--cohort", "--days", "5", "--cohort", TOKEN], TOKEN)),
+    ("two-modes", "arguments", _arg(["--cohort", "--revision", TOKEN, "--days", "5"], TOKEN)),
     ("check-foreign-option", "arguments", _arg(_check_argv() + ["--revision", TOKEN], TOKEN)),
     ("equals-form", "arguments", _arg(["--cohort", "--days=" + TOKEN], TOKEN)),
     ("positional", "arguments", _arg([TOKEN, "--cohort", "--days", "5"], TOKEN)),
-    ("days-text", "days", _arg(["--cohort", "--days", TOKEN], TOKEN)),
     ("days-zero", "days", _arg(["--cohort", "--days", "00000"], "00000")),
     ("days-over", "days", _arg(["--cohort", "--days", "97531"], "97531")),
     ("days-six-digits", "days", _arg(["--cohort", "--days", "123456"], "123456")),
     ("days-negative", "days", _arg(["--cohort", "--days", "-" + TOKEN], TOKEN)),
     ("days-other-digits", "days", _arg(["--cohort", "--days", "\u0663\u0663"], "\u0663\u0663")),
-    ("deadline-text", "deadline", _arg(["--cohort", "--days", "5", "--deadline-s", TOKEN], TOKEN)),
     ("deadline-zero", "deadline", _arg(["--cohort", "--days", "5", "--deadline-s", "00000"],
                                        "00000")),
     ("deadline-over", "deadline", _arg(["--cohort", "--days", "5", "--deadline-s", "97531"],
                                        "97531")),
-    ("rev-text", "rev", _arg(_check_argv(rev=TOKEN), TOKEN)),
     ("rev-upper", "rev", _arg(_check_argv(rev="7E5CA0C0FFEE"), "7E5CA0C0FFEE")),
-    ("at-text", "at", _arg(_check_argv(at="2026-03-05T" + TOKEN), TOKEN)),
     ("at-no-such-day", "at", _arg(_check_argv(at="2026-02-30T19:53:19Z"),
                                   "2026-02-30T19:53:19Z")),
-    ("digest-text", "digest", _arg(_check_argv(digest=TOKEN + "a" * 56), TOKEN)),
     ("digest-upper", "digest", _arg(_check_argv(digest="AB" * 32), "AB" * 32)),
 ]
 
@@ -1072,18 +1444,25 @@ def _p_link(ctx, root):
     return link
 
 
-PATH_ROWS = [
+def _p_empty_argument(ctx, root):
+    return ""
+
+
+PATH_CENSUS = [
+    ("path-empty-argument", "name", _path_row(_p_empty_argument)),
     ("path-outside-root", "root", _path_row(_p_outside)),
-    ("path-root-sibling", "root", _path_row(_p_sibling)),
     ("path-pointer", "pointer", _path_row(_p_pointer)),
-    ("path-through-pointer", "pointer", _path_row(_p_through_pointer)),
-    ("path-none-target", "pointer", _path_row(_p_none)),
     ("path-extra-component", "name", _path_row(_p_extra)),
-    ("path-bad-name", "name", _path_row(_p_bad_name)),
-    ("path-empty-component", "name", _path_row(_p_empty)),
     ("path-missing", "missing", _path_row(_p_missing)),
     ("path-not-a-directory", "missing", _path_row(_p_file)),
     ("path-link", "link", _path_row(_p_link)),
+]
+PATH_VARIANTS = [
+    ("path-root-sibling", "root", _path_row(_p_sibling)),
+    ("path-through-pointer", "pointer", _path_row(_p_through_pointer)),
+    ("path-none-target", "pointer", _path_row(_p_none)),
+    ("path-bad-name", "name", _path_row(_p_bad_name)),
+    ("path-empty-component", "name", _path_row(_p_empty)),
 ]
 
 
@@ -1111,10 +1490,27 @@ def _loader_real(ctx):
             "out": ["refused (inventory)"]}
 
 
-LOADER_ROWS = [
+def _loader_other_content(ctx):
+    """[3] (C2): a directory named for one id holds a whole revision of
+    another id. The load reads it, finds that the name is not the id of what
+    it read and refuses: one fixed line, no count (the row's database stub
+    fails the test if a run starts)."""
+    import shutil
+    root = _root(ctx)
+    d = os.path.join(root, "rules-" + HEX_REV)
+    shutil.copytree(ctx.path, d)
+    assert HEX_REV != ctx.rev and os.path.isfile(os.path.join(d, "REVISION"))   # control
+    return {"argv": ["--revision", d, "--days", "5"], "tokens": [TOKEN, ctx.rev],
+            "code": rc.EXIT_REFUSED, "out": ["refused (digest)"]}
+
+
+LOADER_CENSUS = [
     ("loader-class", "class", _loader_row("inventory")),
-    ("loader-real", "class", _loader_real),
     ("loader-unreadable-class", "revision", _loader_row(TOKEN + " Bad")),
+]
+LOADER_VARIANTS = [
+    ("loader-real", "class", _loader_real),
+    ("loader-other-content", "class", _loader_other_content),
 ]
 LOADER_LINES = {"loader-class": ["refused (inventory)"],
                 "loader-unreadable-class": ["refused (revision)"]}
@@ -1122,33 +1518,36 @@ LOADER_LINES = {"loader-class": ["refused (inventory)"],
 
 def _cohort_members():
     m = ("cohortkey" + TOKEN, "70000000-0000-0000-0000-0000000c0h01",
-         "70000000-0000-0000-0000-0000000c0h02", False, None, False)
+         "70000000-0000-0000-0000-0000000c0h02", False, None, False, False, False)
     return {"card": [m], "identity": [], "combat": []}
 
 
 def _cohort_differs(ctx):
-    async def fake(days, deadline_at=None, at=None):
-        return GOOD_AT, _cohort_members()
+    async def fake(days, deadline_at=None, at=None, rev=None):
+        return GOOD_AT, _cohort_members(), {d: 0 for d in rc.DOMAINS}
     ctx.mp.setattr(rc, "_run_cohort", fake)
     return {"argv": _check_argv(digest=HEX_TOKEN), "tokens": [TOKEN, HEX_TOKEN, "c0h0"],
             "code": rc.EXIT_REFUSED, "out": ["refused (cohort differs)"]}
 
 
 def _cohort_cut(mode):
+    """[1] (METHOD 1): a cohort cut is one fixed line, nothing else."""
     def build(ctx):
-        async def fake(days, deadline_at=None, at=None):
+        async def fake(days, deadline_at=None, at=None, rev=None):
             return None
         ctx.mp.setattr(rc, "_run_cohort", fake)
         argv = _check_argv(digest=HEX_TOKEN) if mode == "check" else ["--cohort", "--days", "5"]
         return {"argv": argv, "tokens": [HEX_TOKEN], "code": rc.EXIT_REFUSED,
-                "out": ["cohort cut (deadline): nothing counted", "report end"]}
+                "out": ["cohort cut (deadline): nothing counted"]}
     return build
 
 
-COHORT_ROWS = [
+COHORT_CENSUS = [
     ("cohort-differs", "cohort differs", _cohort_differs),
-    ("cohort-cut-check", "cohort cut", _cohort_cut("check")),
     ("cohort-cut-cohort", "cohort cut", _cohort_cut("cohort")),
+]
+COHORT_VARIANTS = [
+    ("cohort-cut-check", "cohort cut", _cohort_cut("check")),
 ]
 
 
@@ -1164,7 +1563,7 @@ def _failures():
         "driver": rc.DriverRefused(TOKEN),
         "database": OperationalError("SELECT '%s'" % TOKEN, {"p": TOKEN}, Exception(TOKEN)),
         "database-driver": asyncpg.PostgresError(TOKEN),
-        "system": OSError(13, TOKEN, "C:/" + TOKEN),
+        "system": OSError(13, TOKEN, TOKEN + ".planted"),
         "internal": ValueError(TOKEN),
         "internal-cancelled": asyncio.CancelledError(TOKEN),
     }
@@ -1179,11 +1578,11 @@ def _failure_row(name, mode="cohort"):
         ctx.mp.setattr(rc, "session_factory", factory)
         word = name.split("-")[0]
         if mode == "count":
+            # [1] (METHOD 1): a database failure in count mode, after the
+            # revision loaded, is the one fixed line, no header before it
             ctx.mp.setenv(rr.ROOT_ENV, os.path.dirname(ctx.path))
-            return {"argv": ["--revision", ctx.path, "--days", "5"], "tokens": [TOKEN],
-                    "code": rc.EXIT_FAILED,
-                    "out": ["revision %s days 5 deadline_s %d" % (ctx.rev, rc.DEFAULT_DEADLINE_S),
-                            "failed (%s)" % word]}
+            return {"argv": ["--revision", ctx.path, "--days", "5"], "tokens": [TOKEN, ctx.rev],
+                    "code": rc.EXIT_FAILED, "out": ["failed (%s)" % word]}
         return {"argv": ["--cohort", "--days", "5"], "tokens": [TOKEN], "code": rc.EXIT_FAILED,
                 "out": ["failed (%s)" % word]}
     return build
@@ -1198,16 +1597,39 @@ def _failure_real_address(word, address):
     return build
 
 
-FAILURE_ROWS = [("failure-" + n, n.split("-")[0], _failure_row(n)) for n in (
-    "interrupted", "exit", "memory", "timeout", "config", "driver", "database", "database-driver",
-    "system", "internal", "internal-cancelled")]
-FAILURE_ROWS += [
+def _failure_real_driver(ctx):
+    """The tool's own connect over a driver connection without the
+    capability flag it clears: refused `driver`."""
+    import asyncpg
+
+    class Bare:
+        terminated = False
+
+        def terminate(self):
+            Bare.terminated = True
+
+    async def bare_connect(**_kw):
+        return Bare()
+    ctx.mp.setattr(asyncpg, "connect", bare_connect)
+    real = REAL_SESSION_FACTORY
+    ctx.mp.setattr(rc, "session_factory", lambda d, **k: real(
+        d, url="postgresql+asyncpg://calib:%s@127.0.0.1:1/%s" % (TOKEN, TOKEN)))
+    return {"argv": ["--cohort", "--days", "5"], "tokens": [TOKEN, "127.0.0.1"],
+            "code": rc.EXIT_FAILED, "out": ["failed (driver)"]}
+
+
+FAILURE_CENSUS = [("failure-" + n, n.split("-")[0], _failure_row(n)) for n in (
+    "interrupted", "exit", "memory", "timeout", "database-driver", "internal")]
+FAILURE_CENSUS += [
     ("failure-count-mode", "database", _failure_row("database", mode="count")),
     ("failure-real-config", "config", _failure_real_address(
         "config", "postgresql+asyncpg://calib:%s@127.0.0.1:1/%s?sslmode=%s" % (TOKEN, TOKEN, TOKEN))),
+    ("failure-real-driver", "driver", _failure_real_driver),
     ("failure-real-system", "system", _failure_real_address(
         "system", "postgresql+asyncpg://calib:%s@127.0.0.1:1/%s" % (TOKEN, TOKEN))),
 ]
+FAILURE_VARIANTS = [("failure-" + n, n.split("-")[0], _failure_row(n)) for n in (
+    "config", "driver", "database", "system", "internal-cancelled")]
 
 
 def _process(argv, isolated, out, code):
@@ -1223,9 +1645,13 @@ PROCESS_ROWS = [
                                          ["refused (days)"], rc.EXIT_USAGE)),
 ]
 
-TABLE = ([("arg",) + r for r in ARG_ROWS] + [("path",) + r for r in PATH_ROWS]
-         + [("loader",) + r for r in LOADER_ROWS] + [("cohort",) + r for r in COHORT_ROWS]
-         + [("failure",) + r for r in FAILURE_ROWS]
+CENSUS = ([("arg",) + r for r in ARG_CENSUS] + [("path",) + r for r in PATH_CENSUS]
+          + [("loader",) + r for r in LOADER_CENSUS] + [("cohort",) + r for r in COHORT_CENSUS]
+          + [("failure",) + r for r in FAILURE_CENSUS])
+VARIANTS = ([("arg",) + r for r in ARG_VARIANTS] + [("path",) + r for r in PATH_VARIANTS]
+            + [("loader",) + r for r in LOADER_VARIANTS] + [("cohort",) + r for r in COHORT_VARIANTS]
+            + [("failure",) + r for r in FAILURE_VARIANTS])
+TABLE = (CENSUS + VARIANTS
          + [("import" if r[1] == "import" else "arg",) + r for r in PROCESS_ROWS])
 
 
@@ -1272,10 +1698,106 @@ def test_every_refusal_and_failure_prints_one_fixed_line_and_nothing_else(
         assert tok not in out and tok not in err, tok
 
 
+_BRANCH_FUNCS = ("parse_args", "revision_path", "_main", "session_factory", "_connect")
+
+
+def decisive_points():
+    """The module's refusal and failure branches, read from its source: every
+    raise in the functions that refuse (_BRANCH_FUNCS); every word failure_word
+    returns; every return of _main with the refusal status; and, for a
+    failure that leaves a run, the line of _main that started that run (an
+    exception passing it)."""
+    tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    pts = set()
+    for name in _BRANCH_FUNCS:
+        pts |= {("line", name, n.lineno) for n in ast.walk(funcs[name]) if isinstance(n, ast.Raise)}
+    pts |= {("line", "failure_word", n.lineno) for n in ast.walk(funcs["failure_word"])
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)}
+    for n in ast.walk(funcs["_main"]):
+        if (isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple)
+                and isinstance(n.value.elts[0], ast.Name) and n.value.elts[0].id == "EXIT_REFUSED"):
+            pts.add(("line", "_main", n.lineno))
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_run_loop":
+            pts.add(("exception", "_main", n.lineno))
+    return pts
+
+
+def traced(fn):
+    """fn() with every line and exception event of the module's own code
+    recorded as (event, function, line)."""
+    target = os.path.normcase(os.path.abspath(rc.__file__))
+    hits = set()
+
+    def local(frame, event, _arg):
+        if event in ("line", "exception"):
+            hits.add((event, frame.f_code.co_name, frame.f_lineno))
+        return local
+
+    def glob(frame, _event, _arg):
+        if os.path.normcase(os.path.abspath(frame.f_code.co_filename)) == target:
+            return local
+        return None
+    old = sys.gettrace()
+    sys.settrace(glob)
+    try:
+        fn()
+    finally:
+        sys.settrace(old)
+    return hits
+
+
+def _row_points(row, planted, tmp, points):
+    kind, rid, word, build = row
+    path, rs = planted
+    with pytest.MonkeyPatch.context() as mp:
+        def no_database(*_a, **_k):
+            raise AssertionError("this row reaches no database")
+        mp.setattr(rc, "session_factory", no_database)
+        ctx = types.SimpleNamespace(tmp=tmp, mp=mp, path=path, rev=rs.rev)
+        case = build(ctx)
+        want, want_code = _expected(kind, rid, word, case)
+        got = {}
+
+        def go():
+            out = _Writes()
+            with pytest.MonkeyPatch.context() as mp2:
+                mp2.setattr(sys, "stdout", out)
+                got["code"] = call_main(case["argv"])
+            got["out"] = "".join(out.calls)
+        hits = traced(go)
+    assert got["out"].splitlines() == want and got["code"] == want_code, (rid, got)
+    return hits & points
+
+
+def test_the_census_has_one_row_per_branch_and_each_row_is_needed(planted, tmp_path):
+    """[7]: every decisive point of the source is reached by a census row,
+    and every census row reaches a point no other census row reaches, so
+    removing any one row (of any class) leaves a branch unreached: red. Each
+    variant reaches only points the census reaches."""
+    points = decisive_points()
+    assert len(points) >= 30, len(points)
+    print("CENSUS rows %d, variants %d, process rows %d, table %d, decisive points %d"
+          % (len(CENSUS), len(VARIANTS), len(PROCESS_ROWS), len(TABLE), len(points)))
+    got = {}
+    for i, row in enumerate(CENSUS + VARIANTS):
+        tmp = tmp_path / ("r%02d" % i)
+        tmp.mkdir()
+        got[row[1]] = _row_points(row, planted, tmp, points)
+    census = [r[1] for r in CENSUS]
+    reached = set().union(*(got[r] for r in census))
+    assert points - reached == set(), sorted(points - reached)
+    for rid in census:
+        others = set().union(*(got[o] for o in census if o != rid))
+        assert got[rid] - others, "census row %s reaches no branch of its own" % rid
+    for rid in (r[1] for r in VARIANTS):
+        assert got[rid] and got[rid] <= reached, rid
+    assert len(set(census)) == len(census) and not set(census) & {r[1] for r in VARIANTS}
+
+
 def test_the_table_has_a_row_for_every_refusal_and_failure_word():
-    """The census of the table: its words are exactly the module's fixed
-    words, and every refusal and failure word the module's source can print
-    has a row."""
+    """The words of the table are exactly the module's fixed words; the
+    import branch has its process row."""
     by = {}
     for kind, _rid, word, _b in TABLE:
         by.setdefault(kind, set()).add(word)
@@ -1287,20 +1809,51 @@ def test_the_table_has_a_row_for_every_refusal_and_failure_word():
     assert by["cohort"] == {"cohort differs", "cohort cut"}
     assert by["import"] == {"import"}
     src = open(rc.__file__, encoding="utf-8").read()
-    refuse = set(re.findall(r'_refuse\("([^"]*)"\)', src))
-    assert refuse and refuse <= by["arg"]
-    path_words = set(re.findall(r'PathRefused\("([^"]*)"\)', src))
-    assert path_words and path_words <= by["path"]
-    returned = set(re.findall(r'return "([^"]*)"', inspect.getsource(rc.failure_word)))
-    assert returned and returned <= by["failure"]
-    assert set(re.findall(r'"refused \(([^)%]*)\)"', src)) <= by["cohort"]
-    failed = set(re.findall(r'"failed \(([^)%]*)\)', src))
-    assert failed and failed <= by["import"]
-    assert '"cohort cut (' in src
-    # every Refused line form is one the table covers
-    assert set(re.findall(r'Refused\("(refused \([^"]*\))"', src)) == {"refused (%s)",
-                                                                     "refused (path %s)"}
+    assert set(re.findall(r'"failed \(([^)%]*)\)', src)) == {"import"}
     assert "argparse" not in src
+
+
+_PLANT = '''import sys
+_m = sys.modules.get("__main__")
+if getattr(_m, "__file__", "") and _m.__file__.endswith("review_calibrate.py"):
+    {what}("planted {token} " + __file__)
+'''
+
+
+@pytest.mark.parametrize("module,what", [("asyncio", "raise ValueError"),
+                                         ("asyncio", "raise KeyboardInterrupt"),
+                                         ("hashlib", "raise ImportError"),
+                                         ("hashlib", "raise KeyboardInterrupt")],
+                         ids=["first-import-raises", "first-import-interrupted",
+                              "later-import-raises", "later-import-interrupted"])
+def test_a_failure_or_an_interruption_during_an_import_prints_one_fixed_line(tmp_path, module,
+                                                                            what):
+    """[2] (METHOD 1): a planted standard-library module below the guard
+    raises, or is interrupted (KeyboardInterrupt, as SIGINT gives), while the
+    program imports it: exactly `failed (import)` on standard output, nothing
+    on standard error, the planted text and path nowhere."""
+    plant = tmp_path / "plant"
+    plant.mkdir()
+    (plant / (module + ".py")).write_text(_PLANT.format(what=what, token=TOKEN), encoding="utf-8")
+    env = dict(os.environ, PYTHONPATH=str(plant))
+    p = subprocess.run([sys.executable, "-B", rc.__file__, "--cohort", "--days", "5"],
+                       cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=300)
+    assert (p.stdout, p.stderr, p.returncode) == ("failed (import)\n", "", rc.EXIT_FAILED)
+    # control: the plant is imported by the program (a program that does not
+    # import it would print a refusal or a run, not this line)
+    assert TOKEN not in p.stdout + p.stderr and str(plant) not in p.stdout + p.stderr
+
+
+def test_the_guard_stands_above_every_import():
+    """[2]: the module's first import is `sys`; every other import statement
+    at the top level is inside the one try that the guard's handler holds."""
+    tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
+    top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert [a.name for n in top for a in n.names] == ["sys"]
+    tries = [n for n in tree.body if isinstance(n, ast.Try)]
+    assert len(tries) == 1
+    guard_if = [n for n in tree.body if isinstance(n, ast.If) and n.lineno < tries[0].lineno]
+    assert guard_if and tries[0].handlers[0].type.id == "BaseException"
 
 
 # -- the pointer is never followed ([4]) --------------------------------------------------------
@@ -1474,7 +2027,7 @@ def test_the_named_revision_loads_and_reports(rooted, no_db, capsys):
     path, rs = rooted
     code, out = _run_main(capsys, path)
     assert code == 0 and no_db == [rs.rev]
-    assert "rule %s scope=card evaluated=0 fired=0 errors=0" % ID_DUP in out
+    assert "rule %s scope=card class=flag evaluated=0 fired=0 errors=0" % ID_DUP in out
     assert _tail(out.splitlines()) == "report end"
 
 
@@ -1523,8 +2076,11 @@ CK2 = ("cohortkeyQ7ZB", "70000000-0000-0000-0000-0000000c0e01", "70000000-0000-0
 CK3 = ("cohortkeyQ7ZC", "70000000-0000-0000-0000-0000000c0e03", "70000000-0000-0000-0000-0000000c0e04")
 
 
-def _m(k, purged=False, rev=None, failed=False):
-    return k + (purged, rev, failed)
+def _m(k, purged=False, rev=None, failed=False, marked=False):
+    return k + (purged, rev, failed, marked, False)
+
+
+NONE_TIED = {"card": 0, "identity": 0, "combat": 0}
 
 
 def test_the_cohort_digest_is_order_independent_state_independent_and_domain_sensitive():
@@ -1554,42 +2110,72 @@ def test_a_members_state_is_purged_then_evaluated_then_failed_then_waiting():
     assert rc.classify(_m(CK, rev=None), None) == "waiting"
 
 
-def test_the_cohort_read_binds_t_as_an_instant_and_returns_its_text():
+def test_the_cohort_read_binds_t_and_its_utc_cutoff_and_returns_its_text():
     """The driver refuses a text value for a timestamptz parameter, so T is
-    bound as the aware UTC instant its text names; the text is what is
-    printed."""
+    bound as the aware UTC instant its text names, the cutoff as T less the
+    days in UTC; the text is what is printed. Tied rows are counted apart."""
     seen = []
+    tied_row = ("k", "lo", "hi", False, None, False, False, True)
 
     class Db:
         async def execute(self, stmt, b=None):
             seen.append(b)
-            return FakeResult([])
-    at, members = run(rc.read_cohort(Db(), 29, GOOD_AT))
+            return FakeResult([dict(enumerate(tied_row))])
+    at, members, ambiguous = run(rc.read_cohort(Db(), 29, GOOD_AT, GOOD_REV))
     assert at == GOOD_AT and members == {d: [] for d in rc.DOMAINS}
-    assert [b["at"] for b in seen] == [datetime(2026, 3, 5, 10, 20, 30, tzinfo=timezone.utc)] * 3
-    assert all(b["days"] == 29 for b in seen)
+    assert ambiguous == {d: 1 for d in rc.DOMAINS}
+    t = datetime(2026, 3, 5, 10, 20, 30, tzinfo=timezone.utc)
+    assert [b["at"] for b in seen] == [t] * 3
+    assert [b["cut"] for b in seen] == [t - timedelta(days=29)] * 3
+    assert all(b["rev"] == GOOD_REV for b in seen)
 
 
 def test_the_cohort_report_lines_are_fixed_and_name_no_member():
     members = {"card": [_m(CK), _m(CK2, purged=True)], "identity": [_m(CK3, rev=GOOD_REV)],
-               "combat": [_m(CK3, failed=True)]}
+               "combat": [_m(CK3)]}
+    tied = {"card": 2, "identity": 0, "combat": 1}
     dig = rc.cohort_digest(members)
-    lines = rc.render_cohort(GOOD_AT, 29, members)
-    assert lines == ["cohort at %s days 29: members 4 (card 2, identity 1, combat 1) digest %s"
-                     % (GOOD_AT, dig), "report end"]
-    check = rc.render_check(GOOD_REV, GOOD_AT, members)
+    lines = rc.render_cohort(GOOD_AT, 29, members, tied)
+    assert lines == ["cohort at %s days 29: members 4 (card 2, identity 1, combat 1); ambiguous 3 "
+                     "(card 2, identity 0, combat 1), not members; digest %s" % (GOOD_AT, dig),
+                     "report end"]
+    check = rc.render_check(GOOD_REV, GOOD_AT, members, tied)
     assert check == [
-        "cohort check rev %s at %s: members 4; evaluated 1; waiting 1; purged 1; failed 1; "
-        "complete no" % (GOOD_REV, GOOD_AT),
+        "cohort check rev %s at %s: members 4; evaluated 1; waiting 2; purged 1; failed 0 "
+        "(card only); ambiguous 3; complete no" % (GOOD_REV, GOOD_AT),
         "cohort card members 2 evaluated 0 waiting 1 purged 1 failed 0",
-        "cohort identity members 1 evaluated 1 waiting 0 purged 0 failed 0",
-        "cohort combat members 1 evaluated 0 waiting 0 purged 0 failed 1",
+        "cohort identity members 1 evaluated 1 waiting 0 purged 0 failed not available",
+        "cohort combat members 1 evaluated 0 waiting 1 purged 0 failed not available; "
+        "derive marks without a revision 0",
         "report end"]
     done = {"card": [_m(CK2, purged=True)], "identity": [_m(CK3, rev=GOOD_REV)], "combat": []}
-    assert rc.render_check(GOOD_REV, GOOD_AT, done)[0].endswith("complete yes")
+    assert rc.render_check(GOOD_REV, GOOD_AT, done, NONE_TIED)[0].endswith("complete yes")
     out = "\n".join(lines + check)
     for part in CK + CK2 + CK3 + ("Q7Z", "c0e0"):
         assert part not in out, part
+
+
+def test_a_failure_counts_only_where_the_row_ties_it_to_the_revision():
+    """[12]: planted rows of each kind. Card: a fault under the revision is
+    failed. Identity: no failure evidence, `not available`, the member waits.
+    Combat: a derive mark without a revision is counted apart and the member
+    waits; per-seat fault lists are diagnostics (the SQL's `failed` for
+    combat is false, read live). Nothing reads as complete while a member of
+    a domain without failure evidence is unevaluated."""
+    members = {"card": [_m(CK, failed=True), _m(CK2)], "identity": [_m(CK3)],
+               "combat": [_m(CK, marked=True), _m(CK2)]}
+    check = rc.render_check(GOOD_REV, GOOD_AT, members, NONE_TIED)
+    assert check[0] == ("cohort check rev %s at %s: members 5; evaluated 0; waiting 4; purged 0; "
+                        "failed 1 (card only); ambiguous 0; complete no" % (GOOD_REV, GOOD_AT))
+    assert check[1] == "cohort card members 2 evaluated 0 waiting 1 purged 0 failed 1"
+    assert check[2] == "cohort identity members 1 evaluated 0 waiting 1 purged 0 failed not available"
+    assert check[3] == ("cohort combat members 2 evaluated 0 waiting 2 purged 0 failed not available; "
+                        "derive marks without a revision 1")
+    assert rc.FAILURE_RECORDED == {"card": True, "identity": False, "combat": False}
+    flat = {d: " ".join(rc.cohort_sql(d).split()) for d in rc.DOMAINS}
+    assert "g.derive_fault IS NOT NULL AND g.fault_rev = CAST(:rev AS varchar)" in flat["card"]
+    assert "false AS failed" in flat["identity"] and "false AS failed" in flat["combat"]
+    assert "((g.record_faults -> 'derive') IS NOT NULL) AS marked" in flat["combat"]
 
 
 # -- the database (live) ----------------------------------------------------------------------
@@ -1601,19 +2187,29 @@ def test_the_cohort_report_lines_are_fixed_and_name_no_member():
 #                recent                                                  -> outside
 #            C7  [7] an attached retained record and a stray record
 #                (another attach key, no match) whose lists are purged   -> walked
-#            KE KW KP KF  cohort-only games (canonical match 20 days old,
-#                outside the walk): a games row evaluated under COH_REV,
-#                none, purged after T, a derive fault
+#            CT  [10] two records naming two matches that ended at the
+#                same instant                                            -> ambiguous
+#            KE KW KP KF KO  cohort-only games (canonical match 20 days
+#                old, outside the walk): a games row evaluated under
+#                COH_REV, none, purged after T, a derive fault under
+#                COH_REV, a derive fault under another revision
+#            DST [11] a game at a fixed T across a clock change (March 2026)
 #   identity I1  one record with a clock sample, recent match            -> walked
 #   combat   B1  the a24 pair of records, recent match                   -> walked
+#            BD BF  cohort-only games: fault lists only (diagnostics), a
+#                derive mark (no revision recorded)
 
 ST_A, ST_B = "1000000000007301", "1000000000007302"
 WALK_DAYS = 9
 COH_DAYS = 29
 COH_REV = "7e5ca0c0ffee"
-LK = {n: "calibr2_%s_q7z" % n for n in ("c1", "c6", "c7", "i1", "b1", "ke", "kw", "kp", "kf")}
-LR = {n: "calibroom_r2_%s_q7z" % n for n in ("c1", "c6old", "c6new", "c7", "c7stray", "i1", "b1",
-                                             "ke", "kw", "kp", "kf")}
+OTHER_REV = "0e5ca0c0ffee"
+DST_AT = "2026-03-08T12:00:00Z"        # in America/Los_Angeles a day after a clock change
+LK = {n: "calibr2_%s_q7z" % n for n in ("c1", "c6", "c7", "ct", "i1", "b1", "ke", "kw", "kp", "kf",
+                                        "ko", "bd", "bf", "dst")}
+LR = {n: "calibroom_r2_%s_q7z" % n for n in ("c1", "c6old", "c6new", "c7", "c7stray", "ct1", "ct2",
+                                             "i1", "b1", "ke", "kw", "kp", "kf", "ko", "bd", "bf",
+                                             "dst")}
 
 
 def _sha(s):
@@ -1643,30 +2239,39 @@ async def _plant(sm):
             await db.execute(text("UPDATE matches SET ended_at = :e, created_at = :e WHERE id = :i"),
                              {"e": ended, "i": row["id"]})
 
-        async def card(key, room, seat, other, purged=None):
+        async def card(key, room, seat, other, purged=None, received=None):
             await db.execute(text(
                 "INSERT INTO card_evidence (stable_game_key, attach_key, seat_player_id, "
                 "  other_player_id, pool_digest, deal_profile, payload, payload_sha256, "
                 "  received_at, lists_purged_at) "
                 "VALUES (:k, :a, :s, :o, :d, :dp, CAST(:p AS jsonb), :h, :r, :lp)"),
                 {"k": key, "a": room, "s": seat, "o": other, "d": dump["digest"], "dp": PROFILE,
-                 "p": card_rec, "h": _sha(card_rec), "r": rx, "lp": purged})
+                 "p": card_rec, "h": _sha(card_rec), "r": received or rx, "lp": purged})
 
+        dst_end = datetime(2026, 3, 7, 12, 30, tzinfo=timezone.utc)   # inside T - 1 day in UTC only
         for room, ended in (("c1", recent), ("c6old", old), ("c6new", recent), ("c7", recent),
+                            ("ct1", recent), ("ct2", recent),
                             ("i1", recent), ("b1", recent), ("ke", cohort_end), ("kw", cohort_end),
-                            ("kp", cohort_end), ("kf", cohort_end)):
+                            ("kp", cohort_end), ("kf", cohort_end), ("ko", cohort_end),
+                            ("bd", cohort_end), ("bf", cohort_end), ("dst", dst_end)):
             await match(LR[room], ended)
         await card(LK["c1"], LR["c1"], a, b)
         await card(LK["c6"], LR["c6old"], a, b)
         await card(LK["c6"], LR["c6new"], b, a)
         await card(LK["c7"], LR["c7"], a, b)
         await card(LK["c7"], LR["c7stray"], b, a, purged=now - timedelta(hours=1))
-        for n in ("ke", "kw", "kp", "kf"):
+        await card(LK["ct"], LR["ct1"], a, b)
+        await card(LK["ct"], LR["ct2"], b, a)
+        for n in ("ke", "kw", "kp", "kf", "ko"):
             await card(LK[n], LR[n], a, b)
+        await card(LK["dst"], LR["dst"], a, b, received=datetime(2026, 3, 7, 13, 0, tzinfo=timezone.utc))
         await db.execute(text(
-            "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi, evaluated_rev, derive_fault) "
-            "VALUES (:k, :lo, :hi, :r, NULL), (:k2, :lo, :hi, NULL, 'planted_fault')"),
-            {"k": LK["ke"], "k2": LK["kf"], "lo": lo, "hi": hi, "r": COH_REV})
+            "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi, evaluated_rev, derive_fault, "
+            "  fault_rev) "
+            "VALUES (:k, :lo, :hi, :r, NULL, NULL), (:k2, :lo, :hi, NULL, 'planted_fault', :r), "
+            "       (:k3, :lo, :hi, NULL, 'planted_fault', :o)"),
+            {"k": LK["ke"], "k2": LK["kf"], "k3": LK["ko"], "lo": lo, "hi": hi, "r": COH_REV,
+             "o": OTHER_REV})
         ident = json.dumps(ifx.base_record())
         await db.execute(text(
             "INSERT INTO identity_clock_evidence (stable_game_key, attach_key, seat_player_id, "
@@ -1677,13 +2282,24 @@ async def _plant(sm):
             {"k": LK["i1"], "a": LR["i1"], "s": a, "o": b, "p": ident, "h": _sha(ident),
              "pp": ifx.PROC_A, "sw": 5_000_000, "un": 4_000_000, "ph": 123_456, "r": rx})
         owner, meas = cfx.a24_pair()
-        for seat, other, rec in ((a, b, owner), (b, a, meas)):
+        for key, room, seat, other, rec in ((LK["b1"], LR["b1"], a, b, owner),
+                                            (LK["b1"], LR["b1"], b, a, meas),
+                                            (LK["bd"], LR["bd"], a, b, owner),
+                                            (LK["bf"], LR["bf"], a, b, owner)):
             p = json.dumps(rec)
             await db.execute(text(
                 "INSERT INTO combat_evidence (stable_game_key, attach_key, seat_player_id, "
                 "  other_player_id, payload, payload_sha256, received_at) "
                 "VALUES (:k, :a, :s, :o, CAST(:p AS jsonb), :h, :r)"),
-                {"k": LK["b1"], "a": LR["b1"], "s": seat, "o": other, "p": p, "h": _sha(p), "r": rx})
+                {"k": key, "a": room, "s": seat, "o": other, "p": p, "h": _sha(p), "r": rx})
+        # [12]: per-seat fault lists alone are diagnostics; a derive mark names no revision
+        diag = json.dumps({str(a): {"own_gun": [], "other_gun": [], "sections": []}})
+        derive = json.dumps({str(a): {"own_gun": [], "other_gun": [], "sections": []},
+                             "derive": "ValueError"})
+        await db.execute(text(
+            "INSERT INTO combat_games (stable_game_key, pair_lo, pair_hi, record_faults) "
+            "VALUES (:k, :lo, :hi, CAST(:f AS jsonb)), (:k2, :lo, :hi, CAST(:f2 AS jsonb))"),
+            {"k": LK["bd"], "k2": LK["bf"], "lo": lo, "hi": hi, "f": diag, "f2": derive})
         await db.commit()
     return types.SimpleNamespace(a=a, b=b, ids=(str(a), str(b)))
 
@@ -1769,14 +2385,35 @@ def test_live_the_tool_session_and_its_connection_are_read_only_from_the_start(l
     assert probes == 0
 
 
+def _type_lookup(s):
+    """The driver's look-up of one type by name (asyncpg introspection.TYPE_BY_NAME)."""
+    flat = " ".join(s.split())
+    return (flat.startswith("SELECT t.oid, t.typelem AS elemtype, t.typtype AS kind FROM "
+                            "pg_catalog.pg_type AS t")
+            and "t.typname = $1 AND ns.nspname = $2" in flat)
+
+
 def test_live_every_statement_the_connection_sent_is_an_approved_shape(walked):
-    """[5]: the recorder sits at the driver's protocol, so it lists EVERY
-    statement of the connection: the dialect's first-connect reads, the
-    driver's type introspection, the transaction and the tool's reads. The
-    first is a BEGIN; each is an approved shape; none changes a setting."""
+    """[4], [5]: the recorder sits at the driver's protocol from the moment
+    the connection is established, so it lists every statement after that:
+    the dialect's codec set-up, its first-connect reads, the driver's type
+    introspection, the transaction and the tool's reads. The order before the
+    first BEGIN is READ, not assumed: whatever comes before it is the
+    driver's type look-up by name and nothing else (asyncpg 0.29.0: the json
+    and jsonb look-ups; 0.31.0: none); the versions and that order are
+    printed (-rP shows them). Each statement is an approved shape; none
+    changes a setting."""
+    import asyncpg
+    import sqlalchemy
     log = walked.log
     assert log, "the recorder saw nothing"
-    assert log[0].upper().startswith("BEGIN"), log[0][:80]
+    first_begin = next(i for i, s in enumerate(log) if s.upper().startswith("BEGIN"))
+    before = log[:first_begin]
+    print("DRIVER-ORDER asyncpg %s sqlalchemy %s: %d statement(s) before the first BEGIN: %s"
+          % (asyncpg.__version__, sqlalchemy.__version__, len(before),
+             ["type look-up" if _type_lookup(s) else s[:40] for s in before]))
+    assert all(_type_lookup(s) for s in before), [s[:80] for s in before]
+    assert len(before) <= 2
     bad = [(s[:100], shape_faults(s)) for s in log if shape_faults(s)]
     assert bad == [], bad
     for s in log:
@@ -1833,13 +2470,13 @@ async def _fake_items(rs):
 
 
 def test_live_the_counts_are_what_the_planted_rules_give(walked, planted):
-    """[8]: the live walk's whole report equals the report of the same walk
-    over the same records handed in directly (two card games of the one
-    record on one day, the outside game skipped by its word, one identity
-    game, one combat game); and the cycle rule fires once."""
+    """The live walk's whole report equals the report of the same walk over
+    the same records handed in directly (two card games of the one record on
+    one day, the outside game skipped by its word, the tied game ambiguous,
+    one identity game, one combat game); and the cycle rule fires once."""
     _path, rs = planted
     card, ident, cmb = run(_fake_items(rs))
-    expected = run(rc.walk(rs, FakeFetch({"card": [card, ("skip", "outside"), card],
+    expected = run(rc.walk(rs, FakeFetch({"card": [card, ("skip", "outside"), card, rc.AMBIGUOUS],
                                           "identity": [ident], "combat": [cmb]})))
     tally = walked.tally
     assert tally.cut is None and not tally.abandoned
@@ -1847,24 +2484,100 @@ def test_live_the_counts_are_what_the_planted_rules_give(walked, planted):
     assert counts(tally)[ID_CMB] == (1, 1, 0)
     assert counts(tally)[ID_DUP][0] == 2 and counts(tally)[ID_IDB][0] == 1
     assert counts(tally)[ID_WIN][0] == tally.windows == tally.windows_total
-    assert rc.render(tally)[0] == ("run whole: games read 5 of 5 (card 3 of 3, identity 1 of 1, "
+    assert rc.render(tally)[0] == ("run whole: games read 6 of 6 (card 4 of 4, identity 1 of 1, "
                                    "combat 1 of 1)")
 
 
 def test_live_a_game_whose_canonical_match_is_outside_the_days_is_counted_outside(walked):
-    """[6]: C6 is admitted through its recent attachment; its canonical match
-    is the old one, outside the days: not evaluated, counted `outside`."""
+    """C6 is admitted through its recent attachment; its canonical match is
+    the old one, outside the days: not evaluated, counted `outside`."""
     t = walked.tally
-    assert t.totals["card"] == 3
+    assert t.totals["card"] == 4
     assert t.domains["card"] == {"walked": 2, "skipped": {"outside": 1}}
 
 
-def test_live_a_purged_stray_record_does_not_remove_a_game_the_passes_evaluate(walked):
-    """[7]: C7's attached record is retained; its stray record (another
-    attach key) has purged lists. The game is selected and evaluated."""
+def test_live_a_game_whose_earliest_matches_tie_is_ambiguous_and_not_counted(walked):
+    """[10]: CT's two records name two matches that ended at the same
+    instant: the tool does not choose; the game is on the ambiguous line."""
     t = walked.tally
-    assert t.totals["card"] == 3 and t.domains["card"]["walked"] == 2
+    assert t.ambiguous == {"card": 1, "identity": 0, "combat": 0}
+    assert ("ambiguous (tied earliest match, not counted): card 1, identity 0, combat 0"
+            in rc.render(t))
+
+
+def test_live_a_purged_stray_record_does_not_remove_a_game_the_passes_evaluate(walked):
+    """C7's attached record is retained; its stray record (another attach
+    key) has purged lists. The game is selected and evaluated."""
+    t = walked.tally
+    assert t.totals["card"] == 4 and t.domains["card"]["walked"] == 2
     assert "purged" not in t.domains["card"]["skipped"]
+
+
+def test_live_the_connection_takes_nothing_from_the_drivers_environment(live, monkeypatch):
+    """[5]: a target session attribute of `standby` and a TLS mode of
+    `require` planted in the process environment; the tool's connection to
+    the primary opens (neither variable reached the driver) and the recorder
+    sees no recovery SELECT."""
+    monkeypatch.setenv("PGTARGETSESSIONATTRS", "standby")
+    monkeypatch.setenv("PGSSLMODE", "require")
+    log = []
+
+    async def go():
+        engine, factory = rc.session_factory(60, url=live.url, recorder=log,
+                                             extra_settings=live.settings)
+        try:
+            async with rc.read_only(factory) as db:
+                return (await db.execute(text("SELECT 1"))).scalar()
+        finally:
+            await engine.dispose()
+    assert live.run(go()) == 1
+    assert log and not any("pg_is_in_recovery" in s for s in log)
+    assert os.environ["PGTARGETSESSIONATTRS"] == "standby"     # put back after the connect
+
+
+def test_live_a_statement_ends_by_its_statement_timeout(live):
+    """[9] (METHOD 2): with a deadline of 1 s the startup statement_timeout is
+    1 s, so a statement that would run 4 s is ended by the server at about
+    1 s, with no setting changed after startup."""
+    from sqlalchemy.exc import DBAPIError
+
+    async def go():
+        engine, factory = rc.session_factory(1, url=live.url, extra_settings=live.settings)
+        try:
+            async with rc.read_only(factory) as db:
+                t0 = time.monotonic()
+                try:
+                    await db.execute(text("SELECT pg_sleep(4)"))
+                    return "finished", time.monotonic() - t0
+                except DBAPIError as e:
+                    return str(e).split("\n")[0], time.monotonic() - t0
+        finally:
+            await engine.dispose()
+    word, elapsed = live.run(go())
+    assert "statement timeout" in word, word
+    assert elapsed < 3, elapsed
+
+
+def test_live_the_cohort_cutoff_does_not_move_with_the_session_time_zone(live, monkeypatch, capfd):
+    """[11]: T = 2026-03-08T12:00:00Z and one day, with the session's TimeZone
+    America/Los_Angeles (a clock change on 2026-03-08). The UTC cutoff is
+    2026-03-07T12:00Z, so the DST game (its match ended 12:30Z) is the one
+    member; day arithmetic in the session's zone would put the cutoff at
+    13:00Z and leave it out (the check then refuses: cohort differs)."""
+    real = REAL_SESSION_FACTORY
+    zone = dict(live.settings, TimeZone="America/Los_Angeles")
+    monkeypatch.setattr(rc, "session_factory", lambda d, **k: real(d, url=live.url,
+                                                                   extra_settings=zone))
+    lo, hi = sorted([live.plan.a, live.plan.b])
+    digest = rc.cohort_digest({"card": [(LK["dst"], lo, hi)], "identity": [], "combat": []})
+    capfd.readouterr()
+    code = call_main(["--cohort-check", "--rev", COH_REV, "--at", DST_AT, "--digest", digest,
+                      "--days", "1"])
+    got = capfd.readouterr()
+    assert code == 0 and got.err == "", got.out
+    assert got.out.splitlines()[0] == (
+        "cohort check rev %s at %s: members 1; evaluated 0; waiting 1; purged 0; failed 0 "
+        "(card only); ambiguous 0; complete no" % (COH_REV, DST_AT))
 
 
 def test_live_the_report_names_no_identifier(walked, live):
@@ -1886,8 +2599,9 @@ def test_live_cohort_then_cohort_check(live, monkeypatch, capfd):
     got = capfd.readouterr()
     assert code == 0 and got.err == "", got.out
     lines = got.out.splitlines()
-    m = re.fullmatch(r"cohort at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) days 29: members 9 "
-                     r"\(card 7, identity 1, combat 1\) digest ([0-9a-f]{64})", lines[0])
+    m = re.fullmatch(r"cohort at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) days 29: members 12 "
+                     r"\(card 8, identity 1, combat 3\); ambiguous 1 \(card 1, identity 0, "
+                     r"combat 0\), not members; digest ([0-9a-f]{64})", lines[0])
     assert m, lines
     assert lines == [lines[0], "report end"]
     at, digest = m.groups()
@@ -1902,12 +2616,16 @@ def test_live_cohort_then_cohort_check(live, monkeypatch, capfd):
                       "--days", str(COH_DAYS)])
     got2 = capfd.readouterr()
     assert code == 0 and got2.err == "", got2.out
+    # [12]: KF's fault is under COH_REV (failed), KO's under another revision
+    # (waiting); identity records no failure; combat's BD (fault lists only)
+    # waits, BF's derive mark is counted apart and it waits
     assert got2.out.splitlines() == [
-        "cohort check rev %s at %s: members 9; evaluated 1; waiting 6; purged 1; failed 1; "
-        "complete no" % (COH_REV, at),
-        "cohort card members 7 evaluated 1 waiting 4 purged 1 failed 1",
-        "cohort identity members 1 evaluated 0 waiting 1 purged 0 failed 0",
-        "cohort combat members 1 evaluated 0 waiting 1 purged 0 failed 0",
+        "cohort check rev %s at %s: members 12; evaluated 1; waiting 9; purged 1; failed 1 "
+        "(card only); ambiguous 1; complete no" % (COH_REV, at),
+        "cohort card members 8 evaluated 1 waiting 5 purged 1 failed 1",
+        "cohort identity members 1 evaluated 0 waiting 1 purged 0 failed not available",
+        "cohort combat members 3 evaluated 0 waiting 3 purged 0 failed not available; "
+        "derive marks without a revision 1",
         "report end"]
     changed = ("0" if digest[0] != "0" else "1") + digest[1:]
     code = call_main(["--cohort-check", "--rev", COH_REV, "--at", at, "--digest", changed,
