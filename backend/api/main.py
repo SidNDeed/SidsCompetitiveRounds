@@ -17298,11 +17298,11 @@ async def _alt_retention_pass(session_factory=None, at=None) -> dict:
     """One pass (design 6.3). Each batch runs in its own session from
     `session_factory` (the app's sessions by default); `at` is the instant
     ages are counted to (None: the server's now(), as in production). A
-    batch that fails ends the batches; the pass still says what it deleted
-    per table up to the failure, then counts the due rows left in a session
-    and under limits of their own (or says the count could not be had), and
-    then raises the batch's exception. A pass that ends, or whose batch
-    fails, says what it deleted and the due rows left when any are."""
+    batch that fails ends the batches. Unless it is cancelled, the pass then
+    counts the due rows left in a session and under limits of their own, says
+    what it deleted per table, and says the rows left when the count is read
+    and any are, or that they were not counted when the count fails; then it
+    raises a failed batch's exception. A cancelled pass re-raises and prints nothing."""
     if session_factory is None:
         from database import async_session as session_factory
     t0 = time.monotonic()
