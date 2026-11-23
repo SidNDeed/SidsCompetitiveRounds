@@ -1477,8 +1477,8 @@ def test_census_complete_layer_frozen_whole():
                                                       + fz.LOBBY_INVITES_COUNT
                                                       + fz.BOT_TEXT_ESCAPE_COUNT
                                                       + fz.QAPPLY_COUNT
-                                                      + rows_coarse) == 371 + rows_coarse
-    assert fz.COARSE_COUNT == 361
+                                                      + rows_coarse) == 375 + rows_coarse
+    assert fz.COARSE_COUNT == 365
     # the stack (claude/stack-1120): QAPPLY-1's two hand-frozen coarse import
     # forms in main.py; the ban sweep's six forms are a row of
     # BOTH_LAYER_BLOCKS above (one coarse dsntext, five complete)
@@ -1507,8 +1507,8 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values()) == fz.MAIL_SEND_RECEIPTS_COUNT == 1
     assert set(fz.MAIL_SEND_RECEIPTS_FROZEN) <= coarse
     assert {f[0] for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values() for f in v} == {"import"}
-    assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
-    assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
+    assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 219
+    assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 115
     # round 10's merge: the hand-frozen block (W30b), fifteen forms of the gr child's providers
     assert sum(len(v) for v in fz.R10_MERGE_FROZEN.values()) == fz.R10_MERGE_COUNT == 15
     assert set(fz.R10_MERGE_FROZEN) <= complete

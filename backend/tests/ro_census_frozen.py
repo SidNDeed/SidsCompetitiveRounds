@@ -423,6 +423,7 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                       'Uses SQLAlchemy async with asyncpg for PostgreSQL.\n'),
                      ('dsntext',
                       'postgresql+asyncpg://comp_rounds:changeme@localhost:5432/competitive_rounds'),
+                     ('dsntext', 'postgresql_readonly'),
                      ('env', 'DATABASE_URL'),
                      ('import', 'from sqlalchemy import event'),
                      ('import',
@@ -430,15 +431,18 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                      ('import',
                       'from sqlalchemy.ext.asyncio import create_async_engine as '
                       '_sqlalchemy_create_async_engine'),
+                     ('import', 'from sqlalchemy.pool import NullPool'),
                      ('kwarg', 'create_async_engine connect_args=args'),
                      ('opener', 'Load _sqlalchemy_create_async_engine'),
+                     ('opener', 'Load create_async_engine'),
                      ('opener', 'Load create_async_engine'),
                      ('opener', 'Load create_async_engine'),
                      ('opener', 'Load create_async_engine'),
                      ('opener', 'Load make_asm_engine'),
                      ('opener', 'alias _sqlalchemy_create_async_engine'),
                      ('opener', 'def create_async_engine'),
-                     ('opener', 'def make_asm_engine')],
+                     ('opener', 'def make_asm_engine'),
+                     ('opener', 'def make_snapshot_reader_engine')],
  'api/flag_evidence.py': [('import', 'from sqlalchemy import text')],
  'api/glicko2.py': [('dsntext',
                      '\n'
@@ -1809,6 +1813,11 @@ COMPLETE_FROZEN = {'api/admin_evidence.py#complete': [],
                                'create_async_engine(url, echo=False, pool_size=ASM_POOL_SIZE, '
                                'max_overflow=ASM_POOL_OVERFLOW, pool_timeout=ASM_POOL_TIMEOUT_S, '
                                'pool_pre_ping=True, pool_recycle=1800, connect_args=args)'),
+                              ('call',
+                               'create_async_engine(url, poolclass=NullPool, '
+                               "isolation_level='REPEATABLE READ', "
+                               "execution_options={'postgresql_readonly': True}, "
+                               'async_creator=async_creator)'),
                               ('call', 'make_asm_engine()')],
  'api/flag_evidence.py#complete': [],
  'api/glicko2.py#complete': [],
@@ -2153,8 +2162,8 @@ for _k, _v in R11_COARSE_FROZEN.items():
 # 'api/main.py'; see the BOT_TEXT_ESCAPE block at the end). The FROZEN_COUNT
 # figures that the later blocks' comments give (855, 856, 860, 867) are the
 # figures at those blocks' own edits, with the coarse 365.
-COARSE_COUNT = 361
-COMPLETE_COUNT = 218
+COARSE_COUNT = 365
+COMPLETE_COUNT = 219
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
 # in the round-9 notes): two dynamic forms the gr child's G2/G3 code adds,
 # each reading an AST node's own field named by the field the walk stands in
@@ -2211,7 +2220,24 @@ R10_FROZEN = {'api/admin_evidence.py#complete': [],
                                '    return create_async_engine(url, echo=False, '
                                'pool_size=ASM_POOL_SIZE, max_overflow=ASM_POOL_OVERFLOW, '
                                'pool_timeout=ASM_POOL_TIMEOUT_S, pool_pre_ping=True, '
-                               'pool_recycle=1800, connect_args=args)')],
+                               'pool_recycle=1800, connect_args=args)'),
+                              ('wrapper',
+                               'def make_snapshot_reader_engine(url, async_creator):\n'
+                               '    """An engine for a program that reads one snapshot: no pool '
+                               '(NullPool: a\n'
+                               '    connection is opened for a checkout and closed after it), '
+                               'transactions\n'
+                               '    REPEATABLE READ and read only, connections opened by the '
+                               "caller's\n"
+                               '    `async_creator`. Built for the review counting program\n'
+                               '    (review_calibrate.py), which runs beside the api, so that its '
+                               'engine too\n'
+                               '    comes from the create_async_engine above."""\n'
+                               '    from sqlalchemy.pool import NullPool\n'
+                               '    return create_async_engine(url, poolclass=NullPool, '
+                               "isolation_level='REPEATABLE READ', "
+                               "execution_options={'postgresql_readonly': True}, "
+                               'async_creator=async_creator)')],
  'api/flag_evidence.py#complete': [],
  'api/glicko2.py#complete': [],
  'api/identity_clock_evidence.py#complete': [],
@@ -3494,7 +3520,7 @@ R10_FROZEN = {'api/admin_evidence.py#complete': [],
                                            '    return (engine, async_sessionmaker(engine, '
                                            'expire_on_commit=False))')],
  'tests/title_ladders_lane_schema.py#complete': []}
-R10_COUNT = 114
+R10_COUNT = 115
 for _k, _v in R10_FROZEN.items():
     FROZEN[_k] = list(FROZEN[_k]) + list(_v)
 FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT
