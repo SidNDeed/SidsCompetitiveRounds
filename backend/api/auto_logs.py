@@ -2548,13 +2548,13 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
                 raise
             # MDPL-GATE-REREAD-1: player_id was read in T1a, before the wait
             # above. Read again by id under the identity lock the gate holds to
-            # the commit, a deletion that committed meanwhile is refused 404,
-            # and the stored blob discarded as the ban refusal above does it:
-            # the transaction ended first, then the cleanup. The arm answers
-            # with its own literal 404 (the helper raises only that one, with
-            # the same detail), so test_auto_log_client_contract.py's census
-            # of this route's codes reads it where it reads the others; the
-            # client latches uploads off for the session on a 404.
+            # the commit, a deletion that committed meanwhile is refused 404.
+            # The transaction ends first, so nothing of the upload is stored;
+            # the blob's removal after it is BEST EFFORT (_discard_for_refusal
+            # never raises; a blob it cannot remove keeps its orphan marker for
+            # the retention loop's sweep, and the line says so). The arm's own
+            # literal 404 is read by test_auto_log_client_contract.py's census
+            # of this route's codes; the client latches uploads off on a 404.
             try:
                 if player_id is not None:
                     await _reread_player_or_404(db, player_id)

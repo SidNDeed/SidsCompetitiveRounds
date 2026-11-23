@@ -20,6 +20,11 @@ The mutant (the read again taken out of signup) was run on a copy of the
 tree and is not part of this file. The control runs both scenes without the
 deletion: signup answers 200, with the read run once and nothing pending,
 and the signup row and the sync scene's time vote stand.
+
+F4 (the same round, finding 4), the last row: upload_auto_log's 404 arm with
+the blob's removal failing. The answer and the database are as on the arm's
+ordinary path; the blob stays on the volume with its orphan marker, for the
+retention loop's orphan sweep, and the refusal's line says so.
 """
 
 import os
@@ -35,7 +40,8 @@ from inv_pg import Req, case  # noqa: E402
 import schemas  # noqa: E402
 import tournaments  # noqa: E402
 from test_mdpl_gate_reread_pg import (  # noqa: E402
-    NOT_FOUND, World, _armed, _changed, _did, _naming, _player, _row, _scene, _spy, _uid)
+    NOT_FOUND, WORLDS, World, _armed, _changed, _did, _naming, _player, _row, _scene, _spy, _uid,
+    _volume, auto_logs)
 
 
 async def _signup_worlds(env, tmp_path):
@@ -100,4 +106,36 @@ def test_control_signup_without_the_deletion_answers_as_before(monkeypatch, caps
                 "SELECT count(*) FROM tournament_time_votes WHERE player_id = $1", world.p.id)
             want = (1, 1 if world.want == "sync" else 0)
             assert (signups, votes) == want, ("stored", world.want, signups, votes)
+    case(monkeypatch, body, prefix="mdplrc")
+
+
+# -- F4 (round mdplg-r1, finding 4): the upload's 404 arm when the blob's removal fails ---------
+
+def test_upload_auto_log_404_with_a_failed_removal_leaves_the_blob_to_the_sweep(monkeypatch, capsys, tmp_path):
+    """upload_auto_log's 404 arm (part (a)'s scene, the deletion committing
+    while T2 waits at its gate) with the blob's removal made to fail
+    (auto_logs._release_marked_blob answers that the blob is still there).
+    In this order: the route answers 404 "Player not found"; P's row is the
+    row H left and no row naming P was stored (nothing of the upload is in
+    the database); the refusal's one line carries _discard_for_refusal's
+    sentence for a blob that survives; and the blob stays on the volume with
+    its orphan marker, for the retention loop's orphan sweep."""
+    async def body(env):
+        _armed(env, tmp_path)
+        _spy(env)
+        env.mp.setattr(auto_logs, "_release_marked_blob", lambda own: False)
+        (world,) = await WORLDS["upload_auto_log"](env, tmp_path)
+        capsys.readouterr()
+        ans, left, named = await _scene(env, world, delete=True)
+        out = capsys.readouterr().out
+        assert (ans.status, ans.body) == NOT_FOUND, ("answer", ans)
+        row = await _row(env.conn, world.p)
+        assert row == left, ("P's row", _changed(left, row))
+        now = await _naming(env.conn, world)
+        assert now == named, ("rows naming P", sorted(set(now) ^ set(named))[:4])
+        lines = [ln for ln in out.splitlines() if "refused 404 for" in ln]
+        assert len(lines) == 1 and "could NOT be removed and SURVIVES as" in lines[0] \
+            and auto_logs._ORPHAN_MARKER + "=" in lines[0], ("the line", lines, out[-2000:])
+        blobs, marks = _volume(tmp_path)
+        assert len(blobs) == 1 and marks == [blobs[0] + auto_logs._ORPHAN_MARKER_SUFFIX], ("the volume", blobs, marks)
     case(monkeypatch, body, prefix="mdplrc")
