@@ -16871,16 +16871,16 @@ async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(.
     name here is what stops a new player being registered under their raw
     Steam ID."""
     # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, the request's first
-    # statement: before the session check (whose arming backfill can write
-    # P's players row) and before the player read. delete_player_data takes
-    # this key EXCLUSIVE before it reads or writes anything of P's and holds
-    # it to its commit; this request holds no row lock and no other key when
-    # it asks. So a deletion either commits before the read below or waits
-    # for this request's commit. A committed deletion has rewritten P's
-    # steam_id, so the read finds no row; the read by id after it refuses the
-    # row a read by steam_id can still find with deleted_at set (a purged
-    # id's [Deleted User] row).
-    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    # statement, through _identity_key_shared_bounded: before the session
+    # check (whose arming backfill can write P's players row) and before the
+    # player read, so the request holds no row lock and no other key when it
+    # asks. delete_player_data takes this key EXCLUSIVE before it reads or
+    # writes anything of P's and holds it to its commit. The wait is bounded
+    # (SHARED_IDENTITY_KEY_TIMEOUT_MS): past it the request is rolled back and
+    # answered 503 "identity_busy". A deletion that committed first rewrote
+    # P's steam_id, so the read below finds no row; the read by id refuses a
+    # purged id's [Deleted User] row, which a read by steam_id still finds.
+    await _identity_key_shared_bounded(db, steam_id)
     await _check_steam_session(request, steam_id, db)
     if not _verify_action_sig(f"toggle-ranked:{steam_id}:{str(enabled).lower()}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
@@ -23315,13 +23315,13 @@ async def generate_link_code(
         print(f"[LINK] link-code refused (no valid session) steam_id={steam_id}")
         raise HTTPException(status_code=401, detail="session_required")
 
-    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, after the session
-    # check (one read of steam_sessions: no lock, and it stays ahead of the
-    # player lookup for the reason above) and before the read; the read by
-    # id follows the read. The request holds no row lock and no other key
-    # when it asks for the key, which delete_player_data takes EXCLUSIVE
-    # before it deletes P's link codes and tombstones P's row.
-    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, through
+    # _identity_key_shared_bounded, after the session check (one read of
+    # steam_sessions, no lock) and before the read: the request holds no row
+    # lock and no other key when it asks. Past SHARED_IDENTITY_KEY_TIMEOUT_MS
+    # it is rolled back and answered 503 "identity_busy". delete_player_data
+    # takes the key EXCLUSIVE before it deletes P's link codes and tombstones P's row.
+    await _identity_key_shared_bounded(db, steam_id)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if not player:
@@ -48833,10 +48833,10 @@ async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
 @app.post("/api/v1/achievements/unlock", tags=["Achievements"])
 async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Unlock an achievement for a player. Idempotent — re-unlocking is a no-op."""
-    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, first, as in
-    # toggle_ranked: before the session check and the player read, with no
-    # row lock and no other key held; the read by id follows the read.
-    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": req.steam_id})
+    # MDPL-GATE-REREAD-1 (b): P's identity key, SHARED, first, through
+    # _identity_key_shared_bounded (no row lock, no other key held; past the
+    # bound: rolled back, 503 "identity_busy"); the read by id follows the read.
+    await _identity_key_shared_bounded(db, req.steam_id)
     await _check_steam_session(request, req.steam_id, db)
     if req.achievement_key not in ACHIEVEMENT_DEFS:
         raise HTTPException(status_code=400, detail=f"Unknown achievement: {req.achievement_key}")
@@ -52075,12 +52075,12 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
     await _require_admin(db, req.admin_steam_id, "grant_achievement", req.target_steam_id, req.hmac_signature)
     if req.achievement_key not in ACHIEVEMENT_DEFS:
         raise HTTPException(400, f"Unknown achievement: {req.achievement_key}")
-    # MDPL-GATE-REREAD-1 (b): the target's identity key, SHARED, after the
-    # admin check (reads of the roster and of the admin's ban: no lock) and
-    # before the target read, with no row lock and no other key held; the
-    # read by id follows the read. The admin's own key is not taken.
-    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
-                     {"sid": req.target_steam_id})
+    # MDPL-GATE-REREAD-1 (b): the target's identity key, SHARED, through
+    # _identity_key_shared_bounded, after the admin check (reads, no lock):
+    # no row lock and no other key held; the admin's own key is not taken.
+    # Past the bound: rolled back, 503 "identity_busy"; the read by id follows.
+    await _identity_key_shared_bounded(
+        db, req.target_steam_id)
     target = (await db.execute(select(Player).where(Player.steam_id == req.target_steam_id))).scalar_one_or_none()
     if target is None:
         raise HTTPException(404, "Target player not found")
@@ -88075,3 +88075,51 @@ async def _qapply_reporter_refused(db, lobby, lobby_uuid, g, report) -> bool:
     return bool(rep["late_admitted_at"] is not None or (short and not rep["start_roster"])
                 or (rep["gone_game"] is not None and g > int(rep["gone_game"]))
                 or g in [int(x) for x in (rep["lag_games"] or [])])
+
+
+# MDPL-GATE-REREAD-1 F1 (round mdplg-r1, finding 1): the bound on the ONE
+# shared identity key wait of each route of part (b) -- toggle_ranked,
+# unlock_achievement, admin_grant_achievement (the target's key) and
+# generate_link_code. These four took no key before part (b); a wait on the
+# key now holds a request up for as long as any holder of that player's key
+# EXCLUSIVE runs, and the database arms no statement or lock timeout of its
+# own. The value is FORMATION_LOCK_TIMEOUT_MS's, the one bound an identity
+# wait in a request had before, kept as its OWN constant so that neither
+# moves the other. A normal hold of a player's identity key (a gate route's
+# transaction, one of these four) is far below it. The account deletion's
+# budget is _DELETION_BUDGET_S (15 s), so a request that meets a slow
+# deletion is refused here, and its retry, once the deletion has committed,
+# answers 404 from the read by id. The game client's request timeouts (20 s
+# for PostRequest, 15 s and more elsewhere in plugin/ApiClient.cs) are above
+# it, so the client reads this refusal rather than its own timeout.
+SHARED_IDENTITY_KEY_TIMEOUT_MS = 2500
+
+
+async def _identity_key_shared_bounded(db: AsyncSession, steam_id) -> None:
+    """Take ONE player's identity key SHARED, waiting at most
+    SHARED_IDENTITY_KEY_TIMEOUT_MS. The key is the one delete_player_data
+    takes EXCLUSIVE before it reads or writes anything of that player; the
+    statement is _pc_verified_actor's and _ban_lock_and_gate's, letter for
+    letter. The four routes of part (b) take the key only through here, and
+    each asks holding no row lock and no other key.
+
+    The bound arms that ONE statement and nothing else, the rule
+    _identity_lock_many writes for its barrier: SET LOCAL lock_timeout
+    directly before it, DEFAULT directly after it, and the handler covers it
+    alone. A 55P03 (lock_not_available) from it, and nothing else, rolls the
+    transaction back, prints one line that names no player, and answers 503
+    "identity_busy"; every other error passes untouched. The value is an
+    int() of the module constant, interpolated because SET takes no bind
+    parameters, never a request input."""
+    _wait_ms = max(1, int(SHARED_IDENTITY_KEY_TIMEOUT_MS))
+    await db.execute(text(f"SET LOCAL lock_timeout = '{_wait_ms}ms'"))
+    try:
+        await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                         {"sid": steam_id})
+    except DBAPIError as _exc:
+        if getattr(getattr(_exc, "orig", None), "sqlstate", None) != "55P03":
+            raise
+        await db.rollback()
+        print(f"[LOCK] shared identity key wait timed out after {_wait_ms}ms")
+        raise HTTPException(status_code=503, detail="identity_busy")
+    await db.execute(text("SET LOCAL lock_timeout = DEFAULT"))
