@@ -1117,11 +1117,11 @@ def test_a_recording_prints_only_its_guarded_lines_and_the_admitted_ones(case, e
 
 
 def _alt_functions():
-    """Every function main defines whose name begins with _alt_, and the
-    retention loop: derived from the module, never listed by hand."""
+    """Every function main defines whose name begins with _alt_ or alt_:
+    derived from the module, never listed by hand."""
     import inspect
     fns = [v for n, v in sorted(vars(main).items())
-           if (n.startswith("_alt_") or n == "alt_signals_retention_loop")
+           if n.startswith(("_alt_", "alt_"))
            and inspect.isfunction(v) and v.__module__ == main.__name__]
     return {f.__name__: f for f in fns}
 
@@ -1140,19 +1140,88 @@ _STREAM_READS = {("os", "getenv"): "_alt_boot reads the signal key's variable; g
 _REFUSED_NAMES = frozenset({"builtins", "__builtins__", "__import__", "globals", "vars", "eval", "exec"})
 
 
-def _stream_refusals(name, src, loggers):
+def _stream_bindings(src):
+    """The names the module text `src` binds to one of _STREAM_MODULES or to
+    an attribute of one, read by ast outside every function and class body
+    (the bodies of an if, try or with outside them are read), as two maps:
+    aliases, name to module, for `import M as N` and for an assignment whose
+    right side is the bare name of one of the modules or of an alias; and
+    members, name to (module, dotted attribute), for `from M import a` with
+    or without `as` and for an assignment whose right side is an attribute
+    chain that begins at one of the modules or at an alias (and `import
+    M.a as N`, the member N of (M, a)). A star import of one of them is the
+    member "*". A module under its own name is in neither map."""
+    import ast
+    aliases, members = {}, {}
+
+    def module_of(node):
+        if isinstance(node, ast.Name):
+            return node.id if node.id in _STREAM_MODULES else aliases.get(node.id)
+        return None
+
+    def chain(node):
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        mod = module_of(node)
+        return (mod, ".".join(reversed(parts))) if mod and parts else None
+
+    def statements(body):
+        for s in body:
+            yield s
+            if isinstance(s, (ast.If, ast.Try, ast.With)) or type(s).__name__ == "TryStar":
+                for field in ("body", "orelse", "finalbody"):
+                    yield from statements(getattr(s, field, []))
+                for h in getattr(s, "handlers", []):
+                    yield from statements(h.body)
+
+    for s in statements(ast.parse(src).body):
+        if isinstance(s, ast.Import):
+            for a in s.names:
+                top, _dot, rest = a.name.partition(".")
+                if top in _STREAM_MODULES and a.asname and a.asname != a.name:
+                    if rest:
+                        members[a.asname] = (top, rest)
+                    else:
+                        aliases[a.asname] = top
+        elif isinstance(s, ast.ImportFrom) and s.level == 0 and s.module:
+            top, _dot, rest = s.module.partition(".")
+            if top in _STREAM_MODULES:
+                for a in s.names:
+                    attr = (rest + "." if rest else "") + a.name if a.name != "*" else "*"
+                    members[a.asname or a.name] = (top, attr)
+        elif isinstance(s, (ast.Assign, ast.AnnAssign)) and s.value is not None:
+            targets = s.targets if isinstance(s, ast.Assign) else [s.target]
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            mod, pair = module_of(s.value), chain(s.value)
+            for t in names:
+                if mod:
+                    aliases[t] = mod
+                elif pair:
+                    members[t] = pair
+    return aliases, members
+
+
+def _stream_refusals(name, src, loggers, aliases, members):
     """Each read in the source `src` of the function `name` that the bound
     refuses, as (line, what): the name print, read anywhere unless `name` is
     _alt_print ("name print"); a name in _REFUSED_NAMES ("name N"); a name in
     _STREAM_MODULES read other than as the base of an attribute ("module
     name M"); an attribute of one of them that _STREAM_READS does not list
     ("attribute M.A"); an import of one of them or of builtins ("import M");
-    a name in _STREAMS, _LOGGER_WORDS or `loggers` ("name N")."""
+    a name in _STREAMS, _LOGGER_WORDS or `loggers` ("name N"). A name in
+    `aliases` is read exactly as its module (the refusals above, under the
+    module's own name); a name in `members` is refused as "name N" unless
+    its pair stands in _STREAM_READS (the maps of _stream_bindings)."""
     import ast
     import textwrap
     tree = ast.parse(textwrap.dedent(src))
+
+    def module_of(n):
+        return n.id if n.id in _STREAM_MODULES else aliases.get(n.id)
     bases = {id(n.value) for n in ast.walk(tree)
-             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in _STREAM_MODULES}
+             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and module_of(n.value)}
     out = []
     for n in ast.walk(tree):
         if isinstance(n, ast.Name):
@@ -1160,13 +1229,15 @@ def _stream_refusals(name, src, loggers):
                 out.append((n.lineno, "name print"))
             if n.id in _REFUSED_NAMES:
                 out.append((n.lineno, "name " + n.id))
-            if n.id in _STREAM_MODULES and id(n) not in bases:
-                out.append((n.lineno, "module name " + n.id))
+            if module_of(n) and id(n) not in bases:
+                out.append((n.lineno, "module name " + module_of(n)))
             if n.id in _STREAMS or n.id in _LOGGER_WORDS or n.id in loggers:
                 out.append((n.lineno, "name " + n.id))
-        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in _STREAM_MODULES:
-            if (n.value.id, n.attr) not in _STREAM_READS:
-                out.append((n.lineno, "attribute %s.%s" % (n.value.id, n.attr)))
+            if n.id in members and members[n.id] not in _STREAM_READS:
+                out.append((n.lineno, "name " + n.id))
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and module_of(n.value):
+            if (module_of(n.value), n.attr) not in _STREAM_READS:
+                out.append((n.lineno, "attribute %s.%s" % (module_of(n.value), n.attr)))
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
             mods = [a.name for a in n.names] + ([n.module] if isinstance(n, ast.ImportFrom) and n.module else [])
             for top in sorted({m.split(".")[0] for m in mods}):
@@ -1178,10 +1249,14 @@ def _stream_refusals(name, src, loggers):
 def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed_stream_attributes():
     """Finding R2-14 and claims C3 and C32, by the code (holder H1). The
     functions are DERIVED: every function of main whose name begins with
-    _alt_, and the retention loop (15). In none of them does
-    _stream_refusals find a read, so a call of print stands only inside
-    _alt_print, and the name builtins is not read; of sys, os, traceback,
-    logging and warnings only the attributes _STREAM_READS lists are read. A
+    _alt_ or alt_ (16). In none of them does _stream_refusals find a read,
+    so a call of print stands only inside _alt_print, and the name builtins
+    is not read; of sys, os, traceback, logging and warnings only the
+    attributes _STREAM_READS lists are read. A name main binds outside every
+    function and class to one of those modules or to an attribute of one (an
+    import under another name, a from-import, an assignment) is derived from
+    main.py's text by _stream_bindings and read as the module or refused as
+    a name: none stands today. A
     stream reached through another module is not read by this test, nor an
     attribute named by a string at run time (getattr; _alt_table_missing
     calls it on an exception). LIMIT: a function they call that is named
@@ -1193,10 +1268,12 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
     import textwrap
     fns = _alt_functions()
     assert {"_alt_retention_batch", "_alt_retention_left"} <= set(fns), sorted(fns)
-    assert len(fns) == 15, (len(fns), sorted(fns))
+    assert len(fns) == 16, (len(fns), sorted(fns))
     loggers = {n for n, v in vars(main).items() if isinstance(v, logging.Logger)}
+    aliases, members = _stream_bindings(Path(main.__file__).read_text(encoding="utf-8"))
+    assert "*" not in members, members
     for name, fn in fns.items():
-        got = _stream_refusals(name, inspect.getsource(fn), loggers)
+        got = _stream_refusals(name, inspect.getsource(fn), loggers, aliases, members)
         assert got == [], (name, got)
     tree = ast.parse(textwrap.dedent(inspect.getsource(main._alt_print)))
     assert [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "print"]
@@ -1205,7 +1282,17 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
 def test_the_stream_bound_refuses_each_planted_read_and_admits_an_alt_print_call():
     """The plants of holder H1: each kind of read the bound refuses is found
     by name, and a function that calls only _alt_print and a listed
-    attribute is not."""
+    attribute is not. The plants of _stream_bindings: an alias import (in
+    an if body), a from-import under another name (in a try body), an
+    assignment of an attribute and an assignment of an alias's attribute
+    each give their entry; a control text (a module under its own name,
+    another module under an alias, a plain assignment, an alias inside a
+    function) gives two empty maps; a star import is the member "*".
+    Through _stream_refusals with those maps: an unlisted attribute through
+    an alias is refused as "attribute os.write", the alias passed bare as
+    "module name os", a member read as "name w"; getenv through the alias
+    and a member whose pair _STREAM_READS lists are not refused; the same
+    texts with empty maps give no refusal."""
     plants = (("name print", "def f():\n    print('x')\n"),
               ("name print", "def f():\n    p = print\n    p('x')\n"),
               ("name builtins", "def f():\n    import builtins\n    builtins.print('x')\n"),
@@ -1221,9 +1308,36 @@ def test_the_stream_bound_refuses_each_planted_read_and_admits_an_alt_print_call
               ("name logger", "def f():\n    logger.info('x')\n"),
               ("name _alt_plant_log", "def f():\n    _alt_plant_log.info('x')\n"))
     for want, src in plants:
-        got = _stream_refusals("f", src, {"_alt_plant_log"})
+        got = _stream_refusals("f", src, {"_alt_plant_log"}, {}, {})
         assert any(w == want for _l, w in got), (want, got)
-    assert _stream_refusals("f", "def f():\n    _alt_print('x')\n    os.getenv('K')\n", {"_alt_plant_log"}) == []
+    assert _stream_refusals("f", "def f():\n    _alt_print('x')\n    os.getenv('K')\n", {"_alt_plant_log"}, {}, {}) == []
+    for what, src, want in _BINDING_PLANTS:
+        assert _stream_bindings(src) == want, (what, _stream_bindings(src))
+    assert _stream_bindings("from os import *\n") == ({}, {"*": ("os", "*")})
+    for what, src, (aliases, members), want in _BOUND_PLANTS:
+        assert _stream_refusals("f", src, set(), aliases, members) == want, what
+        assert _stream_refusals("f", src, set(), {}, {}) == [], what
+
+
+# The binding plants (module texts, each with the maps _stream_bindings must
+# give) and the reads through those maps (function text, maps, refusals).
+_BINDING_PLANTS = (
+    ("an alias import", "if True:\n    import os as o\n", ({"o": "os"}, {})),
+    ("a from-import under another name", "try:\n    from os import write as w\nexcept ImportError:\n    pass\n",
+     ({}, {"w": ("os", "write")})),
+    ("an assignment of an attribute", "import os\nw = os.write\n", ({}, {"w": ("os", "write")})),
+    ("an assignment of an alias's attribute", "import sys as s\nerr = s.stderr\n",
+     ({"s": "sys"}, {"err": ("sys", "stderr")})),
+    ("the control", "import os\nimport json as j\nx = 1\ndef f():\n    import os as o\n", ({}, {})),
+)
+_BOUND_PLANTS = (
+    ("an unlisted attribute through an alias", "def f():\n    o.write(2, b'x')\n",
+     ({"o": "os"}, {}), [(2, "attribute os.write")]),
+    ("the alias passed bare", "def f():\n    getattr(o, 'write')\n", ({"o": "os"}, {}), [(2, "module name os")]),
+    ("a member read", "def f():\n    w(2, b'x')\n", ({}, {"w": ("os", "write")}), [(2, "name w")]),
+    ("getenv through the alias", "def f():\n    return o.getenv('K')\n", ({"o": "os"}, {}), []),
+    ("a listed member read", "def f():\n    return g('K')\n", ({}, {"g": ("os", "getenv")}), []),
+)
 
 
 # -- the commands the driver sends under the production pool (finding R2-12) ------

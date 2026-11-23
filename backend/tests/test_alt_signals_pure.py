@@ -364,23 +364,29 @@ def _lane_files():
 
 
 def _main_alt_texts(src):
-    """(name, first line, text) of each top-level function definition and
-    each top-level assignment of `src` (api/main.py's text) whose name
-    begins with _alt_, and of alt_signals_retention_loop, read by ast: at the
-    tip, the functions H1a derives (15) and one assignment."""
+    """(name, first line, text) of each top-level function definition, class
+    and assignment of `src` (api/main.py's text) whose name begins with
+    _alt_, alt_, _Alt or _ALT_, read by ast. Each text runs from the line
+    after the end of the top-level statement before it, so the comment lines
+    above it are read with it, to its own last line. At the lane's tip: 16
+    functions, 2 classes and 6 assignments."""
+    lines = src.split("\n")
     out = []
+    prev_end = 0
     for node in ast.parse(src).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names = [node.name]
         elif isinstance(node, ast.Assign):
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names = [node.target.id]
         else:
-            continue
+            names = []
+        first = prev_end + 1
         for name in names:
-            if name.startswith("_alt_") or name == "alt_signals_retention_loop":
-                out.append((name, node.lineno, ast.get_source_segment(src, node)))
+            if name.startswith(("_alt_", "alt_", "_Alt", "_ALT_")):
+                out.append((name, first, "\n".join(lines[first - 1:node.end_lineno])))
+        prev_end = node.end_lineno
     return out
 
 
@@ -457,17 +463,22 @@ def _literals(name, src):
 
 
 def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_purpose_multicast_or_a_published_resolver():
-    """Each address literal _literals finds in the lane's files and in
-    main's _alt_ code (_main_alt_texts over main.py's text) is
-    special-purpose, multicast or a published resolver. LIMIT: main's other
-    code (the route handlers, the _ALT_ constants, the _Alt classes, the
-    deletion sweep) is not read here."""
+    """Each address literal _literals finds in the lane's files and in the
+    lane's top-level statements of main.py (_main_alt_texts over main.py's
+    text) is special-purpose, multicast or a published resolver. LIMIT: the
+    rule goes by a top-level statement's name. What the lane wrote inside a
+    statement of main.py that is named otherwise is not read here: the
+    import of alt_signals, the call of _alt_boot, the entry in
+    _JANITOR_SELFTEST_ROOTS, its lines in lifespan, health_check, steam_auth
+    and delete_player_data, and the line citations it renumbered."""
     found = []
     for f in _lane_files():
         found += _literals(f.name, f.read_text(encoding="utf-8"))
     texts = _main_alt_texts((BACKEND / "api" / "main.py").read_text(encoding="utf-8"))
-    defs = [n for n, _l, t in texts if t.startswith(("def ", "async def "))]
-    assert (len(defs), len(texts) - len(defs)) == (15, 1), [(n, l) for n, l, _t in texts]
+    kinds = [type(ast.parse(t).body[-1]) for _n, _l, t in texts]
+    counts = (sum(k in (ast.FunctionDef, ast.AsyncFunctionDef) for k in kinds),
+              sum(k is ast.ClassDef for k in kinds), sum(k in (ast.Assign, ast.AnnAssign) for k in kinds))
+    assert counts == (16, 2, 6), (counts, [(n, l) for n, l, _t in texts])
     for _name, first, text_ in texts:
         found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
                   for w, t, c in _literals("main.py", text_)]
@@ -504,18 +515,46 @@ def test_the_literal_scan_refuses_an_unlisted_public_address_a_public_network_an
         assert all(c is None for _w, _t, c in got), (name, got)
 
 
+def _mains_alt_plants(src, v4):
+    """(place, copy of `src` with `v4` planted there, whether the scan must
+    read it) for each place test_the_literal_scan_reads_mains_alt_code
+    plants in; each anchor stands once in `src`."""
+    def at(anchor, planted):
+        assert src.count(anchor) == 1, anchor
+        return src.replace(anchor, planted, 1)
+    seen = "# seen at %s\n" % v4
+    boot = "\ndef _alt_boot() -> None:\n"
+    rel = "\nasync def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> dict:\n"
+    sql = "\n_ALT_RELATION_SQL = (\n"
+    cls = "\nclass _AltNotRecorded(Exception):\n"
+    faq = "\n_ALT_FAQ_CHANNEL = "
+    health = "\nasync def health_check(db: AsyncSession = Depends(get_db)):\n"
+    return (("inside _alt_boot", at(boot, boot + "    " + seen), True),
+            ("a comment line inside alt_relations", at(rel, rel + "    " + seen), True),
+            ("the text of _ALT_RELATION_SQL", at(sql, sql + '    " /* seen at %s */"\n' % v4), True),
+            ("a comment line inside _AltNotRecorded", at(cls, cls + "    " + seen), True),
+            ("a comment line directly above _ALT_FAQ_CHANNEL", at(faq, "\n" + seen + faq[1:]), True),
+            ("the file's first line", seen + src, False),
+            ("a comment line inside health_check", at(health, health + "    " + seen), False))
+
+
 def test_the_literal_scan_reads_mains_alt_code():
-    """A public address planted in a copy of main.py's text inside _alt_boot
-    is found by _main_alt_texts(copy) and refused; planted outside every
-    _alt_ definition and assignment, it is not read (E2's LIMIT)."""
+    """A public address planted in a copy of main.py's text is found by
+    _main_alt_texts(copy) and refused in each lane statement it is planted
+    in: inside _alt_boot, in a comment line inside alt_relations, inside the
+    string _ALT_RELATION_SQL holds, in a comment line inside _AltNotRecorded,
+    and in a comment line directly above _ALT_FAQ_CHANNEL (read with the
+    statement below it). Planted as the file's first line, or in a comment
+    line inside health_check (a statement named otherwise: E2's LIMIT), it
+    is not read. Each anchor stands once in main.py."""
     v4 = ".".join(("1", "1", "2", "1"))
     src = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
-    boot = "\ndef _alt_boot() -> None:\n"
-    assert src.count(boot) == 1
-    inside = src.replace(boot, boot + "    # seen at %s\n" % v4, 1)
-    outside = "# seen at %s\n" % v4 + src
 
     def scan(copy):
         return [(t, c) for _n, _l, text_ in _main_alt_texts(copy) for _w, t, c in _literals("main.py", text_)]
-    assert (v4, None) in scan(inside), [x for x in scan(inside) if x[1] is None]
-    assert all(t != v4 for t, _c in scan(outside))
+    for place, copy, read in _mains_alt_plants(src, v4):
+        got = scan(copy)
+        if read:
+            assert (v4, None) in got, (place, [x for x in got if x[1] is None])
+        else:
+            assert all(t != v4 for t, _c in got), place
