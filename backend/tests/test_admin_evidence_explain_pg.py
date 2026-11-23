@@ -337,10 +337,10 @@ async def _vacuum_until_visible(conn, table, bound=HORIZON_WAIT_S):
     the insert left the first VACUUM setting 0 of 148 pages in 195 of 200
     rounds (arm C); the same neighbour committing synchronously, 0 of 200
     (arm D). A second VACUUM 0.7 s later was complete in 194 of those 195
-    rounds; in the one other round further ids of the same group were taken
-    by other sessions inside the wait (arm E): a second VACUUM after a wait
-    is complete unless further ids of the same group commit asynchronously
-    inside it. With `_flush_own_commit` between the neighbour's commit and
+    rounds and not in the one other (arm E): there six more ids of the same
+    group than a round takes were used before the next round, and this run
+    recorded neither when nor by whom, so a wait before a second VACUUM is
+    not relied on. With `_flush_own_commit` between the neighbour's commit and
     the VACUUM, 0 of 200 rounds missed (arm G). The loop stays for what this
     run did not measure away: a commit of that group arriving between the
     flush and the VACUUM, a snapshot held by a backend HOLDERS_SQL cannot
@@ -495,8 +495,9 @@ def db():
 
     async def up():
         d.conn = await asyncpg.connect(DSN)
-        # The test servers run synchronous_commit=off (the suite seats and the
-        # local server do). This setting makes the fixture's OWN commits wait
+        # A test server may run synchronous_commit=off (one suite seat, read
+        # on 22 Nov 2026, and the local server did).
+        # This setting makes the fixture's OWN commits wait
         # for their log flush: measured for VIS-PREMISE-1 (local server, 23
         # Nov 2026, 200 rounds per arm), a plain INSERT of a session at off
         # left the VACUUM that followed at once short of a complete map in 199
