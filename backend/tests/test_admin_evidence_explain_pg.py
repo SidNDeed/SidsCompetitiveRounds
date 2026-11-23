@@ -284,6 +284,28 @@ async def _await_horizon(conn, bound=HORIZON_WAIT_S):
         await asyncio.sleep(0.2)
 
 
+# Both helpers above and below end only by success or by a deadline inside
+# their loop, so every call of them in this file goes through `_bounded`: a
+# wait bound of the test's own, the call's bound plus WAIT_MARGIN_S, that ends
+# the call with TimeoutError if that deadline is ever lost (RULING-VIS-4).
+# Measured for the margin (VIS-PREMISE-1, local server, PostgreSQL 16.9, 23
+# Nov 2026, 50 passes each, session b holding a snapshot older than 5000
+# rows): one pass of _vacuum_until_visible (flush, VACUUM, pg_class read)
+# took at most 0.021 s, one HOLDERS_SQL read at most 0.013 s; past its
+# deadline a helper ends within one pause, one pass and one such read: by
+# these maxima 0.25 + 0.021 + 0.013, about 0.29 s here. The margin is about
+# 17 times that, for a slower shared seat.
+WAIT_MARGIN_S = 5.0
+
+
+async def _bounded(helper, conn, *args, bound=HORIZON_WAIT_S):
+    """Await helper(conn, *args, bound=bound) under asyncio.wait_for with
+    bound + WAIT_MARGIN_S seconds; a lost deadline inside the helper ends
+    the call here with TimeoutError instead of a wait without end."""
+    return await asyncio.wait_for(helper(conn, *args, bound=bound),
+                                  bound + WAIT_MARGIN_S)
+
+
 VACUUM_PAUSE_S = 0.25
 
 
@@ -1107,11 +1129,11 @@ def test_seed_visibility_premise_a_held_snapshot_is_waited_for_then_a_bounded_va
             await a.execute('INSERT INTO "%s".t SELECT i, repeat(\'x\', 200) '
                             'FROM generate_series(1, 5000) AS i' % schema)
             with pytest.raises(pytest.fail.Exception) as refused:
-                await _await_horizon(a, bound=1.0)
+                await _bounded(_await_horizon, a, bound=1.0)
             assert "'pid': %d" % held in str(refused.value), str(refused.value)
             await b.execute("COMMIT")
-            await _await_horizon(a)
-            vacuums = await _vacuum_until_visible(a, '"%s".t' % schema)
+            await _bounded(_await_horizon, a)
+            vacuums = await _bounded(_vacuum_until_visible, a, '"%s".t' % schema)
             row = await a.fetchrow("""
                 SELECT c.relpages, c.relallvisible
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -1170,7 +1192,7 @@ def test_the_vacuum_loop_outlasts_a_held_snapshot_and_returns_once_it_ends():
 
             ender = asyncio.ensure_future(end_b())
             try:
-                vacuums = await _vacuum_until_visible(a, table)
+                vacuums = await _bounded(_vacuum_until_visible, a, table)
             finally:
                 await ender
             row = await a.fetchrow(
@@ -1208,7 +1230,7 @@ def test_the_vacuum_loop_refuses_after_its_bound_naming_the_pair_and_the_holder(
         try:
             table, held = await _held_snapshot_table(a, b, schema)
             with pytest.raises(pytest.fail.Exception) as refused:
-                await _vacuum_until_visible(a, table, bound=1.0)
+                await _bounded(_vacuum_until_visible, a, table, bound=1.0)
             return held, str(refused.value)
         finally:
             await b.close()
