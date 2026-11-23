@@ -284,6 +284,94 @@ async def _await_horizon(conn, bound=HORIZON_WAIT_S):
         await asyncio.sleep(0.2)
 
 
+# Both helpers above and below end only by success or by a deadline inside
+# their loop, so every call of them in this file goes through `_bounded`: a
+# wait bound of the test's own, the call's bound plus WAIT_MARGIN_S, that ends
+# the call with TimeoutError if that deadline is ever lost (RULING-VIS-4).
+# Measured for the margin (VIS-PREMISE-1, local server, PostgreSQL 16.9, 23
+# Nov 2026, 50 passes each, session b holding a snapshot older than 5000
+# rows): one pass of _vacuum_until_visible (flush, VACUUM, pg_class read)
+# took at most 0.021 s, one HOLDERS_SQL read at most 0.013 s; past its
+# deadline a helper ends within one pause, one pass and one such read: by
+# these maxima 0.25 + 0.021 + 0.013, about 0.29 s here. The margin is about
+# 17 times that, for a slower shared seat.
+WAIT_MARGIN_S = 5.0
+
+
+async def _bounded(helper, conn, *args, bound=HORIZON_WAIT_S):
+    """Await helper(conn, *args, bound=bound) under asyncio.wait_for with
+    bound + WAIT_MARGIN_S seconds; a lost deadline inside the helper ends
+    the call here with TimeoutError instead of a wait without end."""
+    return await asyncio.wait_for(helper(conn, *args, bound=bound),
+                                  bound + WAIT_MARGIN_S)
+
+
+VACUUM_PAUSE_S = 0.25
+
+
+async def _flush_own_commit(conn):
+    """One small transaction of this session that takes a transaction id and
+    writes a log record (a transactional logical message; it creates no
+    object and touches no table), committed under synchronous_commit = on.
+    pg_logical_emit_message's grant read NULL (PUBLIC's default EXECUTE) on
+    the local server; no role attribute is asked for."""
+    async with conn.transaction():
+        await conn.execute("SET LOCAL synchronous_commit = on")
+        await conn.fetchval(
+            "SELECT pg_logical_emit_message(true, 'ae_vacuum_loop', 'flush')")
+
+
+async def _vacuum_until_visible(conn, table, bound=HORIZON_WAIT_S):
+    """VACUUM `table` until its visibility map covers every page and return
+    the number of vacuums taken. Each pass first commits `_flush_own_commit`,
+    then runs the VACUUM, then reads relpages and relallvisible; a map that is
+    not complete is vacuumed again after VACUUM_PAUSE_S; once `bound` seconds
+    have passed the call fails, naming the last pair, the number of vacuums
+    and the rows HOLDERS_SQL shows at that moment.
+
+    Why a loop and not one VACUUM (VIS-PREMISE-1, RULING-VIS-2 and
+    RULING-VIS-3, measured on the local test server, PostgreSQL 16.9,
+    synchronous_commit off, 23 Nov 2026, 200 rounds per arm, 148 pages):
+    with this session's own commits synchronous, ONE asynchronous commit of
+    another session whose transaction id fell in the same group of 32 ids as
+    the insert left the first VACUUM setting 0 of 148 pages in 195 of 200
+    rounds (arm C); the same neighbour committing synchronously, 0 of 200
+    (arm D). A second VACUUM 0.7 s later was complete in 194 of those 195
+    rounds and not in the one other (arm E): there six more ids of the same
+    group than a round takes were used before the next round, and this run
+    recorded neither when nor by whom, so a wait before a second VACUUM is
+    not relied on. With `_flush_own_commit` between the neighbour's commit and
+    the VACUUM, 0 of 200 rounds missed (arm G). The loop stays for what this
+    run did not measure away: a commit of that group arriving between the
+    flush and the VACUUM, a snapshot held by a backend HOLDERS_SQL cannot
+    read, a page whose cleanup lock was not free.
+    """
+    horizon = await conn.fetchval(
+        "SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint"
+        " % 4294967296")
+    deadline = asyncio.get_running_loop().time() + bound
+    vacuums = 0
+    while True:
+        await _flush_own_commit(conn)
+        await conn.execute("VACUUM %s" % table)
+        vacuums += 1
+        row = await conn.fetchrow(
+            "SELECT relpages, relallvisible FROM pg_class WHERE oid = $1::regclass",
+            table)
+        if row["relpages"] > 0 and row["relallvisible"] == row["relpages"]:
+            return vacuums
+        if asyncio.get_running_loop().time() >= deadline:
+            holders = await conn.fetch(HOLDERS_SQL, horizon)
+            pytest.fail("the visibility map of %s is not complete after %d "
+                        "VACUUM(s) in %.1f s: relpages=%d relallvisible=%d; "
+                        "backends holding a snapshot older than the call "
+                        "(horizon %s): %s" % (
+                            table, vacuums, bound, row["relpages"],
+                            row["relallvisible"], horizon,
+                            [dict(r) for r in holders]))
+        await asyncio.sleep(VACUUM_PAUSE_S)
+
+
 async def _seed(conn):
     s = Seeded()
     s.D, s.R, s.X, s.Y, s.X2, s.Y2, s.P, s.Q, s.E = _ids(9)
@@ -407,10 +495,21 @@ def db():
 
     async def up():
         d.conn = await asyncpg.connect(DSN)
-        # A server running synchronous_commit=off (the suite seats do) commits
-        # asynchronously: a row's committed hint bit cannot be set until the
-        # commit's WAL record is flushed, and VACUUM leaves a page whose rows
-        # lack it not all-visible. The fixture's commits wait for their flush.
+        # A test server may run synchronous_commit=off (one suite seat, read
+        # on 22 Nov 2026, and the local server did).
+        # This setting makes the fixture's OWN commits wait
+        # for their log flush: measured for VIS-PREMISE-1 (local server, 23
+        # Nov 2026, 200 rounds per arm), a plain INSERT of a session at off
+        # left the VACUUM that followed at once short of a complete map in 199
+        # of 200 rounds, and at on in 0 of 200. It does NOT cover another
+        # session's asynchronous commit in the same group of 32 transaction
+        # ids, nor a snapshot HOLDERS_SQL cannot read (see
+        # _vacuum_until_visible). This fixture's rows are written by
+        # `_maintain`'s COPY FREEZE, and under such a neighbour the map read
+        # 148 all-visible pages before any VACUUM and relallvisible 148 of
+        # relpages 148 after one, in 200 of 200 rounds, with this setting on
+        # and with it off (RULING-VIS-2 arms F and F2): so `_maintain` keeps
+        # its one VACUUM.
         await d.conn.execute("SET synchronous_commit = on")
         await d.conn.execute('CREATE SCHEMA "%s"' % d.schema)
         await d.conn.execute('SET search_path TO "%s"' % d.schema)
@@ -1004,11 +1103,16 @@ def test_the_file_analyses_matches_after_creating_the_statistics_object():
     print("GATE the file's ANALYZE built stx_matches_pair: mcv_items=%d" % stats[4])
 
 
-def test_seed_visibility_premise_a_held_snapshot_is_waited_for_then_one_vacuum_sets_the_map():
+def test_seed_visibility_premise_a_held_snapshot_is_waited_for_then_a_bounded_vacuum_loop_sets_the_map():
     """The seed's two premises, on a table of its own: a snapshot another
     backend took before the rows were written makes the horizon wait refuse
-    and name that backend; once it ends the wait returns, and one VACUUM of
-    synchronously committed rows marks every page all-visible."""
+    and name that backend; once it ends the wait returns, and the bounded
+    vacuum loop `_vacuum_until_visible` marks every page all-visible, which
+    the test then reads itself. Not one VACUUM: the session's own setting
+    covers its own commit only, and another session's asynchronous commit in
+    the same group of 32 ids left a first VACUUM at 0 of 148 pages in 195 of
+    200 rounds of VIS-PREMISE-1's plant (RULING-VIS-2 arm C; the 22 Nov red
+    on seat-4 printed 0 of 148). The GATE line prints the vacuums taken."""
     require_pg()
 
     async def go():
@@ -1026,18 +1130,19 @@ def test_seed_visibility_premise_a_held_snapshot_is_waited_for_then_one_vacuum_s
             await a.execute('INSERT INTO "%s".t SELECT i, repeat(\'x\', 200) '
                             'FROM generate_series(1, 5000) AS i' % schema)
             with pytest.raises(pytest.fail.Exception) as refused:
-                await _await_horizon(a, bound=1.0)
+                await _bounded(_await_horizon, a, bound=1.0)
             assert "'pid': %d" % held in str(refused.value), str(refused.value)
             await b.execute("COMMIT")
-            await _await_horizon(a)
-            await a.execute('VACUUM "%s".t' % schema)
+            await _bounded(_await_horizon, a)
+            vacuums = await _bounded(_vacuum_until_visible, a, '"%s".t' % schema)
             row = await a.fetchrow("""
                 SELECT c.relpages, c.relallvisible
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = $1 AND c.relname = 't'""", schema)
             assert row["relpages"] > 1 and row["relallvisible"] == row["relpages"], dict(row)
-            print("GATE seed premise: held snapshot pid %d named; after it ended one "
-                  "VACUUM set %d of %d pages" % (held, row["relallvisible"], row["relpages"]))
+            print("GATE seed premise: held snapshot pid %d named; after it ended %d "
+                  "VACUUM(s) set %d of %d pages" % (
+                      held, vacuums, row["relallvisible"], row["relpages"]))
         finally:
             await b.close()
             await a.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
@@ -1048,3 +1153,98 @@ def test_seed_visibility_premise_a_held_snapshot_is_waited_for_then_one_vacuum_s
         loop.run_until_complete(go())
     finally:
         loop.close()
+
+
+async def _held_snapshot_table(a, b, schema):
+    """Session b takes a REPEATABLE READ snapshot; then session a (its own
+    commits synchronous) writes 5000 rows into a fresh table of `schema`
+    with autovacuum off. Returns the table's name and b's pid."""
+    table = '"%s".t' % schema
+    await a.execute("SET synchronous_commit = on")
+    await b.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+    await b.fetchval("SELECT 1")
+    held = await b.fetchval("SELECT pg_backend_pid()")
+    await a.execute('CREATE SCHEMA "%s"' % schema)
+    await a.execute("CREATE TABLE %s (x int, pad text)" % table)
+    await a.execute("ALTER TABLE %s SET (autovacuum_enabled = false)" % table)
+    await a.execute("INSERT INTO %s SELECT i, repeat('x', 200) "
+                    "FROM generate_series(1, 5000) AS i" % table)
+    return table, held
+
+
+def test_the_vacuum_loop_outlasts_a_held_snapshot_and_returns_once_it_ends():
+    """RULING-VIS-2 4(c), the loop's witness from the test's own held
+    snapshot (no timing of a log flush): `_vacuum_until_visible` starts while
+    b's snapshot, taken before the rows, is still held; a second task ends
+    b's transaction about 0.6 s later. The helper must return, after MORE
+    than one VACUUM, and the map read afterwards must be complete."""
+    require_pg()
+
+    async def go():
+        a = await asyncpg.connect(DSN)
+        b = await asyncpg.connect(DSN)
+        schema = "ae_vloop_%s" % uuid.uuid4().hex[:10]
+        try:
+            table, _ = await _held_snapshot_table(a, b, schema)
+
+            async def end_b():
+                await asyncio.sleep(0.6)
+                await b.execute("COMMIT")
+
+            ender = asyncio.ensure_future(end_b())
+            try:
+                vacuums = await _bounded(_vacuum_until_visible, a, table)
+            finally:
+                await ender
+            row = await a.fetchrow(
+                "SELECT relpages, relallvisible FROM pg_class WHERE oid = $1::regclass",
+                table)
+            return vacuums, dict(row)
+        finally:
+            await b.close()
+            await a.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            await a.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        vacuums, row = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    assert vacuums > 1, ("the helper returned after its first VACUUM while the "
+                         "snapshot was still held", vacuums, row)
+    assert row["relpages"] > 1 and row["relallvisible"] == row["relpages"], row
+    print("GATE vacuum loop: returned after %d VACUUM(s) once the held snapshot "
+          "ended; %d of %d pages all-visible" % (
+              vacuums, row["relallvisible"], row["relpages"]))
+
+
+def test_the_vacuum_loop_refuses_after_its_bound_naming_the_pair_and_the_holder():
+    """RULING-VIS-2 4(c), the refusal: with b's snapshot held throughout and
+    a bound of 1.0 s, `_vacuum_until_visible` fails, and its text names the
+    last relpages/relallvisible pair (not complete) and b's pid."""
+    require_pg()
+
+    async def go():
+        a = await asyncpg.connect(DSN)
+        b = await asyncpg.connect(DSN)
+        schema = "ae_vloop_%s" % uuid.uuid4().hex[:10]
+        try:
+            table, held = await _held_snapshot_table(a, b, schema)
+            with pytest.raises(pytest.fail.Exception) as refused:
+                await _bounded(_vacuum_until_visible, a, table, bound=1.0)
+            return held, str(refused.value)
+        finally:
+            await b.close()
+            await a.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+            await a.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        held, text = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    assert "'pid': %d" % held in text, text
+    pair = re.search(r"relpages=(\d+) relallvisible=(\d+)", text)
+    assert pair is not None, text
+    assert int(pair.group(1)) > 1 and int(pair.group(2)) < int(pair.group(1)), text
+    print("GATE vacuum loop refusal: %s" % text[:200])
