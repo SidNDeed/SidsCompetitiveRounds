@@ -1900,8 +1900,21 @@ def test_the_helper_closure_stays_affordable():
     # in both arms; the two trees' reached sets are otherwise equal by name.
     # The bound moves to 601, the measured value, for that reason and no
     # other.
-    # The merged tree's value is measured and set in the lane's closing commit.
-    assert code_worst <= 603, f"worst code closure {code_worst} of {total}"
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of main e36c1dcb (the freeze, e6ffe45b): 604 measured at
+    # GET /api/v1/health on the merged tree, of 5896 indexed bindings (603 on
+    # the lane's tip 3f189be5 and 601 on main e36c1dcb, the same walk over
+    # each tree; 600 on the stack's tip 77969323 and on the merge base
+    # a213c771): +1 by name against the lane, main._LFP_CASUAL_BUILD (main's
+    # build marker, read above), and +3 against main,
+    # main._ACCOUNT_DELETION_LOCK_BUILD, _DeletionRowHeld and
+    # _DeletionPastDeadline (the lane's three, read above); no other code
+    # binding of that closure is new. The bound moves to 604, the measured
+    # value, for that reason and no other. The median (87 against 87) and p90
+    # (230 against 239) bounds stay, and so do the three bounds of the whole
+    # closure (244 against 245, 425 against 425, 868 against 897 at the
+    # health route).
+    assert code_worst <= 604, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
