@@ -11,13 +11,13 @@ the Gambler ping, poll_gambler_pings) now:
   R1 resolve the role through ONE helper: the exact name, else the one role
      whose normalised name matches; two or more normalised matches with no
      exact name are ambiguous (no role); when several roles carry the exact
-     name each is mentioned (duplicate), at most five, the oldest first;
+     name each is mentioned (duplicate), at most five per kind, the oldest first;
   R2 read before the send whether the ping can notify (deliverable): every
      mentioned role mentionable, or the bot holds the permission;
   R3 read after the send how many of the mentioned roles Discord's answer
      lists (listed) and whether it lists every one (delivered), from that
      answer and never from the bot's own text;
-  R4 print one [PING] line per post in a closed grammar, and post one admin
+  R4 print one [PING] line per kind a post names, in a closed grammar, and post one admin
      warning per kind per 24 hours (counted from the time Discord accepted
      the last one) when one is owed: the role absent, ambiguous or
      duplicate, deliverable no, or delivered not yes;
@@ -57,17 +57,20 @@ HELPER_PARTS = ("_TEXT_BREAKS", "_TEXT_URL", "_TEXT_LINE_MARK", "_TEXT_ALWAYS")
 FUNCS = ("_ping_log", "_ping_role_norm", "_ping_role_matches", "_ping_role_resolve", "_ping_deliverable",
          "_ping_delivered", "_ping_line", "_ping_warning_text", "_ping_warn", "_ping_warn_start", "_ping_warn_done",
          "_ping_warning_owed", "_ping_after_send", "_ping_startup_lines", "_ping_startup_wait", "poll_lfp_pings",
-         "poll_gambler_pings", "_escape_md", "_escape_text", "_md_name", "_lfp_render_message")
+         "poll_gambler_pings", "_escape_md", "_escape_text", "_md_name", "_lfp_render_message",
+         "_ping_resolved_line", "_ping_shared_role_line")
 ASSIGNS = ("PING_WARN_EVERY_S", "PING_ROLES_MAX", "PING_STARTUP_WAIT_S", "PING_STARTUP_STEP_S", "_PING_STARTUP",
-           "_PING_ID_RE", "_PING_WORDS", "_PING_MENTIONS", "_PING_KIND_SHOWN", "_PING_PERMISSION", "_ping_warned_at",
+           "_PING_ID_RE", "_PING_WORDS", "_PING_MENTIONS", "_PING_KIND_SHOWN", "_PING_ROLE_ENV", "_PING_PERMISSION",
+           "_ping_warned_at",
            "_ping_warn_tasks", "_ping_startup_done", "_ping_startup_settled", "_ping_startup_waited",
-           "_LFP_EMOJI_TOKEN") + HELPER_PARTS
+           "_LFP_EMOJI_TOKEN", "_PING_HINT_WORDS", "PING_HINTS_MAX") + HELPER_PARTS
 
 # The [PING] line, whole. id=startup goes with delivered=unsent and listed=0;
 # mentioned agrees with the role word, listed is at most mentioned, and
 # delivered is yes exactly when roles were mentioned and the answer lists all.
+# kind=casual is the LFP post's casual role (LFP-CASUAL-1, test_lfp_casual.py).
 GRAMMAR = re.compile(
-    r"\[PING\] kind=(lfp|gambler) id=(startup|[0-9a-f-]{1,64}|invalid) "
+    r"\[PING\] kind=(lfp|casual|gambler) id=(startup|[0-9a-f-]{1,64}|invalid) "
     r"role=(found|duplicate|normalised|absent|ambiguous) mentioned=([0-5]) "
     r"deliverable=(yes|no|unknown) listed=([0-5]) delivered=(yes|no|unsent)")
 MENTIONED = {"found": (1, 1), "normalised": (1, 1), "duplicate": (2, 5), "absent": (0, 0), "ambiguous": (0, 0)}
@@ -371,6 +374,7 @@ class Bot:
 
 QUEUE, BETS, ADMIN = 10, 20, 77
 LFP_NAME, GAMBLER_NAME = "Ranked Looking For Player", "Gambler"
+CASUAL_NAME = "LookingForPlayer"      # LFP_CASUAL_ROLE's default (LFP-CASUAL-1)
 PERMISSION = "Mention @\u200beveryone, @\u200bhere, and All Roles"
 PING = {"ping_id": 41, "discord_id": "123456789012345678", "display_name": "Typed*Name",
         "message": "typed words", "expires_unix": 1763700000, "modes": "1v1", "expires_minutes": 60}
@@ -400,9 +404,9 @@ class World:
 
     def __init__(self, tree=BASE_TREE, roles=(), me=True, mention_everyone=False, answer=discord_rule, flip=False,
                  admin_fails=0, queue_id=QUEUE, lfp_name=LFP_NAME, gambler_name=GAMBLER_NAME, admin_blocks=False,
-                 admin_delay=0.0, slow=(), startup_printed=True, print_fails=None):
+                 admin_delay=0.0, slow=(), startup_printed=True, print_fails=None, casual_name=CASUAL_NAME):
         self.log, self.stamps, self.events, self.acks, self.seen, self.clock = [], [], [], [], set(), [1000.0]
-        self.pings, self.series = [], []
+        self.pings, self.series, self.paths = [], [], []
         self.guild = Guild(roles, Member(not mention_everyone) if me else None)
         self.queue = Channel(QUEUE, self.guild, mention_everyone, answer, flip, self.events)
         self.bets = Channel(BETS, self.guild, mention_everyone, answer, flip, self.events)
@@ -411,8 +415,14 @@ class World:
         self.bot = Bot({QUEUE: self.queue, BETS: self.bets, ADMIN: self.admin}, slow)
 
         async def api_get(path, timeout=8.0):
-            if path == "/internal/lfp-pings":
+            # The api as LFP-CASUAL-1 left it: a row naming casual only for a
+            # poller that declares the casual kind.
+            self.paths.append(path)
+            if path == "/internal/lfp-pings?kinds=casual":
                 return {"pings": [dict(p) for p in self.pings]}
+            if path == "/internal/lfp-pings":
+                return {"pings": [dict(p) for p in self.pings
+                                  if "casual" not in str(p.get("modes") or "").split(",")]}
             if path == "/series/active":
                 return [dict(s) for s in self.series]
             return None
@@ -440,12 +450,12 @@ class World:
             "_lfp_seen_ids": self.seen, "asyncio": types.SimpleNamespace(sleep=sleep, create_task=asyncio.create_task),
             "time": types.SimpleNamespace(monotonic=lambda: self.clock[0]), "print": say,
             "QUEUE_BEACON_CHANNEL_ID": queue_id, "LIVE_BETS_CHANNEL_ID": BETS, "ADMIN_CHANNEL_ID": ADMIN,
-            "LFP_ROLE_NAME": lfp_name, "GAMBLER_ROLE_NAME": gambler_name,
+            "LFP_ROLE_NAME": lfp_name, "GAMBLER_ROLE_NAME": gambler_name, "LFP_CASUAL_ROLE_NAME": casual_name,
             "_gambler_signup_checked": True, "_gambler_seeded": True, "_gambler_pinged": set(),
             "_ensure_gambler_signup_message": noop,
         })
         if startup_printed:
-            self.ns["_ping_startup_settled"].update(SITES)
+            self.ns["_ping_startup_settled"].update(SITES + ("casual",))
 
     async def settle(self):
         """Waits for every other task the run started (the warnings): the bot's
@@ -546,7 +556,7 @@ def check_r1(tree):
     assert resolve([Role(3, "LookingForPlayer"), Role(8, GAMBLER_NAME)], LFP_NAME) == ([], "absent")
     assert resolve([], LFP_NAME) == ([], "absent") and resolve(None, LFP_NAME) == ([], "absent")
     assert resolve([loose, Role(9, "ranked looking for player")], LFP_NAME) == ([], "ambiguous")
-    # several roles carry the exact name: each is mentioned, the oldest (lowest id) first, at most five
+    # several roles carry the exact name: each is mentioned, the oldest (lowest id) first, at most five per kind
     twin, first = Role(11, GAMBLER_NAME), Role(10, GAMBLER_NAME)
     assert resolve([twin, Role(13, "gambler"), first], GAMBLER_NAME) == ([first, twin], "duplicate")
     seven = {rid: Role(rid, LFP_NAME) for rid in (27, 21, 25, 23, 22, 26, 24)}
@@ -705,7 +715,7 @@ def check_r4(tree):
                     ln = line(kind, start, role, mentioned, dv, 0, "unsent")
                     assert in_grammar(ln) and " id=startup " in ln, ln
     for bad in (("lfp", 1, "found", 1, "maybe", 1, "yes"),          # a word outside its set
-                ("casual", 1, "found", 1, "yes", 1, "yes"),
+                ("raffle", 1, "found", 1, "yes", 1, "yes"),
                 ("lfp", 1, "guessed", 1, "yes", 1, "yes"),
                 ("lfp", 1, "found", 1, "yes", 0, "unsent"),         # unsent is the startup line's alone
                 ("lfp", start, "found", 1, "yes", 1, "yes"),
@@ -721,7 +731,7 @@ def check_r4(tree):
                 ("lfp", 1, "found", True, "yes", 1, "yes"),         # counts are whole numbers
                 ("lfp", 1, "found", 1, "yes", "1", "yes")):
         assert _raises_value_error(line, *bad), bad
-    # one line per post; all in order: no warning
+    # one line per post of one kind; all in order: no warning
     w = World(tree, roles=open_roles())
     w.lfp(PING, dict(PING, ping_id=42))
     assert w.lines() == ["[PING] kind=lfp id=41 role=found mentioned=1 deliverable=yes listed=1 delivered=yes",
@@ -830,7 +840,7 @@ def check_r4(tree):
     assert one(w.lines(), "seven").endswith(" role=duplicate mentioned=5 deliverable=yes listed=0 delivered=no")
     warn = one(w.warnings(), "seven")
     assert "**Cause: 7 roles have the same name.**" in warn
-    assert "the post mentioned the 5 oldest of them (one ping mentions at most 5)." in warn
+    assert "the post mentioned the 5 oldest of them (one ping mentions at most 5 per kind)." in warn
     assert "**Cause: Discord did not mention every role.**" in warn
     # a twin that is not mentionable, and the bot lacks the permission: both findings
     w = World(tree, roles=[Role(1, LFP_NAME, True), Role(11, LFP_NAME)])
@@ -894,10 +904,11 @@ def check_r5(tree):
     w.startup()
     assert w.lines() == [
         "[PING] kind=lfp id=startup role=normalised mentioned=1 deliverable=no listed=0 delivered=unsent",
+        "[PING] kind=casual id=startup role=absent mentioned=0 deliverable=no listed=0 delivered=unsent",
         "[PING] kind=gambler id=startup role=found mentioned=1 deliverable=yes listed=0 delivered=unsent"]
     assert w.queue.sent == [] and w.bets.sent == [] and w.admin.sent == []
     w.startup()                                     # on_ready runs again on a new READY: nothing more
-    assert len(w.lines()) == 2
+    assert len(w.lines()) == 3
     # a channel the bot cannot reach still gets its line, which says it cannot tell
     absent = "[PING] kind=lfp id=startup role=absent mentioned=0 deliverable=unknown listed=0 delivered=unsent"
     w = World(tree, roles=[Role(1, LFP_NAME, True)], queue_id=31)
@@ -1141,11 +1152,13 @@ MUTANTS = [
     ("R5", "the startup lines printed on every ready",
      "    if _ping_startup_done:\n        return\n", ""),
     ("R5", "no wait for the startup line (M2)",
-     "    while kind not in _ping_startup_settled:\n", "    while False:\n"),
+     "    while any(kind not in _ping_startup_settled for kind in kinds):\n", "    while False:\n"),
     ("R5", "an unbounded wait for the startup line (M2)",
      "        left = deadline - time.monotonic()\n        if left <= 0:\n"
-     "            _ping_log(f\"[PING-CHECK] kind={kind} startup line not printed within {PING_STARTUP_WAIT_S} s: \"\n"
-     "                      \"the ping posts without it\")\n            return\n"
+     "            for kind in kinds:\n                if kind not in _ping_startup_settled:\n"
+     "                    _ping_log(f\"[PING-CHECK] kind={kind} startup line not printed within "
+     "{PING_STARTUP_WAIT_S} s: \"\n"
+     "                              \"the ping posts without it\")\n            return\n"
      "        await asyncio.sleep(min(PING_STARTUP_STEP_S, left))\n",
      "        await asyncio.sleep(PING_STARTUP_STEP_S)\n"),
     ("R5", "the Gambler ping dropped when its startup line had not printed (M2)",
@@ -1154,7 +1167,7 @@ MUTANTS = [
      "            continue\n"),
     ("R6", "a post that cannot notify held back",
      "                sent = await channel.send(\n                    content[:2000],\n",
-     "                if deliverable == \"no\":\n                    raise RuntimeError(\"held back\")\n"
+     "                if any(k[4] == \"no\" for k in kinds):\n                    raise RuntimeError(\"held back\")\n"
      "                sent = await channel.send(\n                    content[:2000],\n"),
     ("R6", "the warning awaited in line (M1; the reviewed build's form)",
      "            _ping_warn_start(kind, configured, roles, role_word, deliverable, delivered, channel, message)\n",
@@ -1172,7 +1185,7 @@ MUTANTS = [
      "everyone=False, roles=list(ping_roles) + [r for r in channel.guild.roles "
      "if _ping_role_norm(r.name) == \"lookingforplayer\"] or False, users=False),"),
     ("R7", "the casual role pinged beside the ranked one, in the content and in the allowed mentions (L5)",
-     '            mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{LFP_ROLE_NAME}"\n',
+     '            mention = " ".join(mention_parts)\n',
      '            ping_roles = list(ping_roles) + [r for r in channel.guild.roles '
      'if _ping_role_norm(r.name) == "lookingforplayer"]\n'
      '            mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{LFP_ROLE_NAME}"\n'),

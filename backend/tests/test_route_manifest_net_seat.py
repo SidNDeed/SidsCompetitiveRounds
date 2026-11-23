@@ -1864,7 +1864,13 @@ def test_the_helper_closure_stays_affordable():
     # route reads in both arms; no other code binding of that closure is new.
     # The bound moves to 600, the measured value, for that reason and no
     # other.
-    assert code_worst <= 600, f"worst code closure {code_worst} of {total}"
+    # LFP-CASUAL-1 (2026-11-22), its build marker on top of a755b6a4: 601
+    # measured at GET /api/v1/health (600 at a755b6a4, the same walk over that
+    # tree): +1 by name, main._LFP_CASUAL_BUILD, which the health route reads
+    # in both arms; the two trees' reached sets are otherwise equal by name.
+    # The bound moves to 601, the measured value, for that reason and no
+    # other.
+    assert code_worst <= 601, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

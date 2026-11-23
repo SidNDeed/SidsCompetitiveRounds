@@ -711,11 +711,12 @@ def test_negative_control_the_row_serialized_entry_is_load_bearing():
     # report routes' plain pre-checks (FIX-1B point 3), and FIX-2's three:
     # steam_auth's read before the Steam call, the receipt's read under the
     # window guards, the case act's actor read under the mail lock; and
-    # FIX-3's one: the auto-log upload's admission read, which takes no key
+    # FIX-3's one: the auto-log upload's admission read, which takes no key;
+    # and STACK-SEAM-1's one: the held-report list's read form, which writes nothing
     names = (("main", "team_series_report_dc"), ("main", "submit_ovt_match"),
              ("main", "submit_team_match"), ("main", "steam_auth"),
              ("main", "_report_window_receive"), ("main", "_moderation_case_act"),
-             ("auto_logs", "upload_auto_log"))
+             ("auto_logs", "upload_auto_log"), ("main", "_qapply_verdict"))
     assert sorted(bad) == sorted(
         "%s.%s: 1 ban read(s) outside _ban_lock_and_gate, 0 listed" % n for n in names), bad
     assert set(B.ROW_SERIALIZED) == set(names), sorted(B.ROW_SERIALIZED)

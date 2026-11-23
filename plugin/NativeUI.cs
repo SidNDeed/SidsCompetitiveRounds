@@ -2577,8 +2577,14 @@ namespace CompetitiveRounds
         public static readonly string[] LfpExpiryLabels = { "15m", "30m", "1h", "3h" };
         // Aug 7 item 11: mode multi-select (toggles, not radio). Labels are
         // display-only; the wire value is built lowercase in SubmitLfpPing.
-        public static readonly string[] LfpModeLabels = { "1v1", "2v2", "FFA" };
-        public static readonly bool[] LfpModeSel = { true, false, false };
+        // LFP-CASUAL-1: index 3 is Casual (wire word "casual"): the bot pings
+        // the casual role for it, and the server lets a player with ranked
+        // off send a ping whose only mode is casual. Its label is translated
+        // (LfpModeLabel); the three ranked labels are mode names, shown as is.
+        public static readonly string[] LfpModeLabels = { "1v1", "2v2", "FFA", "Casual" };
+        public static readonly bool[] LfpModeSel = { true, false, false, false };
+        public const int LfpCasualIdx = 3;
+        public static string LfpModeLabel(int i) => i == LfpCasualIdx ? I18n.Tr("Casual") : LfpModeLabels[i];
         private static float lfpCooldownUntil = -1f;   // Time.realtimeSinceStartup
         private static object _lfpStatsRef;
 
@@ -2588,27 +2594,53 @@ namespace CompetitiveRounds
             if (stats == null) { CompetitiveUI.ShowNotification("Stats still loading - try again in a moment.", C_DIM); return; }
             if (string.IsNullOrEmpty(stats.discord_id))
             { CompetitiveUI.ShowNotification("Link your Discord account first (Home tab) to use RLFP pings.", new Color(1f, 0.8f, 0.3f), 7f); return; }
-            if (Plugin.RankedEnabled == null || !Plugin.RankedEnabled.Value)
-            { CompetitiveUI.ShowNotification("Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.", new Color(1f, 0.8f, 0.3f), 6f); return; }
             float remain = lfpCooldownUntil - Time.realtimeSinceStartup;
             if (remain > 0f)
             { CompetitiveUI.ShowNotification($"RLFP ping available in {(int)(remain / 60)}m {(int)(remain % 60)}s (1 per hour).", C_DIM, 6f); return; }
             LfpMessageText = "";
             LfpExpiryIdx = 2;
-            LfpModeSel[0] = true; LfpModeSel[1] = false; LfpModeSel[2] = false;
+            // LFP-CASUAL-1: with ranked on the prompt opens on 1v1 as before;
+            // with ranked off it opens on Casual alone, the one ping such a
+            // player may send (SubmitLfpPing refuses a ranked pick for them).
+            bool rankedOn = LfpRankedOn();
+            LfpModeSel[0] = rankedOn; LfpModeSel[1] = false; LfpModeSel[2] = false;
+            LfpModeSel[LfpCasualIdx] = !rankedOn;
             LfpPromptOpen = true;
+        }
+
+        private static bool LfpRankedOn() => Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value;
+
+        /* LFP-CASUAL-1, review round 1: the one predicate SubmitLfpPing's
+         * refusal and the prompt's standing line share. True while ranked is
+         * off and the picks name a ranked mode, or name nothing (the fallback
+         * for nothing is 1v1, a ranked mode). */
+        public static bool LfpRankedPickRefused()
+        {
+            bool rankedPicked = LfpModeSel[0] || LfpModeSel[1] || LfpModeSel[2] || !LfpModeSel[LfpCasualIdx];
+            return rankedPicked && !LfpRankedOn();
         }
 
         public static void SubmitLfpPing()
         {
-            LfpPromptOpen = false;
             int mins = LfpExpiryMinutes[Mathf.Clamp(LfpExpiryIdx, 0, LfpExpiryMinutes.Length - 1)];
             // Canonical lowercase, fixed order, comma-joined ("1v1,ffa");
             // nothing selected falls back to 1v1 (matches the server default).
-            var picked = new List<string>(3);
+            // "casual" comes last, the order the server stores.
+            var picked = new List<string>(4);
             if (LfpModeSel[0]) picked.Add("1v1");
             if (LfpModeSel[1]) picked.Add("2v2");
             if (LfpModeSel[2]) picked.Add("ffa");
+            if (LfpModeSel[LfpCasualIdx]) picked.Add("casual");
+            // The server answers ranked_disabled for any ranked mode while
+            // ranked is off; the prompt stays open so the player can untick it.
+            // The prompt also shows the same sentence as a standing line while
+            // the condition holds (DrawLfpPrompt), whatever this notice did.
+            if (LfpRankedPickRefused())
+            {
+                CompetitiveUI.ShowNotification("Ranked is off - only the Casual ping can be sent. Untick the ranked modes, or press Enable on the RANKED row first.", new Color(1f, 0.8f, 0.3f), 7f);
+                return;
+            }
+            LfpPromptOpen = false;
             string modes = picked.Count > 0 ? string.Join(",", picked.ToArray()) : "1v1";
             ApiClient.SendLfpPing(MatchTracker.LocalSteamId, LfpMessageText ?? "", mins, modes);
         }
@@ -2732,7 +2764,8 @@ namespace CompetitiveRounds
             qCancelBtn=UIFactory.CreateButton("Cancel",row.transform,"Cancel",15f,C_WHITE,C_BTN,()=>ApiClient.LeaveQueue(MatchTracker.LocalSteamId),sizeDelta:new Vector2(70,26));
             /* July 21 item 8: pings the Discord "Ranked Looking For Player" role so
              * players who aren't in-game right now get poked. Gated: Discord linked +
-             * ranked enabled + 1/hour (server-enforced; client mirrors for UX). */
+             * 1/hour (server-enforced; client mirrors for UX); a ranked mode also
+             * needs ranked enabled, a Casual-only ping does not (LFP-CASUAL-1). */
             lfpBtn=UIFactory.CreateButton("LfpPing",row.transform,"RLFP Ping",15f,C_WHITE,C_BTN,()=>OnLfpButton(),sizeDelta:new Vector2(95,26));
             rankOnBtn=UIFactory.CreateButton("RankOn",row.transform,"Enable",15f,C_GREEN,C_BTN,()=>{Plugin.RankedEnabled.Value=true;var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.ToggleRanked(id,true);dirty=true;},sizeDelta:new Vector2(70,26));
             rankOffBtn=UIFactory.CreateButton("RankOff",row.transform,"Disable",15f,C_RED,C_BTN,()=>{Plugin.RankedEnabled.Value=false;var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.ToggleRanked(id,false);if(ApiClient.CurrentQueueState!=ApiClient.QueueState.Idle)ApiClient.LeaveQueue(id);}dirty=true;},sizeDelta:new Vector2(70,26));
@@ -22651,14 +22684,16 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         }
 
         private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.IsInMatch&&GameStateWatcher.MatchIsRanked;
-/* July 21 item 8: LFP button — visible while ranked and not mid-ranked-match.
+/* July 21 item 8: LFP button — visible whenever not mid-ranked-match, ranked on
+ * or off (LFP-CASUAL-1 review round 1: with ranked off it is the way into the
+ * Casual-only prompt, OnLfpButton preselecting Casual alone).
  * Cooldown armed from the server-side lfp_seconds_left whenever a FRESH stats
  * object arrives (reference compare — stats are re-fetched on refresh). */
 try{
     var _lst=ApiClient.CachedPlayerStats;
     if(_lst!=null&&!ReferenceEquals(_lst,_lfpStatsRef)){_lfpStatsRef=_lst;LfpArmCooldown(_lst.lfp_seconds_left);}
     if(lfpBtn!=null){
-        lfpBtn.SetActive(ranked&&!inRankedMatch);
+        lfpBtn.SetActive(!inRankedMatch);
         float _rem=lfpCooldownUntil-Time.realtimeSinceStartup;
         var _lbt=UIFactory.GetButtonText(lfpBtn);
         if(_lbt!=null)UIFactory.SetText(_lbt,_rem>0f?$"RLFP ({(int)(_rem/60)+1}m)":"RLFP Ping");
