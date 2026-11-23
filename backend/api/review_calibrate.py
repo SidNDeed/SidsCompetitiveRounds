@@ -562,18 +562,15 @@ def session_factory(deadline_s: int, url=None, recorder=None, extra_settings=Non
     the case schema's search_path, a session TimeZone)."""
     from sqlalchemy.engine import make_url
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-    from sqlalchemy.pool import NullPool
-    import database                           # the api's engine builder (hide_parameters=True)
+    import database                          # the api's engine builder (hide_parameters=True)
     u = make_url(database.DATABASE_URL if url is None else url)
     if u.query or not (u.host and u.port and u.username and u.database):
         raise ConfigRefused()
     args = u.translate_connect_args(username="user")
     settings = server_settings(deadline_s)
     settings.update(extra_settings or {})
-    engine = database.create_async_engine(
-        u, poolclass=NullPool, isolation_level="REPEATABLE READ",
-        execution_options={"postgresql_readonly": True},
-        async_creator=lambda: _connect(args, settings, recorder))
+    engine = database.make_snapshot_reader_engine(
+        u, async_creator=lambda: _connect(args, settings, recorder))
     return engine, async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

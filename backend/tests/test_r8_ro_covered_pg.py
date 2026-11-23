@@ -1643,6 +1643,11 @@ R10_PLANTED = (
      ("replace", ASM_DEF, ASM_DEF.replace("DATABASE_URL", "ADMIN_URL")),
      {("wrapper", "~def make_asm_engine(url=ADMIN_URL, **connect_args):")},
      {"make_asm_engine"}, True),
+    ("snapshot_reader_use", DB_REL,
+     ("append", "\n\ndef _planted(url, creator):\n    return make_snapshot_reader_engine(url, creator)\n"),
+     {("call", "make_snapshot_reader_engine(url, creator)"),
+      ("wrapper", "def _planted(url, creator):\n    return make_snapshot_reader_engine(url, creator)")},
+     set(), False),
     # (C) the definitions of a forwarded module-scope name
     ("argdef_module_rebinding", CENSUS_REL,
      ("append", "\nDSN = DSN_ALT\n"),
