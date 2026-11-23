@@ -9,7 +9,7 @@ obviously synthetic.
 The live cases (every test whose name holds `live`) run against a throwaway
 database built the way the combat evidence lane builds its own
 (combat_evidence_pg.case: the seat-evidence build with every evidence
-domain's tables), through the tool's own connection (session_factory with a
+domain's tables), through the tool's own connection (calibrate_session_factory with a
 statement recorder); they FAIL rather than skip when
 SEAT_EVIDENCE_TEST_PG_DSN is unset, unless SEAT_EVIDENCE_TEST_PG_OPTOUT=1
 waives it (seat_evidence_pg.require_live_pg).
@@ -65,7 +65,7 @@ import identity_clock_fixtures as ifx  # noqa: E402
 import review_calibrate as rc  # noqa: E402
 import review_rules as rr  # noqa: E402
 
-REAL_SESSION_FACTORY = rc.session_factory     # before any test stubs it
+REAL_SESSION_FACTORY = rc.calibrate_session_factory     # before any test stubs it
 
 # -- the planted revision ----------------------------------------------------------------
 
@@ -150,12 +150,12 @@ def rooted(planted, monkeypatch):
 
 
 def call_main(argv):
-    """main(argv); any exception that leaves main fails the test (the
-    outermost handler must hold every one)."""
+    """calibrate_cli(argv); any exception that leaves calibrate_cli fails the test
+    (the outermost handler must hold every one)."""
     try:
-        return rc.main(argv)
+        return rc.calibrate_cli(argv)
     except BaseException as e:                 # noqa: BLE001
-        pytest.fail("main raised %s" % type(e).__name__)
+        pytest.fail("calibrate_cli raised %s" % type(e).__name__)
 
 
 # -- synthetic card views -----------------------------------------------------------------
@@ -291,7 +291,7 @@ def run(coro):
 
 def test_each_rule_is_counted_alone_over_the_planted_games(planted):
     _path, rs = planted
-    tally = run(rc.walk(rs, FakeFetch(planted_items())))
+    tally = run(rc.calibrate_walk(rs, FakeFetch(planted_items())))
     got = counts(tally)
     assert got[ID_DUP] == (3, 1, 0)
     assert got[ID_HELD] == (3, 1, 0)
@@ -305,9 +305,9 @@ def test_the_full_ruleset_would_change_the_counts(planted, monkeypatch):
     """Negative control of the one-rule copy: evaluated with the whole
     ruleset, the raising rule's error lands on every other card rule."""
     _path, rs = planted
-    alone = counts(run(rc.walk(rs, FakeFetch(planted_items()))))
+    alone = counts(run(rc.calibrate_walk(rs, FakeFetch(planted_items()))))
     monkeypatch.setattr(rc, "one_rule", lambda rs_, rule: rs_)
-    whole = counts(run(rc.walk(rs, FakeFetch(planted_items()))))
+    whole = counts(run(rc.calibrate_walk(rs, FakeFetch(planted_items()))))
     assert whole != alone
     assert whole[ID_DUP][2] == 1 and alone[ID_DUP][2] == 0
 
@@ -317,7 +317,7 @@ def test_evaluated_counts_every_call_of_the_evaluator_a_game_without_subjects_in
     card game with no hand is evaluated once by each card.hand rule and fires
     none; a raising rule's call is evaluated and counted as one error."""
     _path, rs = planted
-    tally = run(rc.walk(rs, FakeFetch({"card": [("game", (view(), DAY0)),
+    tally = run(rc.calibrate_walk(rs, FakeFetch({"card": [("game", (view(), DAY0)),
                                                  ("game", (view(hand(spx="text")), DAY0))]})))
     got = counts(tally)
     assert got[ID_DUP] == (2, 0, 0) and got[ID_HELD] == (2, 0, 0)
@@ -347,9 +347,9 @@ def test_fired_counts_a_note_rule_and_each_rule_line_names_its_class(tmp_path):
     doc["rules"][0]["effect"] = "note"
     root, rev = build_planted(tmp_path, doc)
     rs = rr.load_dir(os.path.join(root, "rules-" + rev))
-    tally = run(rc.walk(rs, FakeFetch(planted_items())))
+    tally = run(rc.calibrate_walk(rs, FakeFetch(planted_items())))
     assert counts(tally)[ID_DUP] == (3, 1, 0) and counts(tally)[ID_HELD] == (3, 1, 0)
-    lines = rc.render(tally)
+    lines = rc.calibrate_render(tally)
     assert "rule %s scope=card class=note evaluated=3 fired=1 errors=0" % ID_DUP in lines
     assert "rule %s scope=card class=flag evaluated=3 fired=1 errors=0" % ID_HELD in lines
 
@@ -365,11 +365,11 @@ def test_the_one_rule_copy_holds_only_that_rule_and_leaves_the_ruleset_alone(pla
 
 def test_skipped_games_are_counted_by_word_and_never_as_walked(planted):
     _path, rs = planted
-    tally = run(rc.walk(rs, FakeFetch(planted_items())))
+    tally = run(rc.calibrate_walk(rs, FakeFetch(planted_items())))
     assert tally.domains["card"] == {"walked": 3, "skipped": {"nomatch": 1, "purged": 1}}
     assert tally.domains["identity"] == {"walked": 2, "skipped": {"unnamed": 1}}
     assert tally.domains["combat"] == {"walked": 2, "skipped": {}}
-    lines = rc.render(tally)
+    lines = rc.calibrate_render(tally)
     assert "domain card walked=3 windows=1 skipped=2 nomatch=1 purged=1" in lines
     assert "domain identity walked=2 skipped=1 unnamed=1" in lines
     assert "domain combat walked=2 skipped=0" in lines
@@ -386,8 +386,8 @@ def test_the_report_ends_with_its_end_line_once_and_the_count_lines_are_unchange
     the summary, the line on fired, one per counted rule, one per domain, the
     ambiguous line and the uncounted line, in that order."""
     _path, rs = planted
-    tally = run(rc.walk(rs, FakeFetch(planted_items())))
-    lines = rc.render(tally)
+    tally = run(rc.calibrate_walk(rs, FakeFetch(planted_items())))
+    lines = rc.calibrate_render(tally)
     assert _tail(lines) == "report end" and lines.count("report end") < 2
     assert len(lines) == REPORT_FIXED + len(tally.rules)
     assert lines[0] == ("run whole: games read 10 of 10 (card 5 of 5, identity 3 of 3, "
@@ -414,7 +414,7 @@ class _Writes:
 
 @pytest.mark.parametrize("case", ["report", "count-failure"])
 def test_a_run_writes_its_output_in_exactly_one_write_call(rooted, no_db, monkeypatch, case):
-    """[14] (METHOD 1): main() makes ONE write call for the whole run, the
+    """[14] (METHOD 1): calibrate_cli() makes ONE write call for the whole run, the
     count report (header to `report end`) or the one fixed line of a failure
     that comes after the revision loaded (no header before it)."""
     path, rs = rooted
@@ -423,7 +423,7 @@ def test_a_run_writes_its_output_in_exactly_one_write_call(rooted, no_db, monkey
 
         async def failing(rs_, days, deadline_at=None):
             raise OperationalError("SELECT 1", {}, Exception(TOKEN))
-        monkeypatch.setattr(rc, "_run", failing)
+        monkeypatch.setattr(rc, "_calibrate_run", failing)
     out = _Writes()
     monkeypatch.setattr(sys, "stdout", out)
     code = call_main(["--revision", path, "--days", "23"])
@@ -444,10 +444,10 @@ def test_a_cancelled_selection_reads_unknown_and_keeps_the_finished_totals(plant
     _path, rs = planted
     tally = rc.Tally(rs)
     fetch = FakeFetch(planted_items(), hang="identity")
-    run(rc.bounded(rc.walk(rs, fetch, tally=tally), tally, time.monotonic() + 0.3))
+    run(rc.bounded(rc.calibrate_walk(rs, fetch, tally=tally), tally, time.monotonic() + 0.3))
     assert tally.cut == "deadline"
     assert tally.totals == {"card": 5, "identity": None, "combat": None}
-    head = rc.render(tally)[0]
+    head = rc.calibrate_render(tally)[0]
     assert head.startswith("run cut (deadline): games read 0 of unknown (card 0 of 5, "
                            "identity 0 of unknown, combat 0 of unknown); "), head
 
@@ -467,7 +467,7 @@ def window_items():
 
 def test_windows_are_rebuilt_as_the_pass_builds_them_and_each_is_evaluated_once(planted):
     _path, rs = planted
-    tally = run(rc.walk(rs, FakeFetch(window_items())))
+    tally = run(rc.calibrate_walk(rs, FakeFetch(window_items())))
     wins, word = rc.rebuild_windows(tally.daily, rs)
     assert word is None
     got = [(k[0], k[1], agg["games"], agg["hands"], agg["slots"]) for k, agg in wins]
@@ -509,7 +509,7 @@ class _WindowDb:
 
 def test_the_window_rebuild_equals_the_pass_window_reader_over_the_same_daily_rows(planted):
     _path, rs = planted
-    tally = run(rc.walk(rs, FakeFetch(window_items())))
+    tally = run(rc.calibrate_walk(rs, FakeFetch(window_items())))
     keys = [k + (rs.rev,) for k in tally.daily]
     theirs, _owned = run(ce._windows(_WindowDb(tally.daily, rs.rev), keys, rs))
     mine, word = rc.rebuild_windows(tally.daily, rs)
@@ -523,7 +523,7 @@ def test_no_window_parameter_means_no_windows(tmp_path):
     doc["measure_params"] = {}
     root, rev = build_planted(tmp_path, doc)
     rs = rr.load_dir(os.path.join(root, "rules-" + rev))
-    tally = run(rc.walk(rs, FakeFetch(window_items())))
+    tally = run(rc.calibrate_walk(rs, FakeFetch(window_items())))
     assert tally.windows == 0 and counts(tally)[ID_WIN] == (0, 0, 0)
 
 
@@ -569,7 +569,7 @@ def test_the_output_holds_no_identifier(planted):
     _path, rs = planted
     items = planted_items()
     items["card"] += window_items()["card"]
-    out = "\n".join(rc.render(run(rc.walk(rs, FakeFetch(items)))))
+    out = "\n".join(rc.calibrate_render(run(rc.calibrate_walk(rs, FakeFetch(items)))))
     for ident in (SEAT_P, SEAT_Q, SEAT_R, ID_SEAT_A, ID_SEAT_B, CMB_SEAT_A, CMB_SEAT_B, PROFILE):
         assert ident not in out and ident[-4:] not in out
     assert ID_DUP in out
@@ -1013,7 +1013,7 @@ def test_every_statement_the_walk_sends_is_an_approved_shape_and_it_ends_with_a_
     selections = [b for s, b in sess.log if s.startswith("WITH cand AS")]
     assert len(selections) == 3 and all(b["cut"] == NOW_AT - timedelta(days=41) for b in selections)
     assert counts(tally)[ID_CMB] == (1, 1, 0)
-    out = "\n".join(rc.render(tally) + [printed.out, printed.err])
+    out = "\n".join(rc.calibrate_render(tally) + [printed.out, printed.err])
     for ident in (KEY_C, KEY_I, KEY_B, ROOM_C, ROOM_I, ROOM_B, LO, HI, MATCH_C, MATCH_I, MATCH_B,
                   "QX7251", "ZQ9137", "f7a0", "fa0c"):
         assert ident not in out, ident
@@ -1059,7 +1059,7 @@ def test_a_game_whose_earliest_eligible_matches_tie_is_counted_ambiguous_and_now
     assert tally.domains["card"] == {"walked": 0, "skipped": {}}
     assert counts(tally)[ID_DUP] == (0, 0, 0)
     assert not any("FROM card_evidence WHERE" in s for s, _b in sess.log)
-    lines = rc.render(tally)
+    lines = rc.calibrate_render(tally)
     assert "ambiguous (tied earliest match, not counted): card 1, identity 0, combat 0" in lines
     assert lines[0].startswith("run whole: games read 3 of 3 (card 1 of 1, ")
 
@@ -1089,7 +1089,7 @@ def test_a_tied_game_outside_the_window_is_counted_outside_and_not_ambiguous(pla
     for d in rc.DOMAINS:
         v = tally.domains[d]
         assert v["walked"] + sum(v["skipped"].values()) + tally.ambiguous[d] == tally.totals[d]
-    lines = rc.render(tally)
+    lines = rc.calibrate_render(tally)
     assert "ambiguous (tied earliest match, not counted): card 0, identity 0, combat 0" in lines
     assert lines[0].startswith("run whole: games read 3 of 3 (card 1 of 1, ")
     doc = " ".join(rc.__doc__.split())
@@ -1153,7 +1153,7 @@ def test_a_combat_game_whose_fault_rebuild_raises_is_not_evaluated_as_the_pass_d
     tally = run(rc.walk_db(rs, lambda: RecordingSession(), 41))
     assert tally.domains["combat"] == {"walked": 0, "skipped": {"rebuild_fault": 1}}
     assert counts(tally)[ID_CMB] == (0, 0, 0)
-    assert "domain combat walked=0 skipped=1 rebuild_fault=1" in rc.render(tally)
+    assert "domain combat walked=0 skipped=1 rebuild_fault=1" in rc.calibrate_render(tally)
     assert tally.domains["card"]["walked"] == 1 and tally.domains["identity"]["walked"] == 1
 
 
@@ -1188,7 +1188,7 @@ def test_an_address_with_options_or_without_a_part_is_refused_before_any_connect
     """[5]: the connection is built from the address's explicit parts; one
     the driver would fill from the environment is refused."""
     with pytest.raises(rc.ConfigRefused):
-        rc.session_factory(5, url=url)
+        rc.calibrate_session_factory(5, url=url)
 
 
 def test_the_drivers_environment_is_out_of_the_process_while_it_connects(monkeypatch):
@@ -1427,7 +1427,7 @@ def test_every_run_kind_builds_its_session_factory_with_at_most_the_deadline(
     def factory(deadline_s, **_k):
         events.append(("factory", deadline_s, time.monotonic()))
         return Eng(), opened
-    monkeypatch.setattr(rc, "session_factory", factory)
+    monkeypatch.setattr(rc, "calibrate_session_factory", factory)
     monkeypatch.setenv(rr.ROOT_ENV, os.path.dirname(path))
     argv = {"count": ["--revision", path],
             "cohort": ["--cohort"],
@@ -1483,11 +1483,11 @@ def _reads_as_whole(line):
 def test_a_run_its_deadline_ends_says_it_was_cut_and_no_count_reads_as_whole(planted):
     _path, rs = planted
     fetch = FakeFetch(planted_items())
-    tally = run(rc.walk(rs, fetch, deadline_at=4, clock=lambda: fetch.now))
+    tally = run(rc.calibrate_walk(rs, fetch, deadline_at=4, clock=lambda: fetch.now))
     assert tally.cut == "deadline" and fetch.closed == ["card"]
     assert tally.domains["card"] == {"walked": 3, "skipped": {"nomatch": 1}}
     assert tally.domains["identity"]["walked"] == tally.domains["combat"]["walked"] == 0
-    lines = rc.render(tally)
+    lines = rc.calibrate_render(tally)
     assert lines[0] == CUT_HEAD
     assert len(lines) == REPORT_FIXED + len(tally.rules)
     assert all(line.startswith("cut ") for line in _middle(lines)) and _tail(lines) == "report end"
@@ -1500,8 +1500,8 @@ def test_a_run_its_deadline_does_not_reach_reads_every_game_and_says_whole(plant
     """Control of the cut test: the same walk with a deadline it never reaches."""
     _path, rs = planted
     fetch = FakeFetch(planted_items())
-    tally = run(rc.walk(rs, fetch, deadline_at=10 ** 6, clock=lambda: fetch.now))
-    lines = rc.render(tally)
+    tally = run(rc.calibrate_walk(rs, fetch, deadline_at=10 ** 6, clock=lambda: fetch.now))
+    lines = rc.calibrate_render(tally)
     assert tally.cut is None and fetch.closed == list(rc.DOMAINS)
     assert lines[0] == ("run whole: games read 10 of 10 (card 5 of 5, identity 3 of 3, "
                         "combat 2 of 2)")
@@ -1520,7 +1520,7 @@ def test_a_deadline_inside_the_card_windows_cuts_them_and_says_how_many_were_eva
     tally.finish(deadline_at=1, clock=lambda: next(ticks))
     assert (tally.windows, tally.windows_total, tally.cut) == (2, 4, "deadline")
     assert counts(tally)[ID_WIN][0] == 2
-    lines = rc.render(tally)
+    lines = rc.calibrate_render(tally)
     assert "card windows evaluated 2 of 4" in lines[0] and lines[0].startswith("run cut (deadline)")
     assert all(line.startswith("cut ") for line in _middle(lines)) and _tail(lines) == "report end"
 
@@ -1533,7 +1533,7 @@ def test_a_deadline_inside_the_window_rebuild_says_none_rebuilt(planted):
     ticks = iter([0, 0, 1, 1, 1])
     tally.finish(deadline_at=1, clock=lambda: next(ticks))
     assert (tally.windows, tally.windows_total, tally.cut) == (0, None, "deadline")
-    assert "card windows evaluated 0 of none rebuilt" in rc.render(tally)[0]
+    assert "card windows evaluated 0 of none rebuilt" in rc.calibrate_render(tally)[0]
 
 
 def test_a_stop_signal_ends_the_walk_after_the_game_in_hand_and_the_run_says_so(
@@ -1542,8 +1542,8 @@ def test_a_stop_signal_ends_the_walk_after_the_game_in_hand_and_the_run_says_so(
     monkeypatch.setitem(rc._STOP, "word", None)
     fetch = FakeFetch(planted_items(),
                       before=lambda n: n == 2 and rc._on_term(signal.SIGTERM, None))
-    tally = run(rc.walk(rs, fetch))
-    lines = rc.render(tally)
+    tally = run(rc.calibrate_walk(rs, fetch))
+    lines = rc.calibrate_render(tally)
     assert tally.cut == "stopped" and fetch.closed == ["card"]
     assert lines[0].startswith("run cut (stopped): games read 2 of 10 (card 2 of 5, identity 0 of 3")
     assert all(line.startswith("cut ") for line in _middle(lines)) and _tail(lines) == "report end"
@@ -1607,14 +1607,14 @@ def test_a_slow_statement_ends_the_run_at_the_deadline_plus_the_named_slack(
     --deadline-s 1 over a statement that never answers, and in both cases an
     engine whose disposal never ends (cut after CLOSE_SLACK_S); with
     `swallow` the statement also swallows every cancellation (abandoned
-    after CANCEL_SLACK_S). Either way main()
+    after CANCEL_SLACK_S). Either way calibrate_cli()
     returns within 1 + REPORT_SLACK_S, the first line is the header, the
     second `run cut (deadline)` and the last `report end`."""
     path, rs = rooted
     bound = 1 + rc.REPORT_SLACK_S
     eng = _StandInEngine(slow=True)
     sess = SlowSession(swallow, guard_s=bound + 2)
-    monkeypatch.setattr(rc, "session_factory", lambda d, **k: (eng, lambda: sess))
+    monkeypatch.setattr(rc, "calibrate_session_factory", lambda d, **k: (eng, lambda: sess))
     capfd.readouterr()
     t0 = time.monotonic()
     code = call_main(["--revision", path, "--days", "5", "--deadline-s", "1"])
@@ -1903,7 +1903,7 @@ def _failure_row(name, mode="cohort"):
 
         def factory(*_a, **_k):
             raise exc
-        ctx.mp.setattr(rc, "session_factory", factory)
+        ctx.mp.setattr(rc, "calibrate_session_factory", factory)
         word = name.split("-")[0]
         if mode == "count":
             # [1] (METHOD 1): a database failure in count mode, after the
@@ -1919,7 +1919,7 @@ def _failure_row(name, mode="cohort"):
 def _failure_real_address(word, address):
     def build(ctx):
         real = REAL_SESSION_FACTORY
-        ctx.mp.setattr(rc, "session_factory", lambda d, **k: real(d, url=address))
+        ctx.mp.setattr(rc, "calibrate_session_factory", lambda d, **k: real(d, url=address))
         return {"argv": ["--cohort", "--days", "5"], "tokens": [TOKEN, "127.0.0.1"],
                 "code": rc.EXIT_FAILED, "out": ["failed (%s)" % word]}
     return build
@@ -1940,7 +1940,7 @@ def _failure_real_driver(ctx):
         return Bare()
     ctx.mp.setattr(asyncpg, "connect", bare_connect)
     real = REAL_SESSION_FACTORY
-    ctx.mp.setattr(rc, "session_factory", lambda d, **k: real(
+    ctx.mp.setattr(rc, "calibrate_session_factory", lambda d, **k: real(
         d, url="postgresql+asyncpg://calib:%s@127.0.0.1:1/%s" % (TOKEN, TOKEN)))
     return {"argv": ["--cohort", "--days", "5"], "tokens": [TOKEN, "127.0.0.1"],
             "code": rc.EXIT_FAILED, "out": ["failed (driver)"]}
@@ -1970,7 +1970,7 @@ def _process(argv, isolated, out, code):
 PROCESS_ROWS = [
     ("process-import", "import", _process(["--" + TOKEN], True, ["failed (import)"], rc.EXIT_FAILED)),
     ("process-refusal", "days", _process(["--cohort", "--days", TOKEN], False,
-                                         ["refused (days)"], rc.EXIT_USAGE)),
+                                         ["refused (days)"], rc.CALIBRATE_EXIT_USAGE)),
 ]
 
 CENSUS = ([("arg",) + r for r in ARG_CENSUS] + [("path",) + r for r in PATH_CENSUS]
@@ -1985,11 +1985,11 @@ TABLE = (CENSUS + VARIANTS
 
 def _expected(kind, rid, word, case):
     if "out" in case:
-        return case["out"], case.get("code", rc.EXIT_USAGE)
+        return case["out"], case.get("code", rc.CALIBRATE_EXIT_USAGE)
     if kind == "arg":
-        return ["refused (%s)" % word], rc.EXIT_USAGE
+        return ["refused (%s)" % word], rc.CALIBRATE_EXIT_USAGE
     if kind == "path":
-        return ["refused (path %s)" % word], rc.EXIT_USAGE
+        return ["refused (path %s)" % word], rc.CALIBRATE_EXIT_USAGE
     if kind == "loader":
         return LOADER_LINES[rid], rc.EXIT_REFUSED
     raise AssertionError("no expectation for row " + rid)
@@ -2006,7 +2006,7 @@ def test_every_refusal_and_failure_prints_one_fixed_line_and_nothing_else(
 
     def no_database(*_a, **_k):
         raise AssertionError("this row reaches no database")
-    monkeypatch.setattr(rc, "session_factory", no_database)
+    monkeypatch.setattr(rc, "calibrate_session_factory", no_database)
     ctx = types.SimpleNamespace(tmp=tmp_path, mp=monkeypatch, path=path, rev=rs.rev)
     case = build(ctx)
     want, want_code = _expected(kind, rid, word, case)
@@ -2026,7 +2026,7 @@ def test_every_refusal_and_failure_prints_one_fixed_line_and_nothing_else(
         assert tok not in out and tok not in err, tok
 
 
-_BRANCH_FUNCS = ("parse_args", "revision_path", "_calibrate_main", "session_factory", "_connect")
+_BRANCH_FUNCS = ("parse_args", "revision_path", "_calibrate_main", "calibrate_session_factory", "_connect")
 
 
 def decisive_points():
@@ -2081,7 +2081,7 @@ def _row_points(row, planted, tmp, points):
     with pytest.MonkeyPatch.context() as mp:
         def no_database(*_a, **_k):
             raise AssertionError("this row reaches no database")
-        mp.setattr(rc, "session_factory", no_database)
+        mp.setattr(rc, "calibrate_session_factory", no_database)
         ctx = types.SimpleNamespace(tmp=tmp, mp=mp, path=path, rev=rs.rev)
         case = build(ctx)
         want, want_code = _expected(kind, rid, word, case)
@@ -2258,14 +2258,14 @@ def test_an_argument_through_the_pointer_is_refused_by_form_with_no_lookup_benea
     with recording_lookups(seen):
         code = call_main(["--revision", arg, "--days", "5"])
     out = capsys.readouterr()
-    assert code == rc.EXIT_USAGE and out.out == "refused (path pointer)\n" and out.err == ""
+    assert code == rc.CALIBRATE_EXIT_USAGE and out.out == "refused (path pointer)\n" and out.err == ""
     assert _beneath(seen, pointer) == []
     # control of the recorder: a lookup the tool does make is seen
     missing = os.path.join(root, "rules-" + HEX_REV)
     seen2 = []
     with recording_lookups(seen2):
         code = call_main(["--revision", missing, "--days", "5"])
-    assert code == rc.EXIT_USAGE and capsys.readouterr().out == "refused (path missing)\n"
+    assert code == rc.CALIBRATE_EXIT_USAGE and capsys.readouterr().out == "refused (path missing)\n"
     assert ("lstat", missing) in [(n, p) for n, p in seen2 if isinstance(p, str)]
 
 
@@ -2277,7 +2277,7 @@ def test_a_pointer_or_a_malformed_name_is_refused_before_loading(rooted, no_db, 
                                                                  word):
     path, _rs = rooted
     code, out = _run_main(capsys, os.path.join(os.path.dirname(path), name))
-    assert code == rc.EXIT_USAGE and out == "refused (path %s)\n" % word
+    assert code == rc.CALIBRATE_EXIT_USAGE and out == "refused (path %s)\n" % word
     assert no_db == []
 
 
@@ -2290,7 +2290,7 @@ def test_the_pointer_is_refused_even_naming_a_good_revision(rooted, no_db, capsy
     with open(os.path.join(root, rr.POINTER), "w", encoding="ascii") as f:
         f.write(os.path.basename(path) + "\n")
     code, out = _run_main(capsys, os.path.join(root, rr.POINTER))
-    assert code == rc.EXIT_USAGE and out == "refused (path pointer)\n" and no_db == []
+    assert code == rc.CALIBRATE_EXIT_USAGE and out == "refused (path pointer)\n" and no_db == []
 
 
 def test_a_symbolic_link_or_junction_named_like_the_revision_is_refused(planted, tmp_path,
@@ -2304,7 +2304,7 @@ def test_a_symbolic_link_or_junction_named_like_the_revision_is_refused(planted,
     # control: the link names the good revision
     assert os.path.realpath(link) == os.path.realpath(path)
     code, out = _run_main(capsys, link)
-    assert code == rc.EXIT_USAGE and out == "refused (path link)\n" and no_db == []
+    assert code == rc.CALIBRATE_EXIT_USAGE and out == "refused (path link)\n" and no_db == []
 
 
 def test_a_directory_junction_is_refused(planted, tmp_path, monkeypatch, no_db, capsys):
@@ -2322,18 +2322,18 @@ def test_a_directory_junction_is_refused(planted, tmp_path, monkeypatch, no_db, 
     _winapi.CreateJunction(path, link)
     assert os.path.realpath(link) == os.path.realpath(path)    # control: names the revision
     code, out = _run_main(capsys, link)
-    assert code == rc.EXIT_USAGE and out == "refused (path link)\n" and no_db == []
+    assert code == rc.CALIBRATE_EXIT_USAGE and out == "refused (path link)\n" and no_db == []
 
 
-# -- main() with a stub walk ----------------------------------------------------------------
+# -- calibrate_cli() with a stub walk----------------------------------------------------------------
 
 class _Seen(list):
-    """The revisions main() walked, plus what each walk was handed."""
+    """The revisions calibrate_cli() walked, plus what each walk was handed."""
 
 
 @pytest.fixture
 def no_db(monkeypatch):
-    """main() stops before any database: the walk is a stub."""
+    """calibrate_cli() stops before any database: the walk is a stub."""
     seen = _Seen()
     seen.calls = []
 
@@ -2342,7 +2342,7 @@ def no_db(monkeypatch):
         seen.calls.append({"days": days, "deadline_at": deadline_at,
                            "handler": signal.getsignal(signal.SIGTERM)})
         return rc.Tally(rs).finish()
-    monkeypatch.setattr(rc, "_run", fake_run)
+    monkeypatch.setattr(rc, "_calibrate_run", fake_run)
     return seen
 
 
@@ -2363,7 +2363,7 @@ def test_days_out_of_range_are_refused(rooted, no_db, capsys):
     path, _rs = rooted
     for days in ("0", "-3", str(cm.WINDOW_DAYS_MAX + 1)):
         code, out = _run_main(capsys, path, days)
-        assert code == rc.EXIT_USAGE and out == "refused (days)\n"
+        assert code == rc.CALIBRATE_EXIT_USAGE and out == "refused (days)\n"
     assert no_db == []
 
 
@@ -2385,7 +2385,7 @@ def test_the_deadline_has_a_stated_default_a_bound_and_reaches_the_walk(rooted, 
     assert t0 + 77 <= no_db.calls[1]["deadline_at"] <= t1 + 77
     for bad in ("0", "-5", str(rc.DEADLINE_MAX_S + 1)):
         code = call_main(["--revision", path, "--days", "23", "--deadline-s", bad])
-        assert code == rc.EXIT_USAGE and capsys.readouterr().out == "refused (deadline)\n"
+        assert code == rc.CALIBRATE_EXIT_USAGE and capsys.readouterr().out == "refused (deadline)\n"
     assert len(no_db) == 2
 
 
@@ -2430,12 +2430,12 @@ def test_the_cohort_digest_is_order_independent_state_independent_and_domain_sen
 
 
 def test_a_members_state_is_purged_then_evaluated_then_failed_then_waiting():
-    assert rc.classify(_m(CK, purged=True, rev=GOOD_REV, failed=True), GOOD_REV) == "purged"
-    assert rc.classify(_m(CK, rev=GOOD_REV, failed=True), GOOD_REV) == "evaluated"
-    assert rc.classify(_m(CK, rev="0" * 12, failed=True), GOOD_REV) == "failed"
-    assert rc.classify(_m(CK, rev="0" * 12), GOOD_REV) == "waiting"
-    assert rc.classify(_m(CK), GOOD_REV) == "waiting"
-    assert rc.classify(_m(CK, rev=None), None) == "waiting"
+    assert rc.calibrate_classify(_m(CK, purged=True, rev=GOOD_REV, failed=True), GOOD_REV) == "purged"
+    assert rc.calibrate_classify(_m(CK, rev=GOOD_REV, failed=True), GOOD_REV) == "evaluated"
+    assert rc.calibrate_classify(_m(CK, rev="0" * 12, failed=True), GOOD_REV) == "failed"
+    assert rc.calibrate_classify(_m(CK, rev="0" * 12), GOOD_REV) == "waiting"
+    assert rc.calibrate_classify(_m(CK), GOOD_REV) == "waiting"
+    assert rc.calibrate_classify(_m(CK, rev=None), None) == "waiting"
 
 
 def test_the_cohort_read_binds_t_and_its_utc_cutoff_and_returns_its_text():
@@ -2657,7 +2657,7 @@ def walked(live, planted):
     with every SQL text it sends recorded."""
     _path, rs = planted
     log = []
-    engine, factory = rc.session_factory(60, url=live.url, recorder=log,
+    engine, factory = rc.calibrate_session_factory(60, url=live.url, recorder=log,
                                          extra_settings=live.settings)
 
     async def go():
@@ -2679,7 +2679,7 @@ def test_live_the_tool_session_and_its_connection_are_read_only_from_the_start(l
     from sqlalchemy.exc import DBAPIError
 
     async def go():
-        engine, factory = rc.session_factory(60, url=live.url, extra_settings=live.settings)
+        engine, factory = rc.calibrate_session_factory(60, url=live.url, extra_settings=live.settings)
         try:
             async with rc.read_only(factory) as db:
                 ro = (await db.execute(text("SHOW transaction_read_only"))).scalar()
@@ -2804,15 +2804,15 @@ def test_live_the_counts_are_what_the_planted_rules_give(walked, planted):
     one identity game, one combat game); and the cycle rule fires once."""
     _path, rs = planted
     card, ident, cmb = run(_fake_items(rs))
-    expected = run(rc.walk(rs, FakeFetch({"card": [card, ("skip", "outside"), card, rc.AMBIGUOUS],
+    expected = run(rc.calibrate_walk(rs, FakeFetch({"card": [card, ("skip", "outside"), card, rc.AMBIGUOUS],
                                           "identity": [ident], "combat": [cmb]})))
     tally = walked.tally
     assert tally.cut is None and not tally.abandoned
-    assert rc.render(tally) == rc.render(expected)
+    assert rc.calibrate_render(tally) == rc.calibrate_render(expected)
     assert counts(tally)[ID_CMB] == (1, 1, 0)
     assert counts(tally)[ID_DUP][0] == 2 and counts(tally)[ID_IDB][0] == 1
     assert counts(tally)[ID_WIN][0] == tally.windows == tally.windows_total
-    assert rc.render(tally)[0] == ("run whole: games read 6 of 6 (card 4 of 4, identity 1 of 1, "
+    assert rc.calibrate_render(tally)[0] == ("run whole: games read 6 of 6 (card 4 of 4, identity 1 of 1, "
                                    "combat 1 of 1)")
 
 
@@ -2830,7 +2830,7 @@ def test_live_a_game_whose_earliest_matches_tie_is_ambiguous_and_not_counted(wal
     t = walked.tally
     assert t.ambiguous == {"card": 1, "identity": 0, "combat": 0}
     assert ("ambiguous (tied earliest match, not counted): card 1, identity 0, combat 0"
-            in rc.render(t))
+            in rc.calibrate_render(t))
 
 
 def test_live_the_selection_reads_a_tied_old_canonical_match_as_outside_and_not_a_game_without_a_recent_match(
@@ -2912,7 +2912,7 @@ def test_live_the_connection_takes_nothing_from_the_drivers_environment(live, mo
     log, direct = [], []
 
     async def go():
-        engine, factory = rc.session_factory(60, url=live.url, recorder=log,
+        engine, factory = rc.calibrate_session_factory(60, url=live.url, recorder=log,
                                              extra_settings=live.settings)
         try:
             async with rc.read_only(factory) as db:
@@ -2971,7 +2971,7 @@ def test_live_a_statement_ends_by_its_statement_timeout(live):
     from sqlalchemy.exc import DBAPIError
 
     async def go():
-        engine, factory = rc.session_factory(1, url=live.url, extra_settings=live.settings)
+        engine, factory = rc.calibrate_session_factory(1, url=live.url, extra_settings=live.settings)
         try:
             async with rc.read_only(factory) as db:
                 t0 = time.monotonic()
@@ -2999,7 +2999,7 @@ def test_live_a_statement_started_late_has_its_whole_statement_timeout(live):
 
     async def go():
         t_built = time.monotonic()
-        engine, factory = rc.session_factory(3, url=live.url, extra_settings=live.settings)
+        engine, factory = rc.calibrate_session_factory(3, url=live.url, extra_settings=live.settings)
         try:
             async with rc.read_only(factory) as db:
                 assert (await db.execute(text("SELECT 1"))).scalar() == 1
@@ -3028,7 +3028,7 @@ def test_live_the_cohort_cutoff_does_not_move_with_the_session_time_zone(live, m
     13:00Z and leave it out (the check then refuses: cohort differs)."""
     real = REAL_SESSION_FACTORY
     zone = dict(live.settings, TimeZone="America/Los_Angeles")
-    monkeypatch.setattr(rc, "session_factory", lambda d, **k: real(d, url=live.url,
+    monkeypatch.setattr(rc, "calibrate_session_factory", lambda d, **k: real(d, url=live.url,
                                                                    extra_settings=zone))
     lo, hi = sorted([live.plan.a, live.plan.b])
     digest = rc.cohort_digest({"card": [(LK["dst"], lo, hi)], "identity": [], "combat": []})
@@ -3043,7 +3043,7 @@ def test_live_the_cohort_cutoff_does_not_move_with_the_session_time_zone(live, m
 
 
 def test_live_the_report_names_no_identifier(walked, live):
-    out = "\n".join(rc.render(walked.tally))
+    out = "\n".join(rc.calibrate_render(walked.tally))
     for part in list(LK.values()) + list(LR.values()) + list(live.plan.ids) + ["q7z", ST_A, ST_B]:
         assert part not in out, part
 
@@ -3054,7 +3054,7 @@ def test_live_cohort_then_cohort_check(live, monkeypatch, capfd):
     attached record is purged, counts each member's state; a changed digest
     is refused."""
     real = REAL_SESSION_FACTORY
-    monkeypatch.setattr(rc, "session_factory",
+    monkeypatch.setattr(rc, "calibrate_session_factory",
                         lambda d, **k: real(d, url=live.url, extra_settings=live.settings))
     capfd.readouterr()
     code = call_main(["--cohort", "--days", str(COH_DAYS)])

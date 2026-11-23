@@ -109,7 +109,7 @@ or failure line repeats no supplied value; a report repeats only values the
 tool validated or computed (days, deadline, revision id, T, digest), with
 rule ids, scopes, classes, fixed words and counts; never a Steam id, a
 player name, a game key, a match id, an address, a path or an exception's
-text. While main() runs, standard error is a sink, warnings are off and
+text. While calibrate_cli() runs, standard error is a sink, warnings are off and
 unraisable exceptions are dropped.
 
 THE IMPORT GUARD. Run as a program, the file's first statements (above them
@@ -127,7 +127,7 @@ TIME. THE ABSOLUTE BOUND of a run is the server verb's outer time limit: the
 verb runs the tool under `timeout -s TERM -k VERB_KILL_AFTER_S <deadline +
 VERB_SLACK_S>`, so the process is ended from outside. The tool's own
 deadline (--deadline-s, default DEFAULT_DEADLINE_S, at most DEADLINE_MAX_S,
-counted from the start of main()) is a courtesy: it ends the work between
+counted from the start of calibrate_cli()) is a courtesy: it ends the work between
 awaited steps and prints the report with what it has. The walk runs as one
 task under a timer; at the deadline (SIGTERM: the same, word `stopped`) the
 task is cancelled at its next await, the driver asks the server to cancel
@@ -206,7 +206,7 @@ revision's closure fingerprint covers.
 import sys                                    # loaded by the interpreter itself, as is posix or nt below
 
 EXIT_REFUSED = 1
-EXIT_USAGE = 2
+CALIBRATE_EXIT_USAGE = 2
 EXIT_FAILED = 3
 
 _AS_PROGRAM = __name__ == "__main__"
@@ -228,7 +228,7 @@ class _Sink:
 
 
 def _fixed_end(line, code):
-    """The end of the process on a failure outside main(): ONE fixed line,
+    """The end of the process on a failure outside calibrate_cli(): ONE fixed line,
     unless the run's one write is already out, then the exit."""
     try:
         if not _OUT["written"]:
@@ -239,11 +239,19 @@ def _fixed_end(line, code):
         _EXIT_NOW(code)
 
 
-# THE GUARD: the first executable statements, before any other import.
-if _AS_PROGRAM:
+def _calibrate_guard_imports():
+    """THE GUARD's first part: standard error a sink, unraisable exceptions
+    dropped, an exception that leaves the imports one fixed line. Written as
+    a function so that the route manifest's walk files these statements under
+    the program's own name, not under the name sys."""
     sys.stderr = _Sink()
     sys.unraisablehook = lambda _u: None
     sys.excepthook = lambda *_a: _fixed_end("failed (import)", EXIT_FAILED)
+
+
+# THE GUARD: the first executable statements, before any other import.
+if _AS_PROGRAM:
+    _calibrate_guard_imports()
 
 try:
     import asyncio
@@ -296,7 +304,7 @@ _LOADER_CLASS = re.compile(r"[a-z][a-z_]{0,31}", re.ASCII)
 _STOP = {"word": None, "task": None}
 
 
-class Refused(Exception):
+class CalibrateRefused(Exception):
     """A refusal: `line` is printed, `code` is the exit status."""
 
     def __init__(self, line: str, code: int):
@@ -328,7 +336,7 @@ def _on_term(signum, frame):
         loop.call_soon_threadsafe(task.cancel)
 
 
-def _ended(deadline_at, clock):
+def _calibrate_ended(deadline_at, clock):
     """The word that ends the walk now, or None."""
     if _STOP["word"]:
         return _STOP["word"]
@@ -355,51 +363,51 @@ _AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.A
 _DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
 
 
-def _refuse(word):
-    return Refused("refused (%s)" % word, EXIT_USAGE)
+def _calibrate_refuse(word):
+    return CalibrateRefused("refused (%s)" % word, CALIBRATE_EXIT_USAGE)
 
 
 def parse_args(argv) -> dict:
-    """{'mode': ..., option: value} or Refused with a fixed word."""
+    """{'mode': ..., option: value} or CalibrateRefused with a fixed word."""
     if not isinstance(argv, (list, tuple)) or not all(isinstance(a, str) for a in argv):
-        raise _refuse("arguments")
+        raise _calibrate_refuse("arguments")
     seen = {}
     i = 0
     while i < len(argv):
         tok = argv[i]
         if tok in seen:
-            raise _refuse("arguments")
+            raise _calibrate_refuse("arguments")
         if tok in _FLAGS:
             seen[tok] = True
             i += 1
         elif tok in _VALUED:
             if i + 1 >= len(argv):
-                raise _refuse("arguments")
+                raise _calibrate_refuse("arguments")
             seen[tok] = argv[i + 1]
             i += 2
         else:
-            raise _refuse("arguments")
+            raise _calibrate_refuse("arguments")
     modes = [m for m, (need, _opt) in _MODES.items() if need <= set(seen)]
     if len(modes) != 1:
-        raise _refuse("arguments")
+        raise _calibrate_refuse("arguments")
     mode = modes[0]
     need, opt = _MODES[mode]
     if set(seen) - need - opt:
-        raise _refuse("arguments")
+        raise _calibrate_refuse("arguments")
     out = {"mode": mode}
     days = seen["--days"]
     if not _DIGITS.fullmatch(days) or not 0 < int(days) <= cm.WINDOW_DAYS_MAX:
-        raise _refuse("days")
+        raise _calibrate_refuse("days")
     out["days"] = int(days)
     dl = seen.get("--deadline-s", str(DEFAULT_DEADLINE_S))
     if not _DIGITS.fullmatch(dl) or not 0 < int(dl) <= DEADLINE_MAX_S:
-        raise _refuse("deadline")
+        raise _calibrate_refuse("deadline")
     out["deadline_s"] = int(dl)
     if mode == "count":
         out["revision"] = seen["--revision"]
     if mode == "check":
         if not _REV.fullmatch(seen["--rev"]):
-            raise _refuse("rev")
+            raise _calibrate_refuse("rev")
         out["rev"] = seen["--rev"]
         at = seen["--at"]
         try:
@@ -407,10 +415,10 @@ def parse_args(argv) -> dict:
         except ValueError:
             ok = False
         if not ok:
-            raise _refuse("at")
+            raise _calibrate_refuse("at")
         out["at"] = at
         if not _DIGEST.fullmatch(seen["--digest"]):
-            raise _refuse("digest")
+            raise _calibrate_refuse("digest")
         out["digest"] = seen["--digest"]
     return out
 
@@ -552,7 +560,7 @@ async def _connect(args: dict, settings: dict, recorder=None):
     return conn
 
 
-def session_factory(deadline_s: int, url=None, recorder=None, extra_settings=None):
+def calibrate_session_factory(deadline_s: int, url=None, recorder=None, extra_settings=None):
     """(engine, session maker) over the api's database (or `url`): one
     connection per session (NullPool), opened by _connect with the read-only
     startup parameters; every session's transaction is REPEATABLE READ READ
@@ -829,8 +837,8 @@ class DbFetch:
 # first w - 1 selected days sums only the selected part of it; each window is
 # rebuilt once from the final contributions of the selected games.
 
-_DAILY_COLS = ce._DAILY_COLS
-_SUM_COLS = ce._SUM_COLS
+_CALIBRATE_DAILY_COLS = ce._DAILY_COLS
+_CALIBRATE_SUM_COLS = ce._SUM_COLS
 
 
 def add_contributions(daily: dict, view, day, game) -> None:
@@ -841,7 +849,7 @@ def add_contributions(daily: dict, view, day, game) -> None:
         key = (c["subject"], day, c["source"], c["coverage"], c["profile"])
         row = daily.get(key)
         if row is None:
-            row = daily[key] = dict.fromkeys(_DAILY_COLS, 0)
+            row = daily[key] = dict.fromkeys(_CALIBRATE_DAILY_COLS, 0)
             row["games"] = set()
         row["games"].add(game)
         row["hands"] += c["hands"]
@@ -867,20 +875,20 @@ def rebuild_windows(daily: dict, rs, deadline_at=None, clock=time.monotonic) -> 
         classes.setdefault((subject, source, coverage, profile), {})[day] = row
     out = []
     for cls in sorted(classes):
-        word = _ended(deadline_at, clock)
+        word = _calibrate_ended(deadline_at, clock)
         if word:
             return out, word
         subject, source, coverage, profile = cls
         by_day = classes[cls]
         for e in sorted(by_day):
-            word = _ended(deadline_at, clock)
+            word = _calibrate_ended(deadline_at, clock)
             if word:
                 return out, word
-            sums = dict.fromkeys(_SUM_COLS, 0)
+            sums = dict.fromkeys(_CALIBRATE_SUM_COLS, 0)
             for d, r in by_day.items():
                 if e - timedelta(days=w) < d <= e:
                     sums["games"] += len(r["games"])
-                    for c in _DAILY_COLS:
+                    for c in _CALIBRATE_DAILY_COLS:
                         sums[c] += int(r[c])
             agg = {c: sums[c] for c in ("games", "hands", "slots", "notrun_hands")}
             agg.update(source=source, coverage=coverage)
@@ -981,7 +989,7 @@ class Tally:
         self.windows_total = len(wins)
         rules = [r for r in self._scope("card") if r.subject == cm.WINDOW_SUBJECT]
         for _key, agg in wins:
-            self.cut = _ended(deadline_at, clock)
+            self.cut = _calibrate_ended(deadline_at, clock)
             if self.cut:
                 break
             self.windows += 1
@@ -991,7 +999,7 @@ class Tally:
         return self
 
 
-async def walk(rs, fetch, deadline_at=None, clock=time.monotonic, tally=None) -> Tally:
+async def calibrate_walk(rs, fetch, deadline_at=None, clock=time.monotonic, tally=None) -> Tally:
     """Every domain's items from `fetch` (each domain in its own pass)
     through the counting core, until the deadline or a stop signal: checked
     before each domain and after every game or skip; a walk either ends is
@@ -1007,7 +1015,7 @@ async def walk(rs, fetch, deadline_at=None, clock=time.monotonic, tally=None) ->
         for domain in DOMAINS:
             tally.totals[domain] = await total(domain)
     for domain in DOMAINS:
-        tally.cut = _ended(deadline_at, clock)
+        tally.cut = _calibrate_ended(deadline_at, clock)
         if tally.cut:
             break
         items = fetch.items(domain, rs)
@@ -1019,7 +1027,7 @@ async def walk(rs, fetch, deadline_at=None, clock=time.monotonic, tally=None) ->
                     tally.tie(domain)
                 else:
                     tally.game(domain, payload)
-                tally.cut = _ended(deadline_at, clock)
+                tally.cut = _calibrate_ended(deadline_at, clock)
                 if tally.cut:
                     break
         finally:
@@ -1071,7 +1079,7 @@ async def walk_db(rs, session_factory, days: int, deadline_at=None, clock=time.m
 
     async def inner():
         async with read_only(session_factory) as db:
-            await walk(rs, DbFetch(db, days), deadline_at, clock, tally=tally)
+            await calibrate_walk(rs, DbFetch(db, days), deadline_at, clock, tally=tally)
     await bounded(inner(), tally, deadline_at, clock)
     return tally
 
@@ -1080,7 +1088,7 @@ def _of(n) -> str:
     return "unknown" if n is None else "%d" % n
 
 
-def render(tally: Tally) -> list:
+def calibrate_render(tally: Tally) -> list:
     """The report. First the summary line: `run whole` with the games read
     of the games selected, or `run cut (<word>)` (deadline: the run's own
     deadline; stopped: SIGTERM) with how many games of how many it read and
@@ -1206,7 +1214,7 @@ def cohort_digest(members: dict) -> str:
     return h.hexdigest()
 
 
-def classify(row, rev) -> str:
+def calibrate_classify(row, rev) -> str:
     """A member's state for the check: purged (an attached record's lists
     were purged after T), evaluated (the games row carries the revision),
     failed (a failure the row ties to the revision), or waiting."""
@@ -1258,7 +1266,7 @@ def render_check(rev, at, members, ambiguous) -> list:
     per = {d: dict.fromkeys(_STATES + ("marked",), 0) for d in DOMAINS}
     for d in DOMAINS:
         for row in members[d]:
-            per[d][classify(row, rev)] += 1
+            per[d][calibrate_classify(row, rev)] += 1
             per[d]["marked"] += 1 if row[6] else 0
     tot = {s: sum(per[d][s] for d in DOMAINS) for s in _STATES}
     n = sum(len(members[d]) for d in DOMAINS)
@@ -1305,8 +1313,8 @@ async def _dispose(engine):
         pass
 
 
-async def _run(rs, days, deadline_at=None):
-    engine, factory = session_factory(_remaining_s(deadline_at))
+async def _calibrate_run(rs, days, deadline_at=None):
+    engine, factory = calibrate_session_factory(_remaining_s(deadline_at))
     try:
         return await walk_db(rs, factory, days, deadline_at)
     finally:
@@ -1315,7 +1323,7 @@ async def _run(rs, days, deadline_at=None):
 
 async def _run_cohort(days, deadline_at=None, at=None, rev=None):
     """(T, members, ambiguous) or None when the deadline or SIGTERM ended it first."""
-    engine, factory = session_factory(_remaining_s(deadline_at))
+    engine, factory = calibrate_session_factory(_remaining_s(deadline_at))
     box = {}
 
     async def inner():
@@ -1395,7 +1403,7 @@ def quiet_streams():
 
 
 def _calibrate_main(argv, start) -> tuple:
-    """(exit status, every line of the run). Raises Refused or a failure."""
+    """(exit status, every line of the run). Raises CalibrateRefused or a failure."""
     opts = parse_args(argv)
     deadline_at = start + opts["deadline_s"]
     _STOP["word"] = None
@@ -1404,19 +1412,19 @@ def _calibrate_main(argv, start) -> tuple:
         try:
             path = revision_path(opts["revision"])
         except PathRefused as e:
-            raise Refused("refused (path %s)" % e.word, EXIT_USAGE) from None
+            raise CalibrateRefused("refused (path %s)" % e.word, CALIBRATE_EXIT_USAGE) from None
         try:
             rs = rr.load_dir(path)
         except rr.Refused as e:
             if isinstance(e.cls, str) and _LOADER_CLASS.fullmatch(e.cls):
-                raise Refused("refused (%s)" % e.cls, EXIT_REFUSED) from None
-            raise Refused("refused (revision)", EXIT_REFUSED) from None
+                raise CalibrateRefused("refused (%s)" % e.cls, EXIT_REFUSED) from None
+            raise CalibrateRefused("refused (revision)", EXIT_REFUSED) from None
         head = ["revision %s days %d deadline_s %d" % (rs.rev, opts["days"], opts["deadline_s"])]
     before = signal.signal(signal.SIGTERM, _on_term)
     try:
         if opts["mode"] == "count":
-            tally = _run_loop(_run(rs, opts["days"], deadline_at))
-            return 0, head + render(tally)
+            tally = _run_loop(_calibrate_run(rs, opts["days"], deadline_at))
+            return 0, head + calibrate_render(tally)
         got = _run_loop(_run_cohort(opts["days"], deadline_at, opts.get("at"), opts.get("rev")))
     finally:
         signal.signal(signal.SIGTERM, before)
@@ -1431,14 +1439,14 @@ def _calibrate_main(argv, start) -> tuple:
     return 0, render_check(opts["rev"], at, members, ambiguous)
 
 
-def main(argv=None) -> int:
+def calibrate_cli(argv=None) -> int:
     """The run: every line collected, then ONE write. A refusal or a failure
     is one fixed line."""
     start = time.monotonic()                  # the deadline counts the whole run, loading included
     with quiet_streams():
         try:
             code, lines = _calibrate_main(sys.argv[1:] if argv is None else argv, start)
-        except Refused as e:
+        except CalibrateRefused as e:
             code, lines = e.code, [e.line]
         except BaseException as e:            # noqa: BLE001 -- THE outermost handler
             code, lines = EXIT_FAILED, ["failed (%s)" % failure_word(e)]
@@ -1446,11 +1454,18 @@ def main(argv=None) -> int:
         return code
 
 
-if _AS_PROGRAM:
-    # From here on an exception outside main() ends the process with one fixed line.
+def _calibrate_guard_run():
+    """THE GUARD's second part: from here on an exception outside
+    calibrate_cli() ends the process with one fixed line. A function for the
+    reason _calibrate_guard_imports gives."""
     sys.excepthook = lambda _t, e, _tb: _fixed_end("failed (%s)" % failure_word(e), EXIT_FAILED)
-    _hold = quiet_streams()
-    _hold.__enter__()                         # for the whole process, interpreter exit included
-    _code = main(sys.argv[1:])
+
+
+if _AS_PROGRAM:
+    # From here on an exception outside calibrate_cli() ends the process with one fixed line.
+    _calibrate_guard_run()
+    _calibrate_hold = quiet_streams()
+    _calibrate_hold.__enter__()               # for the whole process, interpreter exit included
+    _calibrate_code = calibrate_cli(sys.argv[1:])
     sys.stdout.flush()
-    _EXIT_NOW(_code)
+    _EXIT_NOW(_calibrate_code)
