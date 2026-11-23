@@ -2159,9 +2159,15 @@ for _k, _v in R11_COARSE_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
 # 365 as derived at round 11, less the four forms BOT-TEXT-ESCAPE-1 took out of
 # the coarse list above by hand (two '@everyone' and two '@here' under
-# 'api/main.py'; see the BOT_TEXT_ESCAPE block at the end). The FROZEN_COUNT
-# figures that the later blocks' comments give (855, 856, 860, 867) are the
-# figures at those blocks' own edits, with the coarse 365.
+# 'api/main.py'; see the BOT_TEXT_ESCAPE block at the end), gives 361; the
+# hand edit for the snapshot reader builder in api/database.py adds its four
+# coarse forms in the list above (the import of the pool class, a fourth Load
+# of create_async_engine, the def of make_snapshot_reader_engine and the
+# dsntext postgresql_readonly), 361 to 365, and its one complete form and its
+# one round-10 form below, which bring the total from 873 to 879. The
+# FROZEN_COUNT figures that the later blocks' comments give (855, 856, 860,
+# 867, with the coarse 365; 873, with the coarse 361) are the figures at those
+# blocks' own edits.
 COARSE_COUNT = 365
 COMPLETE_COUNT = 219
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
@@ -3849,7 +3855,7 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 #   mention-word substitutions that the compose-time paths of the admin post
 #   and the channel post no longer run (they pass the shared discord_text
 #   helpers instead). The two of each that remain are other call sites.
-#   COARSE_COUNT is 361 for that reason.
+#   COARSE_COUNT was 361 at this block's own edit for that reason.
 # - Replaced in place in the coarse list above (same position, the count
 #   unchanged): the docstring of _stream_md_escape, which no longer begins
 #   "Names go into a Discord embed body" and now begins "A name for a stream
@@ -3895,7 +3901,8 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 #   URL 'http://t') and five complete forms (the exec alias, the mutant check's
 #   constructed call, and three dynamic forms: the compiled mutant source,
 #   sys.modules and vars(main)).
-# Frozen by hand, not by a re-derivation; FROZEN_COUNT is 873.
+# Frozen by hand, not by a re-derivation; FROZEN_COUNT was 873 at this
+# block's own edit.
 QAPPLY_FROZEN = {'api/main.py': [
     ('import', 'from sqlalchemy import event as _sa_event'),
     ('import', 'from sqlalchemy.engine import Engine as _SaEngine')]}
