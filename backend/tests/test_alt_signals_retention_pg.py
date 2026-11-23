@@ -330,7 +330,9 @@ def test_a_cancelled_pass_re_raises_and_prints_nothing(monkeypatch, capsys, wher
         return 0
 
     async def left(db, at=None):
-        raise asyncio.CancelledError()
+        if where == "in the count":
+            raise asyncio.CancelledError()
+        return {"markers": 0, "shares": 0, "facts": 0}
 
     monkeypatch.setattr(main, "_alt_retention_batch", batch)
     monkeypatch.setattr(main, "_alt_retention_left", left)
