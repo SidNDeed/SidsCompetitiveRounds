@@ -1435,7 +1435,7 @@ def test_every_run_kind_builds_its_session_factory_with_at_most_the_deadline(
                       "--digest", "0" * 64]}[mode] + ["--days", "5", "--deadline-s", "100"]
     start = time.monotonic()
     with pytest.raises(_FirstSession):
-        rc._main(argv, start)
+        rc._calibrate_main(argv, start)
     built = [e for e in events if isinstance(e, tuple)]
     assert len(built) == 1, events
     _f, deadline_s, at = built[0]
@@ -2026,14 +2026,14 @@ def test_every_refusal_and_failure_prints_one_fixed_line_and_nothing_else(
         assert tok not in out and tok not in err, tok
 
 
-_BRANCH_FUNCS = ("parse_args", "revision_path", "_main", "session_factory", "_connect")
+_BRANCH_FUNCS = ("parse_args", "revision_path", "_calibrate_main", "session_factory", "_connect")
 
 
 def decisive_points():
     """The module's refusal and failure branches, read from its source: every
     raise in the functions that refuse (_BRANCH_FUNCS); every word failure_word
-    returns; every return of _main with the refusal status; and, for a
-    failure that leaves a run, the line of _main that started that run (an
+    returns; every return of _calibrate_main with the refusal status; and, for a
+    failure that leaves a run, the line of _calibrate_main that started that run (an
     exception passing it)."""
     tree = ast.parse(open(rc.__file__, encoding="utf-8").read())
     funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -2042,12 +2042,12 @@ def decisive_points():
         pts |= {("line", name, n.lineno) for n in ast.walk(funcs[name]) if isinstance(n, ast.Raise)}
     pts |= {("line", "failure_word", n.lineno) for n in ast.walk(funcs["failure_word"])
             if isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)}
-    for n in ast.walk(funcs["_main"]):
+    for n in ast.walk(funcs["_calibrate_main"]):
         if (isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple)
                 and isinstance(n.value.elts[0], ast.Name) and n.value.elts[0].id == "EXIT_REFUSED"):
-            pts.add(("line", "_main", n.lineno))
+            pts.add(("line", "_calibrate_main", n.lineno))
         if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_run_loop":
-            pts.add(("exception", "_main", n.lineno))
+            pts.add(("exception", "_calibrate_main", n.lineno))
     return pts
 
 

@@ -1397,7 +1397,7 @@ def quiet_streams():
         logging.raiseExceptions = saved[3]
 
 
-def _main(argv, start) -> tuple:
+def _calibrate_main(argv, start) -> tuple:
     """(exit status, every line of the run). Raises Refused or a failure."""
     opts = parse_args(argv)
     deadline_at = start + opts["deadline_s"]
@@ -1440,7 +1440,7 @@ def main(argv=None) -> int:
     start = time.monotonic()                  # the deadline counts the whole run, loading included
     with quiet_streams():
         try:
-            code, lines = _main(sys.argv[1:] if argv is None else argv, start)
+            code, lines = _calibrate_main(sys.argv[1:] if argv is None else argv, start)
         except Refused as e:
             code, lines = e.code, [e.line]
         except BaseException as e:            # noqa: BLE001 -- THE outermost handler
