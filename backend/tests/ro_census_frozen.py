@@ -423,6 +423,7 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                       'Uses SQLAlchemy async with asyncpg for PostgreSQL.\n'),
                      ('dsntext',
                       'postgresql+asyncpg://comp_rounds:changeme@localhost:5432/competitive_rounds'),
+                     ('dsntext', 'postgresql_readonly'),
                      ('env', 'DATABASE_URL'),
                      ('import', 'from sqlalchemy import event'),
                      ('import',
@@ -430,15 +431,18 @@ FROZEN = {'api/admin_evidence.py': [('import', 'from sqlalchemy import text'),
                      ('import',
                       'from sqlalchemy.ext.asyncio import create_async_engine as '
                       '_sqlalchemy_create_async_engine'),
+                     ('import', 'from sqlalchemy.pool import NullPool'),
                      ('kwarg', 'create_async_engine connect_args=args'),
                      ('opener', 'Load _sqlalchemy_create_async_engine'),
+                     ('opener', 'Load create_async_engine'),
                      ('opener', 'Load create_async_engine'),
                      ('opener', 'Load create_async_engine'),
                      ('opener', 'Load create_async_engine'),
                      ('opener', 'Load make_asm_engine'),
                      ('opener', 'alias _sqlalchemy_create_async_engine'),
                      ('opener', 'def create_async_engine'),
-                     ('opener', 'def make_asm_engine')],
+                     ('opener', 'def make_asm_engine'),
+                     ('opener', 'def make_snapshot_reader_engine')],
  'api/flag_evidence.py': [('import', 'from sqlalchemy import text')],
  'api/glicko2.py': [('dsntext',
                      '\n'
@@ -1809,6 +1813,11 @@ COMPLETE_FROZEN = {'api/admin_evidence.py#complete': [],
                                'create_async_engine(url, echo=False, pool_size=ASM_POOL_SIZE, '
                                'max_overflow=ASM_POOL_OVERFLOW, pool_timeout=ASM_POOL_TIMEOUT_S, '
                                'pool_pre_ping=True, pool_recycle=1800, connect_args=args)'),
+                              ('call',
+                               'create_async_engine(url, poolclass=NullPool, '
+                               "isolation_level='REPEATABLE READ', "
+                               "execution_options={'postgresql_readonly': True}, "
+                               'async_creator=async_creator)'),
                               ('call', 'make_asm_engine()')],
  'api/flag_evidence.py#complete': [],
  'api/glicko2.py#complete': [],
@@ -2150,11 +2159,17 @@ for _k, _v in R11_COARSE_FROZEN.items():
     FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
 # 365 as derived at round 11, less the four forms BOT-TEXT-ESCAPE-1 took out of
 # the coarse list above by hand (two '@everyone' and two '@here' under
-# 'api/main.py'; see the BOT_TEXT_ESCAPE block at the end). The FROZEN_COUNT
-# figures that the later blocks' comments give (855, 856, 860, 867) are the
-# figures at those blocks' own edits, with the coarse 365.
-COARSE_COUNT = 361
-COMPLETE_COUNT = 218
+# 'api/main.py'; see the BOT_TEXT_ESCAPE block at the end), gives 361; the
+# hand edit for the snapshot reader builder in api/database.py adds its four
+# coarse forms in the list above (the import of the pool class, a fourth Load
+# of create_async_engine, the def of make_snapshot_reader_engine and the
+# dsntext postgresql_readonly), 361 to 365, and its one complete form and its
+# one round-10 form below, which bring the total from 873 to 879. The
+# FROZEN_COUNT figures that the later blocks' comments give (855, 856, 860,
+# 867, with the coarse 365; 865 and 873, with the coarse 361) are the figures
+# at those blocks' own edits.
+COARSE_COUNT = 365
+COMPLETE_COUNT = 219
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
 # in the round-9 notes): two dynamic forms the gr child's G2/G3 code adds,
 # each reading an AST node's own field named by the field the walk stands in
@@ -2211,7 +2226,24 @@ R10_FROZEN = {'api/admin_evidence.py#complete': [],
                                '    return create_async_engine(url, echo=False, '
                                'pool_size=ASM_POOL_SIZE, max_overflow=ASM_POOL_OVERFLOW, '
                                'pool_timeout=ASM_POOL_TIMEOUT_S, pool_pre_ping=True, '
-                               'pool_recycle=1800, connect_args=args)')],
+                               'pool_recycle=1800, connect_args=args)'),
+                              ('wrapper',
+                               'def make_snapshot_reader_engine(url, async_creator):\n'
+                               '    """An engine for a program that reads one snapshot: no pool '
+                               '(NullPool: a\n'
+                               '    connection is opened for a checkout and closed after it), '
+                               'transactions\n'
+                               '    REPEATABLE READ and read only, connections opened by the '
+                               "caller's\n"
+                               '    `async_creator`. Built for the review counting program\n'
+                               '    (review_calibrate.py), which runs beside the api, so that its '
+                               'engine too\n'
+                               '    comes from the create_async_engine above."""\n'
+                               '    from sqlalchemy.pool import NullPool\n'
+                               '    return create_async_engine(url, poolclass=NullPool, '
+                               "isolation_level='REPEATABLE READ', "
+                               "execution_options={'postgresql_readonly': True}, "
+                               'async_creator=async_creator)')],
  'api/flag_evidence.py#complete': [],
  'api/glicko2.py#complete': [],
  'api/identity_clock_evidence.py#complete': [],
@@ -3494,7 +3526,7 @@ R10_FROZEN = {'api/admin_evidence.py#complete': [],
                                            '    return (engine, async_sessionmaker(engine, '
                                            'expire_on_commit=False))')],
  'tests/title_ladders_lane_schema.py#complete': []}
-R10_COUNT = 114
+R10_COUNT = 115
 for _k, _v in R10_FROZEN.items():
     FROZEN[_k] = list(FROZEN[_k]) + list(_v)
 FROZEN_COUNT = COARSE_COUNT + COMPLETE_COUNT + R10_COUNT
@@ -3823,7 +3855,7 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 #   mention-word substitutions that the compose-time paths of the admin post
 #   and the channel post no longer run (they pass the shared discord_text
 #   helpers instead). The two of each that remain are other call sites.
-#   COARSE_COUNT is 361 for that reason.
+#   COARSE_COUNT was 361 at this block's own edit for that reason.
 # - Replaced in place in the coarse list above (same position, the count
 #   unchanged): the docstring of _stream_md_escape, which no longer begins
 #   "Names go into a Discord embed body" and now begins "A name for a stream
@@ -3869,7 +3901,8 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 #   URL 'http://t') and five complete forms (the exec alias, the mutant check's
 #   constructed call, and three dynamic forms: the compiled mutant source,
 #   sys.modules and vars(main)).
-# Frozen by hand, not by a re-derivation; FROZEN_COUNT is 873.
+# Frozen by hand, not by a re-derivation; FROZEN_COUNT was 873 at this
+# block's own edit.
 QAPPLY_FROZEN = {'api/main.py': [
     ('import', 'from sqlalchemy import event as _sa_event'),
     ('import', 'from sqlalchemy.engine import Engine as _SaEngine')]}

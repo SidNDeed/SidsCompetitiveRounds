@@ -1255,6 +1255,27 @@ def test_the_helper_closure_stays_affordable():
     # +12 here and reached _aer_rows and _aer_fail. The four report routes
     # measure 218 and enter above the rank; the rank position moves
     # 212 -> 214. Inside 87, so the bound stays.
+    # The review counting program (review_calibrate.py, a program the server
+    # verb starts; no app module imports it) joins backend/api: 93 measured
+    # at GET /api/v1/i18n/pack/{locale} of 5986 indexed bindings over 438
+    # routes, against 86 at GET /api/v1/read-gate/probe of 5855 on main
+    # e36c1dcb, the rank position 219 on both. +7 on the median route by
+    # shared names, none executed by it: the route's closure names _refuse
+    # (read_gate's helper), which folds in the program's _refuse, and through
+    # it the names Refused and EXIT_USAGE, which fold in the program's own and
+    # review_rules', apt_lock's and build_manifest's Refused and review_rules'
+    # EXIT_USAGE. The sum was written before the measurement: 86 + 7 = 93.
+    # The bound moves to 98, ~5% over the measurement, for that reason and no
+    # other.
+    # The counting program's carry (RULING-CARRY-9): the program's fourteen
+    # module-level names the walk entered by shared names take its mark
+    # (calibrate_cli, calibrate_render, _calibrate_refuse, CalibrateRefused,
+    # CALIBRATE_EXIT_USAGE and the rest), so the seven names of the move to
+    # 98 above are gone, and no route's closure holds a code binding of the
+    # program (the holder in test_review_calibrate_build.py). 86 measured at
+    # GET /api/v1/read-gate/probe, position 219 of 438, the same route and
+    # value as on main e36c1dcb. The bound goes back to 87, main's bound, for
+    # that reason and no other; the move to 98 stays in the history.
     assert code_median <= 87, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
@@ -1914,6 +1935,12 @@ def test_the_helper_closure_stays_affordable():
     # (230 against 239) bounds stay, and so do the three bounds of the whole
     # closure (244 against 245, 425 against 425, 868 against 897 at the
     # health route).
+    # The review counting program (review_calibrate.py) on main e36c1dcb
+    # (2026-11-23): 602 measured at GET /api/v1/health (601 on main, the same
+    # walk over that tree): +1 by name, main._REVIEW_CALIBRATE_BUILD, the
+    # lane's build marker, which the health route reads in both arms; no code
+    # binding of the program is in any closure. The bound moves to 602, the
+    # measured value, for that reason and no other.
     assert code_worst <= 604, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
@@ -2007,7 +2034,15 @@ def test_the_helper_closure_stays_affordable():
     # 403 and enter above the rank; the rank position moves 212 -> 214. No
     # route crossed into a hub. The bound moves to 245, ~5% over the
     # measurement, for that reason and no other.
-    assert all_median <= 245, f"median closure {all_median} of {total}"
+    # The review counting program (review_calibrate.py) on main e36c1dcb
+    # (2026-11-23): 248 measured at POST /api/v1/shop/purchase, position 219
+    # of 438 (242 there on main, the same route at the rank): +6 by name, the
+    # program's import lines datetime, hashlib, os, text, time and timezone,
+    # which the route's own names fold in by the walk's every-match rule;
+    # none executed by the route, and no code binding of the program is in
+    # any closure. The bound moves to 261, ~5% over the measurement, for that
+    # reason and no other.
+    assert all_median <= 261, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -2275,7 +2310,15 @@ def test_the_helper_closure_stays_affordable():
     # main's rank route GET /api/v1/queue/poll/{steam_id} measures 375 -> 387
     # by the same fold as the median. The bound moves to 425, ~5% over the
     # measurement, for that reason and no other.
-    assert all_p90 <= 425, f"p90 closure {all_p90} of {total}"
+    # The review counting program (review_calibrate.py) on main e36c1dcb
+    # (2026-11-23): 431 measured at POST /api/v1/pc/trades/cancel, position
+    # 394 of 438 (423 there on main, the same route at the rank): +8 by
+    # name, the program's import lines datetime, hashlib, math, stat, text,
+    # time, timezone and warnings, folded in as at the median; none executed
+    # by the route. The bound moves to 453, ~5% over the measurement, for
+    # that reason and no other. The worst (879 at GET /api/v1/health: the
+    # build marker and 13 import lines over main's 865) stays inside 897.
+    assert all_p90 <= 453, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the

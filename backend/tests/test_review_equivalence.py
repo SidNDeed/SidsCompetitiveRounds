@@ -22,18 +22,35 @@ module SKIPS with that reason. When it is set, REVIEW_EQUIV_TEST_PG_DSN must
 name a throwaway PostgreSQL database for the sitting half, or those cases
 FAIL (a skipped live case reports success for coverage that did not run).
 
-What is asserted, for every rule of the revision:
+SCOPE. This file covers the revision's GAME and SITTING rules only: the
+rules the old worker had, which a revision carries with the same firing
+(RULING-CARRIED-1 moved the CLASS of eleven of them, flag to note, and
+nothing else). Their map to the old kinds, their class, their posting and
+their mutations are asserted here. A
+revision may also hold card, identity and combat rules; this file does not
+judge them, and their holders are elsewhere: the revision's own private
+self-tests (every case's complete firing set, run by every build, validate
+and load) and the private build preflight and mutants in the private store,
+for those rules' firing and posting; test_review_calibrate.py, for the
+counting tool that evaluates them over recorded evidence.
+
+What is asserted, for every game and sitting rule of the revision:
   * games: the same rules fire on the same games with the same stored
     details (exact JSON equality, after each side's own bounding) and the same
-    rendered text as the bound oracle;
+    rendered text as the bound oracle, every rule read as a flag (a note of
+    game scope stores no finding of its own; `_flag_view`);
+  * class: each old rule's class is the demotion table's (the private
+    suite's `demoted` entry are notes, every other old rule is a flag);
   * every rule has a positive and a boundary-negative fixture case, and the
     evaluator agrees with both labels;
   * posting: a rule is armed exactly when its old kind was, as the old
     migration seeded its per-kind posting switch (the old setting default
     otherwise);
-  * every rule has at least one mutation, and every mutation changes the
+  * every game and sitting rule has at least one mutation, and every mutation changes the
     finding IDENTITY set exactly as its frozen `expect` states, only on its
-    own rule, and every rule keeps its scope and posting. A mutation's
+    own rule, and every rule of the revision, of any scope, keeps its scope
+    and posting under it (the mutations themselves touch game and sitting
+    rules only). A mutation's
     frozen metadata names ONLY its expected gains and losses: every retained
     identity keeps exactly the same stored details and line, with no key
     exempt. A moved-VALUE mutation flips only that rule's labelled boundary
@@ -208,6 +225,14 @@ def _ruleset():
     return rr.load_dir(_p("revision"))
 
 
+def _old_kind_ids(rs):
+    """The revision's rules the old worker had a kind for: its game and
+    sitting rules. A revision may also hold card, identity and combat rules,
+    which the old worker never had; the rule map covers the game and sitting
+    rules exactly, and the oracle judges nothing else."""
+    return {r.id for r in rs.rules if r.scope in ("game", "sitting")}
+
+
 class OracleRefused(AssertionError):
     """The old worker's source is not the bound one."""
 
@@ -293,12 +318,29 @@ def _roundtrip(obj):
     return json.loads(json.dumps(obj, separators=(",", ":")))
 
 
+def _flag_view(rs):
+    """The revision with every rule's class read as flag, for comparing games
+    only. A note of game scope stores no finding of its own (its line rides on
+    the flags that fired beside it), so the games are compared on WHEN each
+    rule fires and WHAT it shows, as flags; the class itself is asserted apart
+    (test_a16_each_old_rule_has_the_class_of_the_demotion_table)."""
+    view = copy.copy(rs)
+    view.rules = []
+    for r in rs.rules:
+        c = copy.copy(r)
+        c.effect = "flag"
+        view.rules.append(c)
+    return view
+
+
 def _game_result(rs, g):
-    """The new worker's result for one game. The frozen games carry the
+    """The new worker's result for one game, every rule read as a flag
+    (_flag_view). The frozen games carry the
     nine-element hit_sent of the old worker; the current code reads ten
     (amended B7), so each entry is lifted by the old coupling (none or keyed,
     never unkeyed; an entry that coupling refused raises), while the old
     oracle keeps reading the frozen records as they are."""
+    rs = _flag_view(rs)
     registry = {tuple(t) for t in g["registry"]}
     findings, _fired, errors = rs.evaluate_game(fx.lift_hit_sent(g["records"]), g["match"], registry)
     assert errors == 0, g["name"]
@@ -313,11 +355,23 @@ def _expected_by_rule(kindmap, expected_game):
     return {kindmap[k]: v for k, v in expected_game.items()}
 
 
-def test_a16_the_rule_map_is_one_to_one_and_covers_the_revision():
+def test_a16_the_rule_map_is_one_to_one_and_covers_the_game_and_sitting_rules():
     rs = _ruleset()
     kindmap = _json("kindmap")
     assert len(set(kindmap.values())) == len(kindmap)
-    assert set(kindmap.values()) == {r.id for r in rs.rules}
+    assert set(kindmap.values()) == _old_kind_ids(rs)
+
+
+def test_a16_each_old_rule_has_the_class_of_the_demotion_table():
+    """The demotion table is the private suite's (its `demoted` entry: the
+    old rules whose finding is a NOTE in the revision; their firing is
+    unchanged). Every other old rule is a flag."""
+    rs = _ruleset()
+    old = _old_kind_ids(rs)
+    demoted = frozenset(_json("demoted"))
+    assert demoted and demoted <= old
+    assert {r.id: r.effect for r in rs.rules if r.id in old} == \
+        {i: "note" if i in demoted else "flag" for i in old}
 
 
 def test_a16_games_reproduce_the_reference_items_and_text():
@@ -357,7 +411,8 @@ def test_a16_posting_matches_the_reference_arming():
     kindmap = _json("kindmap")
     posting = _oracle()["posting"]
     assert set(posting) == set(kindmap)
-    assert {kindmap[k]: v for k, v in posting.items()} == {r.id: r.post for r in rs.rules}
+    old = _old_kind_ids(rs)
+    assert {kindmap[k]: v for k, v in posting.items()} == {r.id: r.post for r in rs.rules if r.id in old}
 
 
 def _mutant(rs, m, kindmap):
@@ -371,7 +426,9 @@ def _mutant(rs, m, kindmap):
         node = node[key]
     assert node[m["path"][-1]] != m["value"], "a mutation must change a value"
     node[m["path"][-1]] = m["value"]
-    out = rr.compile_rules(doc, rr._Binder(doc["vocabulary"]), {})
+    # The loaded revision's own data tables: a rule that reads one compiles
+    # only beside it, and a mutant must compile as its revision does.
+    out = rr.compile_rules(doc, rr._Binder(doc["vocabulary"]), rs.data)
     out.rev = "mutant"
     return out
 
@@ -596,7 +653,8 @@ async def _sitting_run(muts=()):
                 "INSERT INTO matches (%s, ended_at, created_at, invalidated_at) VALUES (%s, "
                 "date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' "
                 " - make_interval(days => $%d) + make_interval(hours => $%d) + make_interval(mins => $%d), "
-                "now(), CASE WHEN $%d THEN now() END)" % (cols, ph, n + 1, n + 2, n + 3, n + 4),
+                "now(), CASE WHEN $%d THEN now() END)"
+                % (cols, ph, n + 1, n + 2, n + 3, n + 4),
                 *vals, r["days_ago"], ROW_HOUR, r["minute"], r["invalidated"])
         await _check_placement(conn, fx["rows"])
         # the worker's dirty set over the OLD candidate window only: the same

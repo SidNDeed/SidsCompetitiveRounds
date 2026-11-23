@@ -1428,9 +1428,10 @@ def test_census_refuses_incomplete_opener_form(name):
 def test_census_complete_layer_frozen_whole():
     """G1: the complete layer is frozen for every census file, holds no
     refuse form, and each declared FORWARDING exception is frozen exactly
-    once as a call; the count is the coarse 361 (363, plus the two coarse forms
+    once as a call; the count is the coarse 365 (363, plus the two coarse forms
     of the round-11 merge, re-frozen once from the seat derivation, less the
-    four the bot text escape took out by hand), plus the
+    four the bot text escape took out by hand, plus the four coarse forms of
+    the snapshot reader's builder, frozen by hand), plus the
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
     the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
     frozen by hand), plus the four coarse forms of migration 416's change
@@ -1442,7 +1443,8 @@ def test_census_complete_layer_frozen_whole():
     the stack, plus the five coarse forms of MDPL's change (MDPL_FROZEN,
     frozen by hand), plus the complete layer, which also holds the moderator
     log block's two complete forms, the ban sweep block's five and MDPL's
-    twenty."""
+    twenty; the snapshot reader's builder adds one more form to the complete
+    layer and one more of round 10's kinds, both frozen by hand."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1485,8 +1487,8 @@ def test_census_complete_layer_frozen_whole():
                                                       + fz.LOBBY_INVITES_COUNT
                                                       + fz.BOT_TEXT_ESCAPE_COUNT
                                                       + fz.QAPPLY_COUNT
-                                                      + rows_coarse) == 371 + rows_coarse
-    assert fz.COARSE_COUNT == 361
+                                                      + rows_coarse) == 375 + rows_coarse
+    assert fz.COARSE_COUNT == 365
     # the stack (claude/stack-1120): QAPPLY-1's two hand-frozen coarse import
     # forms in main.py; the ban sweep's six forms are a row of
     # BOTH_LAYER_BLOCKS above (one coarse dsntext, five complete)
@@ -1524,8 +1526,8 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values()) == fz.MAIL_SEND_RECEIPTS_COUNT == 1
     assert set(fz.MAIL_SEND_RECEIPTS_FROZEN) <= coarse
     assert {f[0] for v in fz.MAIL_SEND_RECEIPTS_FROZEN.values() for f in v} == {"import"}
-    assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 218
-    assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 114
+    assert sum(len(fz.COMPLETE_FROZEN[k]) for k in complete) == fz.COMPLETE_COUNT == 219
+    assert sum(len(fz.R10_FROZEN[k]) for k in complete) == fz.R10_COUNT == 115
     # round 10's merge: the hand-frozen block (W30b), fifteen forms of the gr child's providers
     assert sum(len(v) for v in fz.R10_MERGE_FROZEN.values()) == fz.R10_MERGE_COUNT == 15
     assert set(fz.R10_MERGE_FROZEN) <= complete
@@ -1546,7 +1548,7 @@ def test_census_complete_layer_frozen_whole():
                                + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
                                + fz.LOBBY_INVITES_COUNT + fz.BOT_TEXT_ESCAPE_COUNT
                                + fz.QAPPLY_COUNT
-                               + rows_count) == 860 + rows_count
+                               + rows_count) == 866 + rows_count
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
@@ -1660,6 +1662,11 @@ R10_PLANTED = (
      ("replace", ASM_DEF, ASM_DEF.replace("DATABASE_URL", "ADMIN_URL")),
      {("wrapper", "~def make_asm_engine(url=ADMIN_URL, **connect_args):")},
      {"make_asm_engine"}, True),
+    ("snapshot_reader_use", DB_REL,
+     ("append", "\n\ndef _planted(url, creator):\n    return make_snapshot_reader_engine(url, creator)\n"),
+     {("call", "make_snapshot_reader_engine(url, creator)"),
+      ("wrapper", "def _planted(url, creator):\n    return make_snapshot_reader_engine(url, creator)")},
+     set(), False),
     # (C) the definitions of a forwarded module-scope name
     ("argdef_module_rebinding", CENSUS_REL,
      ("append", "\nDSN = DSN_ALT\n"),
