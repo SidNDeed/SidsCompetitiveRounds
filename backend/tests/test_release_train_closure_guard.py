@@ -1,13 +1,16 @@
 """The release tool's closure guard (item 41)."""
 import ast
+import contextlib
 import hashlib
 import importlib.util
+import io
 import itertools
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -311,7 +314,7 @@ def test_iii_a_build_file_the_tip_deletes_is_refused_unless_the_build_part_names
     assert _predict(rt, tip, base) == base_word
 
 
-def test_the_ancestor_refusal_in_a_resumed_run_names_the_recorded_base_or_a_fresh_run(world, monkeypatch):
+def test_the_ancestor_refusal_given_the_source_record_names_the_recorded_base_or_a_fresh_run(world, monkeypatch):
     rt, scratch, base_word = world
     monkeypatch.setattr(rt, "CLOSURE_CHANGE", None)
     lane = scratch.commit({"main.py": b"# lane\n"})
@@ -325,7 +328,7 @@ def test_the_ancestor_refusal_in_a_resumed_run_names_the_recorded_base_or_a_fres
             "--boxes-head read on both boxes; refused") in msg and "read HEAD on both boxes again" not in msg, msg
 
 
-def test_iii_a_script_the_dockerfile_runs_joins_the_set_from_the_dockerfiles_own_lines(world, monkeypatch):
+def test_iii_a_changed_script_a_dockerfile_run_line_names_is_refused(world, monkeypatch):
     rt, scratch, base_word = world
     base = scratch.commit({"Dockerfile": b"FROM x\nCOPY . .\nRUN python -B stamp_files.py /app\n",
                            "stamp_files.py": b"print(1)\n"}, "base with a build script")
@@ -350,7 +353,7 @@ def test_iv_a_store_on_the_evaluator_from_outside_is_refused(world, monkeypatch)
         assert "(iv)" in str(exc.value) and "outside the listed places" in str(exc.value), (body, str(exc.value))
 
 
-def test_iv_mains_backend_api_holds_no_form_the_census_refuses():
+def test_iv_the_checkouts_backend_api_holds_no_form_the_census_refuses():
     rt = _release_train()
     paths = [p.relative_to(API).as_posix() for p in API.rglob("*.py")]
     count, hits, unfollowed = rt.closure_census(str(API), paths, list(EVALUATOR))
@@ -598,9 +601,69 @@ PLAY_PLACES = {
     ("deploy-bot", "phase_bot", "Call.args", "ssh_argv"),
     ("deploy-bot", "phase_bot", "Call.args", "blocking_child"),
 }
+MEMBERS = {"zap": 0, "ssh": 1, "zap_argv": 0, "ssh_argv": 1}  # the senders and builders, one closed set: member -> the position of the play or the box verb
+LOCAL_RUNNERS = {"start_process": "the one runner: starts the argv it is handed", "run": "starts an argv built elsewhere", "job_spawn": "starts an argv built elsewhere", "contained_child": "starts the argv zap_argv built", "git_child": "starts a git argv", "blocking_child": "starts an argv a member built; its step is a label PLAY_PLACES holds", "git_out": "runs a git form of GIT_FORMS", "_git_line": "runs a git form of GIT_FORMS", "git_forms_preflight.<locals>.git": "runs a git form on the scratch repository", "sql": "reaches ssh by the PREFIXES row sql-readonly:", "sql_argv": "reaches ssh_argv by the PREFIXES row sql-readonly:", "migrate_child": "starts the line migrate_argv builds", "migrate_argv": "reaches ssh_argv by the PREFIXES row migrate:", "http_code": "a curl line to a box route; no play, no verb", "http_code_argv": "the same", "route_json": "the same", "route_json_argv": "the same"}
+PREFIXES = {"sql-readonly:": ("the query", "the box's wrapper takes the whole verb in its case arm sql-readonly:*, so the tail stays inside it"), "migrate:": ("a migration file's name", "the same wrapper's case arm migrate:*"), "ps -eo pid,args; echo PS_RC=$? %s": ("the probe's own tag, rtps- and 12 hex (T:9065)", "a read-only ps line on the controller; the tail is an argument of echo")}
 
 
-def _play_census(tree):
+def _params(fn):
+    a = fn.args
+    return {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs + [v for v in (a.vararg, a.kwarg) if v]}
+
+
+def _loop_names(t):
+    if isinstance(t, ast.Name):
+        return {t.id}
+    if isinstance(t, (ast.Tuple, ast.List)):
+        inner = [e.value if isinstance(e, ast.Starred) else e for e in t.elts]
+        return {e.id for e in inner if isinstance(e, ast.Name)}
+    return set()
+
+
+def _loop_binder(parent, node, name):
+    """The (target, iterable) of the comprehension or for statement that binds `name` where `node` stands, or None."""
+    x = node
+    while x in parent:
+        p = parent[x]
+        if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return None
+        for g in getattr(p, "generators", None) or ():
+            if name in _loop_names(g.target):
+                return g.target, g.iter
+        if isinstance(p, (ast.For, ast.AsyncFor)) and any(x is s for s in p.body) and name in _loop_names(p.target):
+            return p.target, p.iter
+        x = p
+    return None
+
+
+def _str_constant(e):
+    return isinstance(e, ast.Constant) and isinstance(e.value, str)
+
+
+def _loop_kinds(target, it, name):
+    """The loop rule (TEXTS C3.7): (kind, part) for each place where the loop does not fit; [] when it fits."""
+    if not isinstance(it, (ast.Tuple, ast.List)):
+        return [("the iterable is not a display written at that place", it)]
+    if isinstance(target, ast.Name):
+        return [("a starred element", e) if isinstance(e, ast.Starred) else
+                ("position %d holding something that is not a string constant" % k, e)
+                for k, e in enumerate(it.elts) if not _str_constant(e)]
+    if any(isinstance(e, ast.Starred) for e in target.elts):
+        return [("a starred name in the target", target)]
+    i = next(k for k, e in enumerate(target.elts) if isinstance(e, ast.Name) and e.id == name)
+    out = []
+    for e in it.elts:
+        if isinstance(e, ast.Starred) or (isinstance(e, (ast.Tuple, ast.List))
+                                          and any(isinstance(x, ast.Starred) for x in e.elts)):
+            out.append(("a starred element", e))
+        elif not isinstance(e, (ast.Tuple, ast.List)) or len(e.elts) != len(target.elts):
+            out.append(("an element whose length differs from the target's", e))
+        elif not _str_constant(e.elts[i]):
+            out.append(("position %d holding something that is not a string constant" % i, e.elts[i]))
+    return out
+
+
+def _play_census(tree, runners=None):
     parent, hits = _parent_map(tree), []
     for n in ast.walk(tree):
         if isinstance(n, ast.Name) and n.id in ("zap", "zap_argv"):
@@ -620,6 +683,37 @@ def _play_census(tree):
             extra = p.func.id
         if (what, owner, place, extra) not in PLAY_PLACES:
             hits.append((what, owner, getattr(n, "lineno", 0), place, extra))
+    tops = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and n.id in MEMBERS and not (
+                isinstance(parent.get(n), ast.Call) and parent[n].func is n):
+            hits.append(("a member named outside a call: " + n.id, _place(parent, n)[0], getattr(n, "lineno", 0)))
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in MEMBERS):
+            continue
+        member, owner, line = n.func.id, _place(parent, n)[0], getattr(n, "lineno", 0)
+        part = n.args[MEMBERS[member]] if len(n.args) > MEMBERS[member] else None
+        binder = _loop_binder(parent, n, part.id) if isinstance(part, ast.Name) else None
+        if owner in MEMBERS and owner in tops:
+            if not (isinstance(part, ast.Name) and part.id in _params(tops[owner])):
+                hits.append(("inside %s the play or verb of %s is not its own parameter" % (owner, member), owner, line))
+        elif _str_constant(part):
+            pass
+        elif isinstance(part, ast.BinOp) and isinstance(part.op, (ast.Add, ast.Mod)) and _str_constant(part.left):
+            if part.left.value not in PREFIXES:
+                hits.append(("the play or verb of %s joins %r, a prefix not on the table" % (member, part.left.value),
+                             owner, line))
+        elif binder is not None:
+            for kind, bad in _loop_kinds(binder[0], binder[1], part.id):
+                hits.append(("the play or verb of %s comes from a loop the rule does not take (%s): %s"
+                             % (member, kind, ast.unparse(bad)), owner, line))
+        else:
+            hits.append(("the play or verb of %s given as %s"
+                         % (member, type(part).__name__ if part is not None else "no argument at its position"),
+                         owner, line))
+    if runners is not None:
+        starters = set(runners) | {v[2] for v in runners.values() if v[2]}
+        for q in sorted(starters - set(MEMBERS) - set(LOCAL_RUNNERS)):
+            hits.append(("a function that starts a process and stands in neither list: " + q, "<module>", 0))
     return hits
 
 
@@ -751,7 +845,28 @@ READ_CALLS = {"isinstance", "len", "set", "dict", "list", "tuple", "sorted", "an
 READ_METHODS = {"get", "items", "keys", "values", "split", "partition", "startswith", "endswith", "decode", "encode",
                 "join", "strip", "lstrip", "rstrip", "lower", "upper", "replace", "splitlines", "fullmatch", "match",
                 "group", "find", "index", "append", "extend", "add", "setdefault", "hexdigest", "isdigit", "fromkeys",
-                "count", "format", "sha256", "gettempdir"}
+                "count", "format"}
+READ_ATTRS = {"contextlib.contextmanager": "makes the wrapper a context manager; reads, writes, starts nothing", "hashlib.sha256": "hashes bytes in memory; reads, writes, starts nothing", "os.path.join": "joins strings; reads, writes, starts nothing", "re.fullmatch": "matches a string; reads, writes, starts nothing", "sys.executable": "names the interpreter's path; reads, writes, starts nothing", "tempfile.gettempdir": "gettempdir: at its first call in a process it creates and removes one probe file in the temporary folder; it writes nothing in the working tree, the registry or a box"}
+
+
+def _imported_names(tree):
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            out |= {a.asname or a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, ast.ImportFrom):
+            out |= {a.asname or a.name for a in n.names}
+    return out
+
+
+def _root_name(node):
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _outside_read_attrs(node):
+    return ast.unparse(node) not in READ_ATTRS
 
 
 def _in_reading(parent, node):
@@ -769,7 +884,8 @@ def _in_reading(parent, node):
     return None
 
 
-def _read_census(tree):
+def _read_census(tree, imported=None):
+    imported = _imported_names(tree) if imported is None else set(imported)
     parent, hits = _parent_map(tree), []
     fns = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     sites = {}
@@ -789,18 +905,37 @@ def _read_census(tree):
                 p = parent.get(n)
                 if not (isinstance(p, ast.Call) and p.func is n):
                     hits.append((fn.name, getattr(n, "lineno", 0), "a read named outside a call: " + n.id))
+            if isinstance(n, ast.Attribute) and n.attr in _GUARD_READS:
+                p = parent.get(n)
+                if not (isinstance(p, ast.Call) and p.func is n):
+                    hits.append((fn.name, getattr(n, "lineno", 0), "a read named outside a call: " + ast.unparse(n)))
+            if isinstance(n, ast.Name) and n.id in imported and not (_in_reading(parent, n) or fn.name in inner):
+                top = n
+                while isinstance(parent.get(top), ast.Attribute) and parent[top].value is top:
+                    top = parent[top]
+                q = parent.get(top)
+                if top is n:
+                    hits.append((fn.name, getattr(n, "lineno", 0), "an imported name not under an attribute: " + n.id))
+                elif not (isinstance(q, ast.Call) and q.func is top) and _outside_read_attrs(top):
+                    hits.append((fn.name, getattr(n, "lineno", 0),
+                                 "an attribute of an imported name outside READ_ATTRS: " + ast.unparse(top)))
             if not isinstance(n, ast.Call) or _in_reading(parent, n) or fn.name in inner:
                 continue
             f = n.func
             if isinstance(f, ast.Name) and (f.id in READ_CALLS or ("closure" in f.id and f.id in fns)):
                 continue
-            if isinstance(f, ast.Attribute) and f.attr in READ_METHODS:
+            if isinstance(f, ast.Attribute) and f.attr in READ_METHODS and _root_name(f) not in imported:
+                continue
+            if isinstance(f, ast.Attribute) and _root_name(f) in imported:
+                if _outside_read_attrs(f):
+                    hits.append((fn.name, getattr(n, "lineno", 0),
+                                 "an attribute of an imported name outside READ_ATTRS: " + ast.unparse(f)))
                 continue
             hits.append((fn.name, getattr(n, "lineno", 0), "a call outside the wrapper: " + ast.unparse(f)))
     return hits, sorted(inner)
 
 
-def test_every_call_of_a_closure_function_outside_the_wrapper_is_one_of_the_listed_pure_calls():
+def test_every_call_and_imported_name_in_a_closure_function_outside_the_wrapper_is_listed_or_a_closure_function():
     rt = _release_train()
     tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
     hits, inner = _read_census(tree)
@@ -810,7 +945,8 @@ def test_every_call_of_a_closure_function_outside_the_wrapper_is_one_of_the_list
     assert loads == [], loads
 
 
-INNER_FUNCTIONS = ["_closure_bindings", "_closure_chain", "_closure_field", "_closure_module", "_closure_state_files",
+INNER_FUNCTIONS = ["_closure_bindings", "_closure_chain", "_closure_field", "_closure_import_shape", "_closure_module",
+                   "_closure_state_files",
                    "_closure_uses", "closure_census", "closure_child_env", "closure_export", "closure_routine"]
 
 
@@ -828,6 +964,7 @@ READ_PLANTS = {
     "an attribute read of a file outside the wrapper": "import os\ndef closure_x(p):\n    return os.stat(p)\n",
     "a read bound to another name": "def closure_x(p):\n    r = load_state\n    return r()\n",
     "a read handed to a call": "def closure_x(p):\n    return list(map(open, p))\n",
+    "a second attribute of tempfile": "import tempfile\ndef closure_x(p):\n    return tempfile.mkdtemp()\n",
 }
 
 
@@ -837,9 +974,33 @@ def test_the_read_census_hits_each_planted_form(form):
     assert hits, form
 
 
-def test_the_read_census_hits_a_read_under_a_node_type_its_code_never_names():
+def test_the_read_census_hits_a_guard_read_named_or_reached_as_an_attribute_under_await():
     hits, _inner = _read_census(_hand_built("closure_x", ast.Await(value=ast.Name(id="open", ctx=ast.Load()))))
     assert [h[2] for h in hits] == ["a read named outside a call: open"], hits
+    plant = ast.Await(value=ast.Attribute(value=ast.Name(id="builtins", ctx=ast.Load()), attr="open", ctx=ast.Load()))
+    hits, _inner = _read_census(_hand_built("closure_x", plant))
+    assert [h[2] for h in hits] == ["a read named outside a call: builtins.open"], hits
+
+
+_TOOL_FILE = REPO / "scripts" / "deploy" / "release_train.py"
+_TOOL_IMPORTED = sorted(_imported_names(ast.parse(_TOOL_FILE.read_text(encoding="utf-8")))) if _TOOL_FILE.exists() else []
+S3_FORMS = {"called": "def closure_x(p):\n    return {m}.replace(p)\n",
+            "handed on": "def closure_x(p):\n    return {m}.replace\n",
+            "bound to a local": "def closure_x(p):\n    r = {m}\n    return r\n"}
+S3_PLANTS = [(m, f) for m in _TOOL_IMPORTED for f in S3_FORMS]
+
+
+@pytest.mark.parametrize("name,form", S3_PLANTS)
+def test_the_read_census_hits_each_imported_name_of_the_tool_outside_the_table(name, form):
+    """For every name an import statement binds anywhere in the tool, read from its tree: name.replace (a READ_METHODS name, so only the root rule refuses it) called, the same attribute handed on as a value, and the bare name bound to a local, each in a closure function outside the wrapper: one hit each."""
+    assert len(S3_PLANTS) == len(_TOOL_IMPORTED) * len(S3_FORMS)
+    assert not [m for m in _TOOL_IMPORTED if m + ".replace" in READ_ATTRS]
+    if (name, form) == S3_PLANTS[0]:
+        print("COUNT S3: %d plants = %d names x %d forms" % (len(S3_PLANTS), len(_TOOL_IMPORTED), len(S3_FORMS)))
+    hits, _inner = _read_census(ast.parse(S3_FORMS[form].replace("{m}", name)), imported=_TOOL_IMPORTED)
+    want = ("an imported name not under an attribute: " + name if form == "bound to a local"
+            else "an attribute of an imported name outside READ_ATTRS: %s.replace" % name)
+    assert [h[2] for h in hits] == [want], hits
 
 
 PLAY_PLANTS = {
@@ -856,9 +1017,158 @@ def test_the_play_census_hits_each_planted_form(form):
     assert _play_census(ast.parse(PLAY_PLANTS[form])), form
 
 
-def test_the_play_census_hits_a_runner_under_a_node_type_its_code_never_names():
+def test_the_play_census_hits_a_runner_under_await():
     hits = _play_census(_hand_built("_deploy_both", ast.Await(value=ast.Name(id="zap", ctx=ast.Load()))))
-    assert [(h[0], h[1], h[3]) for h in hits] == [("zap", "_deploy_both", "Await.value")], hits
+    # the census fixes the order of the two hits: the places census walks the tree first, the member rule after it
+    assert hits == [("zap", "_deploy_both", 1, "Await.value", None),
+                    ("a member named outside a call: zap", "_deploy_both", 1)], hits
+
+
+def _grammar(c):
+    """The fields of an ast class as its own signature line names them, [(type, suffix, field)]: the first line of its
+    docstring when that line begins with the class's own name and a parenthesis; None otherwise."""
+    line = (c.__doc__ or "").split("\n")[0]
+    if not line.startswith(c.__name__ + "("):
+        return None
+    out = []
+    for part in [p.strip() for p in line[len(c.__name__) + 1:line.rindex(")")].split(",") if p.strip()]:
+        typ, field = part.split()
+        out.append((typ.rstrip("*?"), typ[-1] if typ[-1] in "*?" else "", field))
+    return out
+
+
+def _arguments(args=()):
+    return ast.arguments(posonlyargs=[], args=list(args), vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None,
+                         defaults=[])
+
+
+def _fill(typ, suffix):
+    if suffix == "?":
+        return None
+    if suffix == "*":
+        return [ast.Pass()] if typ == "stmt" else [ast.Eq()] if typ == "cmpop" else []
+    return {"identifier": lambda: "x", "int": lambda: 0, "constant": lambda: 0,
+            "expr": lambda: ast.Name(id="x", ctx=ast.Load()), "expr_context": ast.Load, "boolop": ast.And,
+            "operator": ast.Add, "unaryop": ast.Not, "pattern": ast.MatchAs, "arguments": _arguments}[typ]()
+
+
+def _filled(c, field=None, value=None):
+    return c(**{f: (([value] if s == "*" else value) if f == field else _fill(t, s)) for t, s, f in _grammar(c)})
+
+
+S4_TYPES = sorted(c.__name__ for c in vars(ast).values() if isinstance(c, type) and c.__bases__ == (ast.expr,))
+S4_PLANTS = [(m, k) for m in MEMBERS for k in S4_TYPES]
+
+
+@pytest.mark.parametrize("member,kind", S4_PLANTS)
+def test_the_play_census_hits_each_member_given_its_play_or_verb_as_anything_but_one_string(member, kind):
+    """For every member of MEMBERS and every expression node type of ast (its direct subclasses of ast.expr, read at test time), a call of the member from def phase_other(x) with an instance of that type where its play or verb stands (x itself for Name, a bytes constant for Constant): the hit that names the member and the type is among the hits."""
+    assert len(S4_PLANTS) == len(MEMBERS) * len(S4_TYPES)
+    if (member, kind) == S4_PLANTS[0]:
+        print("COUNT S4: %d plants = %d members x %d types" % (len(S4_PLANTS), len(MEMBERS), len(S4_TYPES)))
+    c = getattr(ast, kind)
+    part = (ast.Name(id="x", ctx=ast.Load()) if c is ast.Name else ast.Constant(value=b"x") if c is ast.Constant
+            else _filled(c))
+    call = ast.Call(func=ast.Name(id=member, ctx=ast.Load()),
+                    args=[ast.Name(id="P", ctx=ast.Load()) for _k in range(MEMBERS[member])] + [part], keywords=[])
+    fn = ast.FunctionDef(name="phase_other", args=_arguments([ast.arg(arg="x")]), body=[ast.Expr(value=call)],
+                         decorator_list=[], returns=None, type_params=[])
+    hits = _play_census(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])))
+    assert "the play or verb of %s given as %s" % (member, kind) in [h[0] for h in hits], hits
+
+
+Q2_PLANTS = ([(k, m) for k in ("a local in place of the parameter", "a member named outside a call") for m in MEMBERS]
+             + [(k, r) for k in ("a prefix not on the table", "the row's own prefix") for r in PREFIXES])
+
+
+def _q2_case(kind, which):
+    """(source, the text the plant must hit, or None for the row's own prefix, which passes)."""
+    if kind == "a local in place of the parameter":
+        return ("def %s(p, q):\n    w = q\n    return ssh_argv(p, w)\n" % which,
+                "inside %s the play or verb of ssh_argv is not its own parameter" % which)
+    if kind == "a member named outside a call":
+        return "def phase_other():\n    s = %s\n" % which, "a member named outside a call: " + which
+    row = "z" + which if kind == "a prefix not on the table" else which
+    src = "def phase_other(x):\n    ssh_argv(P, %r %s x)\n" % (row, "%" if "%s" in which else "+")
+    return src, ("the play or verb of ssh_argv joins %r, a prefix not on the table" % row if row != which else None)
+
+
+@pytest.mark.parametrize("kind,which", Q2_PLANTS)
+def test_the_play_census_hits_a_local_a_prefix_off_the_table_and_a_member_named_outside_a_call(kind, which):
+    """Generated per member and per row of PREFIXES: inside the member's body a local in place of its parameter is a hit; a member named outside a call is a hit; a row's constant with one letter added is a hit; the row's own constant joined to its tail passes."""
+    assert len(Q2_PLANTS) == 2 * len(MEMBERS) + 2 * len(PREFIXES)
+    if (kind, which) == Q2_PLANTS[0]:
+        print("COUNT Q2: %d plants = 2 x %d members + 2 x %d rows" % (len(Q2_PLANTS), len(MEMBERS), len(PREFIXES)))
+    src, want = _q2_case(kind, which)
+    hits = _play_census(ast.parse(src))
+    if want is None:
+        assert hits == [], (src, hits)
+    else:
+        assert want in [h[0] for h in hits], (src, hits)
+
+
+C38_LOOPS = sorted(c.__name__ for c in vars(ast).values() if isinstance(c, type) and issubclass(c, ast.AST)
+                   and "generators" in c._fields) + ["For", "AsyncFor"]
+C38_KINDS = {"a single name": ("the shape", "the iterable is not a display written at that place", "a starred element",
+                               "position"),
+             "a tuple of names": ("the shape", "the iterable is not a display written at that place", "a starred element",
+                                  "a starred name in the target", "an element whose length differs from the target's",
+                                  "position")}
+C38_CASES = [(m, loop, d, t, p) for m in MEMBERS for loop in C38_LOOPS for d in ("Tuple", "List")
+             for t, kinds in C38_KINDS.items() for p in kinds]
+
+
+def _c38_source(member, loop, display, target, plant):
+    if target == "a single name":
+        elts, tgt = ['"a.yml"', '"c.yml"'], "p"
+        if plant == "a starred element":
+            elts.append("*zz_d")
+        if plant == "position":
+            elts[0] = "zz_x"
+    else:
+        elts, tgt = ['("a.yml", zz_b)', '("c.yml", zz_d)'], "*p, q" if plant == "a starred name in the target" else "p, q"
+        elts[0] = {"a starred element": '("a.yml", *zz_b)', "an element whose length differs from the target's":
+                   '("a.yml",)', "position": "(zz_x, zz_b)"}.get(plant, elts[0])
+    it = "zz_d" if plant.startswith("the iterable") else ("(%s)" if display == "Tuple" else "[%s]") % ", ".join(elts)
+    call = "%s(%s)" % (member, ", ".join(["P"] * MEMBERS[member] + ["p"]))
+    if loop in ("For", "AsyncFor"):
+        return "%s phase_other():\n    %s %s in %s:\n        %s\n" % (
+            "async def" if loop == "AsyncFor" else "def", "async for" if loop == "AsyncFor" else "for", tgt, it, call)
+    comp = {"ListComp": "[%s for %s in %s]", "SetComp": "{%s for %s in %s}", "GeneratorExp": "(%s for %s in %s)",
+            "DictComp": "{p: %s for %s in %s}"}[loop]
+    return "def phase_other():\n    return %s\n" % (comp % (call, tgt, it))
+
+
+@pytest.mark.parametrize("member,loop,display,target,plant", C38_CASES)
+def test_the_play_census_judges_a_name_a_loop_binds_only_at_its_position_in_the_display(member, loop, display, target, plant):
+    """Generated per member, per loop (each node type of ast with a generators field, read at test time, and the for statements For and AsyncFor), per display (tuple, list) and per target (a single name; a tuple of names): the bound name over a display whose elements, or whose elements' position i, are string constants, handed where the member's play or verb stands, passes, a name standing at another position; one plant per kind of hit the rule lists is the hit that names its kind. Passes means that the loop rule and the play-or-verb rule add no hit: for ssh and ssh_argv the list of hits is empty; for zap and zap_argv it is the one hit of the places census, because the generated function owns no row of PLAY_PLACES."""
+    assert len(C38_CASES) == len(MEMBERS) * len(C38_LOOPS) * 2 * sum(len(k) for k in C38_KINDS.values())
+    if (member, loop, display, target, plant) == C38_CASES[0]:
+        print("COUNT C3.8: %d cases = %d members x %d loops x 2 displays x (%d + %d)" % (
+            len(C38_CASES), len(MEMBERS), len(C38_LOOPS), len(C38_KINDS["a single name"]),
+            len(C38_KINDS["a tuple of names"])))
+    src = _c38_source(member, loop, display, target, plant)
+    hits = _play_census(ast.parse(src))
+    if plant == "the shape":
+        line = next(k for k, text in enumerate(src.splitlines(), 1) if member + "(" in text)
+        assert hits == ([] if member in ("ssh", "ssh_argv") else [(member, "phase_other", line, "Call.func", None)]), (
+            src, hits)
+    else:
+        kind = "position 0 holding something that is not a string constant" if plant == "position" else plant
+        want = "the play or verb of %s comes from a loop the rule does not take (%s): " % (member, kind)
+        assert [h[0] for h in hits if h[0].startswith(want)], (src, hits)
+
+
+def test_every_function_that_starts_a_process_is_a_member_or_a_listed_local_runner():
+    """The functions the tool names in RUNNERS and their builders are each in MEMBERS or in LOCAL_RUNNERS, the two lists hold no other name, and a starter added to RUNNERS is the hit that names it."""
+    rt = _release_train()
+    starters = set(rt.RUNNERS) | {v[2] for v in rt.RUNNERS.values() if v[2]}
+    assert starters == set(MEMBERS) | set(LOCAL_RUNNERS) and len(starters) == len(MEMBERS) + len(LOCAL_RUNNERS), (
+        sorted(starters ^ (set(MEMBERS) | set(LOCAL_RUNNERS))))
+    assert _play_census(ast.parse(""), rt.RUNNERS) == []
+    planted = dict(rt.RUNNERS, zz_runner=((0,), (), None, False))
+    assert [h[0] for h in _play_census(ast.parse(""), planted)] == [
+        "a function that starts a process and stands in neither list: zz_runner"]
 
 
 def test_check_and_plan_reach_the_guard_before_any_token_and_without_the_preflight(monkeypatch, tmp_path, capsys):
@@ -1032,6 +1342,147 @@ def test_without_a_verified_state_file_the_base_is_origins_main_declared(world, 
             "(0 unreadable); a run needs --boxes-head" % scratch.base) in out
 
 
+GIT_FORM_REFUSALS = {("closure-is-ancestor", "_closure_ancestor"): ("is not an ancestor of the reviewed tip", "asking git whether the base is an ancestor did not succeed; refused"), ("closure-ls-remote-main", "_closure_origin_main"): ("reading origin's main did not succeed; refused",) * 2, ("closure-cat-file-commit", "_closure_is_commit"): ("is not a commit of this repository; fetch origin, then run again; refused", "asking git whether --boxes-head names a commit did not succeed; refused"), ("closure-first-parent", "_closure_first_parent"): ("origin's main %s is not a commit of this repository", "listing the first-parent line of origin's main did not succeed; refused"), ("ls-tree-api", "closure_export"): ("did not run to its lines, so its word is unknown; refused",) * 2, ("cat-file-batch", "closure_export"): ("did not run to its lines, so its word is unknown; refused",) * 2, ("cat-file-batch", "_closure_blobs"): ("reading the build files did not succeed; refused",) * 2, ("rev-parse", "_closure_main_sha"): ("reading main did not succeed; refused",) * 2, ("merge-tree", "expected_merge_tree"): ("computing the merge of main and the reviewed tip did not succeed; refused",) * 2}
+GIT_FORM_EMPTY = {("closure-ls-remote-main", "_closure_origin_main"): "reading origin's main did not succeed; refused", ("closure-first-parent", "_closure_first_parent"): "does not stand on the first-parent line of origin's main", ("ls-tree-api", "closure_export"): "did not run to its lines, so its word is unknown; refused", ("cat-file-batch", "closure_export"): "did not run to its lines, so its word is unknown; refused", ("cat-file-batch", "_closure_blobs"): "reading the build files did not succeed; refused", ("rev-parse", "_closure_main_sha"): "computing the merge of main and the reviewed tip did not succeed; refused",("merge-tree", "expected_merge_tree"): "computing the merge of main and the reviewed tip did not succeed; refused"}  # the two forms that read only the return code have no row
+_PLAN_ONLY = {("rev-parse", "_closure_main_sha"), ("merge-tree", "expected_merge_tree")}  # only the code stage's block runs them (T:11750-11755); check does not reach it
+GIT_FORM_CASES = [(site, case, verb) for verb in ("check", "plan") for site in GIT_FORM_REFUSALS
+                  if verb == "plan" or site not in _PLAN_ONLY for case in ((1, 2, 3) if site in GIT_FORM_EMPTY else (1, 2))]
+
+
+class _Site(list):
+    site = None
+
+
+def _git_forms_run(verb, plant=None):
+    """One check, or one plan --only code, driven through main against a scratch repository whose origin is itself,
+    with --boxes-head its base and a tip that changes main.py only. Every git form runs for real; a git_argv the guard
+    calls records its site (the form and the calling function); `plant` = (site, case) makes that site's calls end with
+    return code 1 and the passing run's own output (case 1), raise (case 2) or answer nothing with return code 0 (3)."""
+    rt = _release_train()
+    if os.name != "nt":
+        pytest.skip("the closure routine's child runs in a Windows job object")
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as top, pytest.MonkeyPatch.context() as mp:
+        top = Path(top)
+        scratch = Scratch(top / "scratch")
+        mp.setattr(rt, "REPO", str(scratch.repo))
+        base_word = _word(rt, scratch.base)
+        scratch.git("remote", "add", "origin", str(scratch.repo))
+        tip = scratch.commit({"main.py": b"# lane\n"})
+        events, sites, saves, depth = [], [], [], [0]
+        phases_real = list(rt.PHASES)
+        argv = ["check"] if verb == "check" else ["plan", "--only", "code"]
+        _main_world(mp, rt, top, events, argv + ["--boxes-head", scratch.base])
+        mp.setattr(rt, "PHASES", phases_real)
+        for name, value in (("ALL_SQL", []), ("PRIMARY", PRIMARY), ("STANDBY", STANDBY), ("BRANCH", "lane"),
+                            ("REVIEWED_TIP", tip), ("CLOSURE_CHANGE", None), ("HEALTH_EXPECT", []),
+                            ("STATE_PATH", str(top / "state" / "train-state.json"))):
+            mp.setattr(rt, name, value)
+        mp.setattr(rt, "health_json", Boxes(base_word).health_json)
+        mp.setattr(rt, "measure_every_batch", lambda: ([], []))
+        mp.setattr(rt, "run", lambda cmd, *a, **kw: tip)
+        mp.setattr(rt, "mod_version_argv", lambda host: ["mod-version", host])
+        for name in ("EXPECT_TABLES", "EXPECT_COLUMNS", "EXPECT_INDEXES", "SCHEMA_SQL", "I18N_SQL", "BACKFILL_SQL"):
+            mp.setattr(rt, name, [])
+        mp.setattr(rt, "precursor_files", lambda: [])
+        mp.setattr(rt, "code_state", lambda host: (True, False, True, []))
+        mp.setattr(rt, "schema_state", lambda host: ([], []))
+        mp.setattr(rt, "index_state", lambda host: [])
+        mp.setattr(rt, "require_rollback_point", lambda args, st, phase: None)
+        real_argv, real_start, real_guard, real_save = rt.git_argv, rt.start_process, rt.closure_guard, rt.save_state
+
+        def git_argv(form, *args):
+            built = _Site(real_argv(form, *args))
+            built.site = (form, sys._getframe(1).f_code.co_name)
+            if depth[0]:
+                sites.append(built.site)
+            return built
+
+        def start_process(how, cmd, **kw):
+            if plant is None or getattr(cmd, "site", None) != plant[0]:
+                return real_start(how, cmd, **kw)
+            if plant[1] == 2:
+                raise OSError("planted")
+            if plant[1] == 3:
+                return subprocess.CompletedProcess(list(cmd), 0, b"", b"")
+            p = real_start(how, list(cmd), **kw)
+            return subprocess.CompletedProcess(p.args, 1, p.stdout, p.stderr)
+
+        def guard(st, stage, *a, **kw):
+            depth[0] += 1
+            try:
+                real_guard(st, stage, *a, **kw)
+            finally:
+                depth[0] -= 1
+            print("guard passed")
+            raise rt.Fail("stopped after the guard by the test")
+
+        def save_state(st):
+            saves.append(dict(st))
+            real_save(st)
+        for name, fn in (("git_argv", git_argv), ("start_process", start_process), ("closure_guard", guard),
+                         ("save_state", save_state)):
+            mp.setattr(rt, name, fn)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = rt.main()
+        return {"rc": rc, "out": out.getvalue(), "sites": sites, "events": events, "saves": saves,
+                "state": os.path.exists(rt.STATE_PATH), "tags": rt.run_tags(["code"], {}), "origin": scratch.base}
+
+
+def test_the_git_forms_the_guard_runs_are_the_tables_rows_for_check_and_plan():
+    """The sites where a function the guard reaches calls git_argv, found in the tool's tree (a form that is not one string constant fails), equal the sites a passing check and a passing plan run record; each site's form carries the run's tags in each verb that records it; each row tagged deploy-precursor is recorded in check and in plan; each row tagged check is such a form or one phase_check's own body names."""
+    rt = _release_train()
+    tree = ast.parse(Path(rt.__file__).read_text(encoding="utf-8"))
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    reach, todo = set(), ["closure_guard"]
+    while todo:
+        f = todo.pop()
+        if f not in reach:
+            reach.add(f)
+            todo += [n.func.id for n in ast.walk(fns[f]) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id in fns]
+    static = set()
+    for f in reach:
+        for n in ast.walk(fns[f]):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "git_argv":
+                assert n.args and _str_constant(n.args[0]), (f, ast.unparse(n))
+                static.add((n.args[0].value, f))
+    runs = {verb: _git_forms_run(verb) for verb in ("check", "plan")}
+    recorded = {verb: set(r["sites"]) for verb, r in runs.items()}
+    assert all("guard passed" in r["out"] for r in runs.values()), [r["out"][-800:] for r in runs.values()]
+    print("COUNT G.1: %d static sites; %d recorded in check, %d in plan" % (len(static), len(recorded["check"]),
+                                                                           len(recorded["plan"])))
+    assert static == recorded["check"] | recorded["plan"] == recorded["plan"], (static, recorded)
+    assert recorded["check"] == static - _PLAN_ONLY, recorded["check"]
+    tags = {"check": {"check"}, "plan": runs["plan"]["tags"]}
+    assert not [(v, s) for v, ss in recorded.items() for s in ss if not set(rt.GIT_FORMS[s[0]][0]) & tags[v]], tags
+    pre = {form for form, v in rt.GIT_FORMS.items() if "deploy-precursor" in v[0]}
+    assert all(pre <= {s[0] for s in recorded[v]} for v in recorded), (pre, recorded)
+    named = {n.args[0].value for n in ast.walk(fns["phase_check"]) if isinstance(n, ast.Call)
+             and ast.unparse(n.func) == "git_argv" and n.args and _str_constant(n.args[0])}
+    rows = {form for form, v in rt.GIT_FORMS.items() if "check" in v[0]}
+    assert rows <= {s[0] for s in recorded["check"]} | named, rows - ({s[0] for s in recorded["check"]} | named)
+
+
+@pytest.mark.parametrize("site,case,verb", GIT_FORM_CASES,
+                         ids=["%s-%s-%d-%s" % (s[0], s[1], c, v) for s, c, v in GIT_FORM_CASES])
+def test_each_git_form_the_guard_runs_in_check_and_plan_ends_in_its_refusal_when_it_fails_raises_or_answers_nothing(site, case, verb):
+    """For each form, at one site: (1) its call ends with a return code that is not 0 while its output is the passing run's; (2) its call raises; (3) its call ends with return code 0 and answers nothing; every other form answers through the real functions. In check and in plan where the form runs: the guard's refusal with its text, no pass, no token, nothing written. The ancestor check and the commit-type check read only the return code and take cases 1 and 2, since such a form has no answer to be empty: return code 0 IS its passing answer."""
+    by_verb = {v: [c for c in GIT_FORM_CASES if c[2] == v] for v in ("check", "plan")}
+    assert len(GIT_FORM_CASES) == len(by_verb["check"]) + len(by_verb["plan"]) == sum(
+        3 if s in GIT_FORM_EMPTY else 2 for v in by_verb for s in GIT_FORM_REFUSALS if v == "plan" or s not in _PLAN_ONLY)
+    if (site, case, verb) == GIT_FORM_CASES[0]:
+        print("COUNT G.2: %d cases: check %d, plan %d" % (len(GIT_FORM_CASES), len(by_verb["check"]),
+                                                         len(by_verb["plan"])))
+    r = _git_forms_run(verb, (site, case))
+    want = GIT_FORM_EMPTY[site] if case == 3 else GIT_FORM_REFUSALS[site][case - 1]
+    want = want % r["origin"][:12] if "%s" in want else want
+    assert r["rc"] == 1 and "closure guard: " in r["out"] and want in r["out"], r["out"][-1500:]
+    assert "guard passed" not in r["out"], r["out"][-1500:]
+    assert not [e for e in r["events"] if e.startswith(("train_token", "controller"))], r["events"]
+    assert r["saves"] == [] and not r["state"], (r["saves"], r["state"])
+
+
 @pytest.mark.parametrize("what,want", [("tip", "no reviewed_tip is pinned as a full commit id"),
                                        ("sha", "a recorded sha is not a full commit id")])
 def test_a_reviewed_tip_or_a_recorded_sha_not_a_full_commit_id_is_refused(monkeypatch, what, want):
@@ -1091,7 +1542,7 @@ def test_the_first_pass_refuses_a_main_or_a_merge_without_its_word(monkeypatch, 
     assert want in str(exc.value) and saved == [], str(exc.value)
 
 
-def test_a_commit_tree_without_its_word_is_not_committed(monkeypatch):
+def test_the_commit_judge_refuses_a_tree_without_its_word_and_takes_the_source_record(monkeypatch):
     rt = _release_train()
     cell = dict(rec="valid", pre=False, code=False, P="O", Sb="O", key="valid", call="W")
     st = _cell_world(monkeypatch, rt, cell, [])
@@ -1171,7 +1622,7 @@ def test_the_command_line_refuses_a_run_without_the_word_before_any_token(monkey
 
 @pytest.mark.parametrize("argv,go", [(["run", "--go"], True), (["run"], False), (["plan", "--go"], False),
                                      (["check"], False)])
-def test_the_command_line_hands_the_word_and_the_go_to_the_base_function(monkeypatch, tmp_path, argv, go):
+def test_the_command_line_sets_closure_boxes_head_and_closure_go(monkeypatch, tmp_path, argv, go):
     rt = _release_train()
     _main_world(monkeypatch, rt, tmp_path, [], argv + ["--boxes-head", "9" * 40])
 
@@ -1217,7 +1668,7 @@ def test_the_words_relation_to_the_newest_verified_record_is_printed_and_never_r
             % (c[word], c[rec] if rec else "(none)", want)) in capsys.readouterr().out
 
 
-def test_check_and_plan_take_the_word_when_it_is_given_and_carry_the_newest_records_numbers(line, monkeypatch):
+def test_closure_base_takes_the_word_when_it_is_given_and_carries_the_newest_records_numbers(line, monkeypatch):
     rt, scratch, c = line
     numbers = {"call": 1, "container": 0, "return": 2, "attribute": 0, "loop": 3}
     _state_files(monkeypatch, rt, scratch, {"a": {"verified": True, "code_sha": c["m2"],
@@ -1352,7 +1803,7 @@ WRITE_TEXTS = (("call below depth", "a call through the evaluator at depth 2"),
 
 
 @pytest.mark.parametrize("form", sorted(UNKNOWN_FORMS))
-def test_iv_a_use_at_a_place_the_census_does_not_list_is_one_hit_naming_the_place(tmp_path, form):
+def test_iv_each_unknown_form_is_one_hit_in_main_py_with_its_written_text(tmp_path, form):
     body, want = UNKNOWN_FORMS[form]
     rt, (count, hits, unfollowed) = _census(tmp_path, body)
     assert len(hits) == 1 and hits[0][0] == "main.py" and want in hits[0][2], (form, hits)
@@ -1371,6 +1822,216 @@ def test_iv_a_use_under_a_node_type_the_census_code_never_names_is_a_hit():
             if getattr(n, "name", None) in ("closure_census", "_closure_bindings", "_closure_uses", "_closure_chain",
                                             "_closure_field")]
     assert len(code) == 5 and not any("Await" in c for c in code + [repr(rt.CLOSURE_PLACES)]), "Await is named"
+
+
+S1_WALKED = {("Attribute", "value"), ("Subscript", "value"), ("Starred", "value")}  # the census walks through to the parent
+S1_NOT_BUILT = dict.fromkeys((("Expression", "body"), ("FunctionType", "argtypes"), ("FunctionType", "returns")),
+                             "no file the census parses in exec mode has this mode")
+
+
+def _s1_pairs():
+    pairs = []
+    for name, c in sorted(vars(ast).items()):
+        if isinstance(c, type) and issubclass(c, ast.AST) and c.__name__ == name:
+            pairs += [(name, f) for t, _s, f in _grammar(c) or () if t == "expr"]
+    return pairs
+
+
+def _s1_host(node):
+    if isinstance(node, ast.stmt):
+        return node
+    if isinstance(node, ast.expr):
+        return ast.Expr(value=node)
+    if isinstance(node, ast.excepthandler):
+        return ast.Try(body=[ast.Pass()], handlers=[node], orelse=[], finalbody=[])
+    if isinstance(node, ast.keyword):
+        return ast.Expr(value=ast.Call(func=ast.Name(id="x", ctx=ast.Load()), args=[], keywords=[node]))
+    if isinstance(node, ast.comprehension):
+        return ast.Expr(value=ast.ListComp(elt=ast.Name(id="x", ctx=ast.Load()), generators=[node]))
+    if isinstance(node, (ast.arguments, ast.arg, ast.type_param)):
+        return ast.FunctionDef(name="x", args=node if isinstance(node, ast.arguments) else _arguments(
+            [node] if isinstance(node, ast.arg) else ()), body=[ast.Pass()], decorator_list=[], returns=None,
+            type_params=[node] if isinstance(node, ast.type_param) else [])
+    if isinstance(node, ast.withitem):
+        return ast.With(items=[node], body=[ast.Pass()])
+    if isinstance(node, ast.match_case):
+        return ast.Match(subject=ast.Name(id="x", ctx=ast.Load()), cases=[node])
+    if isinstance(node, ast.pattern):
+        return _s1_host(ast.match_case(pattern=node, guard=None, body=[ast.Pass()]))
+    raise AssertionError("no host for " + type(node).__name__)
+
+
+def test_iv_every_expression_field_of_the_grammar_is_a_listed_place_or_one_hit_naming_it():
+    """For every node type of ast and every field whose grammar type is expr, expr* or expr?, read at test time from the class's own signature (the first line of its docstring when that line begins with the class's own name and a parenthesis), a tree built by hand holds rr.TABLE at that place: it passes, or is counted, only where the pair stands in CLOSURE_PLACES; the three pairs the census walks through take their parent's place; the pairs of a mode other than exec are not built (written with the reason); every other pair is one hit that names it."""
+    rt = _release_train()
+    pairs = _s1_pairs()
+    assert set(S1_NOT_BUILT) == {p for p in pairs if issubclass(getattr(ast, p[0]), ast.mod) and p[0] != "Module"}
+    listed = [p for p in pairs if p in rt.CLOSURE_PLACES]
+    assert set(listed) == set(rt.CLOSURE_PLACES) and S1_WALKED <= set(pairs), (listed, S1_WALKED - set(pairs))
+    wrong, default = [], 0
+    for p in pairs:
+        if p in S1_NOT_BUILT:
+            continue
+        plant = ast.Attribute(value=ast.Name(id="rr", ctx=ast.Load()), attr="TABLE", ctx=ast.Load())
+        tree = ast.parse(RR)
+        tree.body.append(_s1_host(_filled(getattr(ast, p[0]), p[1], plant)))
+        tree = ast.fix_missing_locations(tree)
+        tracked, carriers = rt._closure_bindings(tree, {"review_rules"}, {})
+        hits, counts = rt._closure_uses(tree, tracked, carriers, {}, {"review_rules"})
+        texts = [h[1] for h in hits]
+        if p in rt.CLOSURE_PLACES:
+            place = rt.CLOSURE_PLACES[p]
+            want = dict(dict.fromkeys(rt.CLOSURE_UNFOLLOWED, 0), **({place: 1} if place in rt.CLOSURE_UNFOLLOWED else {}))
+            ok = texts == [] and counts == want
+        elif p in S1_WALKED:
+            ok = texts == []
+        else:
+            default += 1
+            ok = texts == ["a use of the evaluator at a place the census does not list (%s.%s)" % p]
+        if not ok:
+            wrong.append((p, texts, counts))
+    print("COUNT S1: %d pairs (%d listed, %d walked through, %d not built, %d default)"
+          % (len(pairs), len(listed), len(S1_WALKED), len(S1_NOT_BUILT), default))
+    assert len(pairs) == len(listed) + len(S1_WALKED) + len(S1_NOT_BUILT) + default and wrong == [], wrong
+
+
+_MODULE_NAMED = ("import, plain name", "import, plain name, as", "from-import, level 0, module plain, a name, named by the module", "from-import, level 0, module plain, a name, as, named by the module", "from-import, level 0, module plain, the star", "from-import, level above 0, module plain, a name, named by the module", "from-import, level above 0, module plain, a name, as, named by the module", "from-import, level above 0, module plain, the star")
+FOLLOWED_IMPORTS = {("review_rules", s) for s in _MODULE_NAMED + ("from-import, level above 0, module absent, a name, named by the imported name", "from-import, level above 0, module absent, a name, as, named by the imported name")} | {("seat_mod", s) for s in _MODULE_NAMED}  # T:11292 a stem; :11294 a module with exports, plain or with as; :11299 from a stem; :11301 a stem from the package; :11303 an export; :11323 a star of either is its own hit
+_S2_TARGETS = {"review_rules": "TABLE", "seat_mod": "T"}
+
+
+def _s2_cells():
+    cells = [dict(kind="import", dotted=d, as_=a) for d, a in itertools.product((False, True), repeat=2)]
+    for level, module, star, as_ in itertools.product((0, 1), ("absent", "plain", "dotted"), (False, True),
+                                                      (False, True)):
+        for role in ((None,) if star else ("imported",) if module == "absent" else ("module", "imported")):
+            cells.append(dict(kind="from", level=level, module=module, star=star, as_=as_, role=role))
+    return cells
+
+
+def _s2_shape(c):
+    if c["kind"] == "import":
+        return "import, %s name%s" % ("dotted" if c["dotted"] else "plain", ", as" if c["as_"] else "")
+    return "from-import, level %s, module %s, %s%s%s" % (
+        "above 0" if c["level"] else "0", c["module"], "the star" if c["star"] else "a name", ", as" if c["as_"] else "",
+        "" if c["star"] else ", named by the " + ("module" if c["role"] == "module" else "imported name"))
+
+
+def _s2_source(c, t, x):
+    b = " as b" if c["as_"] else ""
+    if c["kind"] == "import":
+        mod = ("pkg." if c["dotted"] else "") + t
+        return "import %s%s\n%s.%s['k'] = 1\n" % (mod, b, "b" if c["as_"] else mod, x)
+    mod = ("" if c["module"] == "absent" else ("pkg" if c["module"] == "plain" else "pkg.sub") if c["role"] == "imported"
+           else t if c["module"] == "plain" else "pkg." + t)
+    name = "*" if c["star"] else x if c["role"] == "module" else t
+    bound = "b" if c["as_"] else name
+    store = ("%s['k'] = 1" % x if c["star"] else "%s['k'] = 1" % bound if c["role"] == "module"
+             else "%s.%s['k'] = 1" % (bound, x))
+    return "from %s%s import %s%s\n%s\n" % ("." * c["level"], mod, name, b, store)
+
+
+def _parses(src):
+    try:
+        ast.parse(src)
+        return True
+    except SyntaxError:
+        return False
+
+
+_S2_NO_SOURCE = lambda c: c["kind"] == "from" and (  # noqa: E731 (written: no source text parses to these)
+    (c["level"] == 0 and c["module"] == "absent") or (c["star"] and c["as_"]))
+S2_SHAPES = [c for c in _s2_cells() if _parses(_s2_source(c, "review_rules", "TABLE"))]
+S2_PLANTS = {(_s2_shape(c), t): ("from . import *\n" if _s2_shape(c) == "from-import, level above 0, module absent, the star"
+                                 else _s2_source(c, t, x))
+             for c in S2_SHAPES for t, x in _S2_TARGETS.items()
+             if not (_s2_shape(c) == "from-import, level above 0, module absent, the star" and t == "seat_mod")}
+
+
+@pytest.mark.parametrize("shape,target", sorted(S2_PLANTS))
+def test_iv_every_shape_of_an_import_that_names_the_evaluator_is_followed_or_a_hit_naming_the_shape(tmp_path, shape, target):
+    """Every shape of an import statement, generated from its fields and from which of its names names the target, once for a stem and once for a module with exports, each followed by one store through the name it binds, and the star import with no module as itself: at least one hit each; a shape outside FOLLOWED_IMPORTS is a hit that names the shape, and one inside it is not."""
+    cells = _s2_cells()
+    assert [c for c in cells if not _parses(_s2_source(c, "review_rules", "TABLE"))] == [c for c in cells
+                                                                                       if _S2_NO_SOURCE(c)]
+    assert len(S2_PLANTS) == len(S2_SHAPES) * len(_S2_TARGETS) - 1
+    if (shape, target) == sorted(S2_PLANTS)[0]:
+        print("COUNT S2: %d cells, %d without source, %d shapes, %d plants (%d followed, %d hits)" % (
+            len(cells), len(cells) - len(S2_SHAPES), len(S2_SHAPES), len(S2_PLANTS),
+            len({(t, s) for s, t in S2_PLANTS} & FOLLOWED_IMPORTS), len({(t, s) for s, t in S2_PLANTS} - FOLLOWED_IMPORTS)))
+    rt, (count, hits, unfollowed) = _census(tmp_path, S2_PLANTS[(shape, target)])
+    texts = [h[2] for h in hits]
+    assert texts != [] and (("an import the census does not follow (%s)" % shape) in texts) == (
+        (target, shape) not in FOLLOWED_IMPORTS), (S2_PLANTS[(shape, target)], texts)
+
+
+Q1_FILES = {"review_rules.py": "TABLE = {}\nLIST = []\n", "seat_mod.py": "import review_rules as rr\nT = rr.TABLE\n",
+            "hub.py": "import review_rules as rr\nimport seat_mod as s\n", "hub2.py": "from hub import s\n"}
+
+
+def _q1_bindings(rt):
+    trees = {f[:-3]: ast.parse(s) for f, s in Q1_FILES.items() if f != "review_rules.py"}
+    exports, carried = {}, {}
+    for _round in range(len(trees) + 1):
+        bound = {m: rt._closure_bindings(t, {"review_rules"}, exports, carried) for m, t in trees.items()}
+        new, more = ({m: dict(b[k]) for m, b in bound.items()} for k in (0, 1))
+        if (new, more) == (exports, carried):
+            break
+        exports, carried = new, more
+    return exports, carried
+
+
+def _q1_rows():
+    if not _TOOL_FILE.exists():
+        return []
+    spec = importlib.util.spec_from_file_location("release_train_closure_q1_rows", _TOOL_FILE)
+    rt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rt)
+    try:
+        exports, carried = _q1_bindings(rt)
+    except Exception as e:  # a census without the carried fixpoint: one row, which fails its count, not the file
+        return [("the census world", "not built: %s" % type(e).__name__)]
+    rows = []
+    for m in sorted(m for m in exports if exports[m]):
+        rows += [(m, "zz_other")] + [(m, e) for e in sorted(exports[m])] + [(m, c) for c in sorted(carried[m])] + [
+            (m, "*")]
+    return rows + [("hub2", "s")]
+
+
+Q1_ROWS = _q1_rows()
+
+
+@pytest.mark.parametrize("module,name", Q1_ROWS)
+def test_iv_every_from_import_out_of_a_module_with_exports_is_followed_binds_nothing_or_is_a_star_hit(tmp_path, module, name):
+    """Generated per module with exports of a census world that adds hub.py (import review_rules as rr; import seat_mod as s) and hub2.py (from hub import s): a name that is no export passes with no hit; each export and each carrier is followed and counted when handed to a call; a star is a hit; and the case of two hubs, the carrier taken from hub2, is followed and counted."""
+    rt = _release_train()
+    exports, carried = _q1_bindings(rt)
+    assert len(Q1_ROWS) == sum(2 + len(exports[m]) + len(carried[m]) for m in exports if exports[m]) + 1
+    if (module, name) == Q1_ROWS[0]:
+        print("COUNT Q1: %d rows (%s; two hubs 1)" % (len(Q1_ROWS), "; ".join(
+            "%s 1 + %d + %d + 1" % (m, len(exports[m]), len(carried[m])) for m in sorted(exports) if exports[m])))
+    api = tmp_path / "api"
+    api.mkdir()
+    for f, s in Q1_FILES.items():
+        (api / f).write_text(s, encoding="utf-8")
+    if name == "zz_other":
+        body = "from %s import zz_other\nzz_other['k'] = 1\n" % module
+    elif name == "*":
+        body = "from %s import *\n" % module
+    elif name in exports[module]:
+        body = "from %s import %s\nprint(%s)\n" % (module, name, name)
+    else:
+        body = "from %s import %s\nprint(%s.T)\n" % (module, name, name)
+    (api / "main.py").write_text(body, encoding="utf-8")
+    count, hits, unfollowed = rt.closure_census(str(api), sorted(Q1_FILES) + ["main.py"], ["review_rules.py"])
+    texts = [h[2] for h in hits]
+    if name == "*":
+        assert "a star import" in texts, (body, texts)
+    elif name == "zz_other":
+        assert texts == [] and sum(unfollowed.values()) == 0, (body, texts, unfollowed)
+    else:
+        assert texts == [] and unfollowed == dict(dict.fromkeys(rt.CLOSURE_UNFOLLOWED, 0), call=1), (
+            body, texts, unfollowed)
 
 
 @pytest.mark.parametrize("form,body", UNFOLLOWED_FORMS)
