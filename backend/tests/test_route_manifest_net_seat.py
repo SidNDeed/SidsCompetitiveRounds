@@ -1941,7 +1941,18 @@ def test_the_helper_closure_stays_affordable():
     # lane's build marker, which the health route reads in both arms; no code
     # binding of the program is in any closure. The bound moves to 602, the
     # measured value, for that reason and no other.
-    assert code_worst <= 604, f"worst code closure {code_worst} of {total}"
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of the counting tool's tip 07268bd8 (2026-11-23): 605
+    # measured at GET /api/v1/health on the merged tree, of 6031 indexed
+    # bindings (604 on the lane's tip f3224b27, the same walk over each
+    # tree): 604 + 1 by name, main._REVIEW_CALIBRATE_BUILD (the counting
+    # tool's build marker, read above), which the health route reads in both
+    # arms; no other code binding of that closure is new. The bound moves to
+    # 605, the measured value, for that reason and no other. The median (87
+    # against 87) and p90 (230 against 239) bounds stay, and so do the three
+    # bounds of the whole closure (250 against 261, 433 against 453, 882
+    # against 897 at the health route).
+    assert code_worst <= 605, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

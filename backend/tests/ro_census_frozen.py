@@ -2164,10 +2164,11 @@ for _k, _v in R11_COARSE_FROZEN.items():
 # coarse forms in the list above (the import of the pool class, a fourth Load
 # of create_async_engine, the def of make_snapshot_reader_engine and the
 # dsntext postgresql_readonly), 361 to 365, and its one complete form and its
-# one round-10 form below, which bring the total from 873 to 879. The
-# FROZEN_COUNT figures that the later blocks' comments give (855, 856, 860,
-# 867, with the coarse 365; 865 and 873, with the coarse 361) are the figures
-# at those blocks' own edits.
+# one round-10 form below, which bring the total from 873 to 879 at this
+# edit. The FROZEN_COUNT figures that the later blocks' comments give (855, 856, 860,
+# 867, with the coarse 365; 865, 873, 890 and 898, with the coarse 361) are
+# the figures at those blocks' own edits. With MDPL's block at the end, the
+# total is 904.
 COARSE_COUNT = 365
 COMPLETE_COUNT = 219
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed
