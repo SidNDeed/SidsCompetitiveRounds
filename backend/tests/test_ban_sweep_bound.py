@@ -85,6 +85,14 @@ EXTRA_REQUESTS = {
     "__registry_columns__": ["admin_evidence", "", True],
     "admin_evidence|SEAT_BASELINE_SQL": ["admin_evidence", "SEAT_BASELINE_SQL", True],
     "admin_evidence|PAIR_BASELINE_SQL": ["admin_evidence", "PAIR_BASELINE_SQL", True],
+    # J13 to J15: the counting program's three places (review_calibrate.py), their texts and mappings' values
+    "review_calibrate|_GAMES_SQL": ["review_calibrate", "_GAMES_SQL", True],
+    "review_calibrate|_TABLES.values": ["review_calibrate", "list(_TABLES.values())", True],
+    "review_calibrate|_CARD_MATCH.text": ["review_calibrate", "_CARD_MATCH.text", True],
+    "review_calibrate|_COHORT_SQL": ["review_calibrate", "_COHORT_SQL", True],
+    "review_calibrate|_GAMES_TABLES.values": ["review_calibrate", "list(_GAMES_TABLES.values())", True],
+    "review_calibrate|_FAILED.values": ["review_calibrate", "list(_FAILED.values())", True],
+    "review_calibrate|_MARKED.values": ["review_calibrate", "list(_MARKED.values())", True],
 }
 
 
@@ -120,7 +128,9 @@ def _census_line(rows):
 
 
 # ---- the census line --------------------------------------------------------------------------------
-CENSUS_LINE = {"bounded": 25, "expanded": 122, "judged": 4, "read": 107, "remaining": 8}
+# At the stack lane's merge of the counting tool (2026-11-23), measured: bounded 25 -> 26 by the fix's helper
+# main._identity_key_shared_bounded; remaining 8 -> 11 by the counting program's three places (J13 to J15).
+CENSUS_LINE = {"bounded": 26, "expanded": 122, "judged": 4, "read": 107, "remaining": 11}
 
 
 def test_the_census_line_is_as_measured(base):
@@ -178,6 +188,32 @@ JUDGED = {
         "reading": "TEMPLATES", "reason": "a rule's argument reaches a sitting statement's text only as a registry "
                                           "name given to R, through _pop, or as the length of a list argument "
                                           "written by %d"},
+    # J13 to J15 (the counting program, review_calibrate.py): each pin holds every text the place can run; the
+    # texts, each field filled by each of its values, are scanned as J12's are (j13_scan_failures below).
+    "review_calibrate.games:717": {
+        "reading": "VALUE", "requested": True,
+        "values": {"review_calibrate|_GAMES_SQL": "72d9dd4a2116ad83",
+                   "review_calibrate|_TABLES.values": "445e23d63edcba1f"},
+        "tables": ["card_evidence", "combat_evidence", "identity_clock_evidence", "matches"],
+        "reason": "the place runs _GAMES_SQL with its one field filled from _TABLES, a table name of the module "
+                  "per domain"},
+    "review_calibrate._card:749": {
+        "reading": "VALUE", "requested": True,
+        "values": {"review_calibrate|_CARD_MATCH.text": "9d77b9fc8657e57f"},
+        "tables": ["matches", "ranked_series"],
+        "reason": "the place runs _CARD_MATCH, built at import from card_evidence's _MATCH text before its first "
+                  "WHERE, with one bound id"},
+    "review_calibrate.read_cohort:1243": {
+        "reading": "VALUE", "requested": True,
+        "values": {"review_calibrate|_COHORT_SQL": "b8a30fba0c88a71b",
+                   "review_calibrate|_TABLES.values": "445e23d63edcba1f",
+                   "review_calibrate|_GAMES_TABLES.values": "68ff1a5aacc8d327",
+                   "review_calibrate|_FAILED.values": "edac0aaf9ed80aad",
+                   "review_calibrate|_MARKED.values": "f1b9b5cd385ba450"},
+        "tables": ["card_evidence", "card_games", "combat_evidence", "combat_games", "identity_clock_evidence",
+                   "identity_clock_games", "matches"],
+        "reason": "the place runs cohort_sql(domain): _COHORT_SQL with its four fields filled from four "
+                  "per-domain mappings of the module"},
 }
 
 
@@ -968,12 +1004,30 @@ def test_the_judged_pins_refuse_an_empty_value_an_empty_word_table_and_no_table(
     assert any(b.startswith("admin_evidence._aer_rows:1588: the values' digests") for b in bad), bad
     assert any(b.startswith("main._janitor_check_statement:3508: _JANITOR_EXPLAIN_WORDS is []") for b in bad), bad
     assert any(b.startswith("admin_evidence.rebuild_game_population:1079: the reach") for b in bad), bad
+    # J13 to J15: one character of each pinned text, and one table name of a pinned mapping, names the row;
+    # the unchanged copy names none (the control).
+    assert judged_table_failures(ns["rows"], json.loads(json.dumps(vals))) == []
+    for key, edit, place in (
+            ("review_calibrate|_GAMES_SQL", lambda t: t.replace("DISTINCT", "DISTINCt", 1),
+             "review_calibrate.games:717"),
+            ("review_calibrate|_TABLES.values", lambda t: [t[0] + "x"] + t[1:], "review_calibrate.games:717"),
+            ("review_calibrate|_CARD_MATCH.text", lambda t: t.replace("m.id = :mid", "m.id = :mie", 1),
+             "review_calibrate._card:749"),
+            ("review_calibrate|_COHORT_SQL", lambda t: t.replace("DISTINCT", "DISTINCt", 1),
+             "review_calibrate.read_cohort:1243"),
+            ("review_calibrate|_GAMES_TABLES.values", lambda t: t[:-1] + [t[-1] + "x"],
+             "review_calibrate.read_cohort:1243")):
+        v2 = json.loads(json.dumps(vals))
+        v2[key]["value"] = edit(v2[key]["value"])
+        bad = judged_table_failures(ns["rows"], v2)
+        assert any(b.startswith(place + ": the values' digests") for b in bad), (key, bad)
 
 
 # The places whose every verdict holds no table, by name, each a true answer by the code: the text read is
 # exact and names no table, or the widest text over a complete reach names none (advisory lock statements).
 NO_TABLE_PLACES = {"main._identity_lock_many:18505": "bounded", "main._identity_lock_many:18513": "bounded",
-                   "main._publish_pair_sitting:1383": "read", "main._report_disconnect_once:22984": "read"}
+                   "main._publish_pair_sitting:1383": "read", "main._report_disconnect_once:22984": "read",
+                   "main._identity_key_shared_bounded:88115": "bounded"}
 
 
 def test_the_places_whose_verdicts_hold_no_table_are_the_named(base):
@@ -1055,6 +1109,49 @@ def test_j12_the_scan_refuses_a_lock_word_a_further_table_and_an_empty_text(base
     v2 = json.loads(json.dumps(vals))                       # control: a change with no lock word and no table
     v2["admin_evidence|SEAT_BASELINE_SQL"]["value"] += "\n"
     assert j12_scan_failures(ns["verdicts"], v2) == []
+
+
+# ---- J13 to J15: the counting program's three texts, each field filled by each of its values, scanned whole --
+def j13_texts(vals):
+    """place -> the texts it can run: _GAMES_SQL per domain, _CARD_MATCH, _COHORT_SQL per domain (the four
+    mappings' values taken domain by domain, as cohort_sql fills them)."""
+    v = {k: (vals.get(k) or {}).get("value") for k in vals if k.startswith("review_calibrate|")}
+    rc = "review_calibrate|"
+    if not all(isinstance(v.get(rc + n), (str, list)) and v.get(rc + n) for n in (
+            "_GAMES_SQL", "_TABLES.values", "_CARD_MATCH.text", "_COHORT_SQL", "_GAMES_TABLES.values",
+            "_FAILED.values", "_MARKED.values")):
+        return None
+    return {
+        "review_calibrate.games:717": [v[rc + "_GAMES_SQL"].format(t=t) for t in v[rc + "_TABLES.values"]],
+        "review_calibrate._card:749": [v[rc + "_CARD_MATCH.text"]],
+        "review_calibrate.read_cohort:1243": [
+            v[rc + "_COHORT_SQL"].format(t=t, g=g, failed=f, marked=m) for t, g, f, m in zip(
+                v[rc + "_TABLES.values"], v[rc + "_GAMES_TABLES.values"], v[rc + "_FAILED.values"],
+                v[rc + "_MARKED.values"])],
+    }
+
+
+def j13_scan_failures(verdicts, vals):
+    """each text of J13 to J15 holds no lock word, and each row's texts name exactly its pinned tables."""
+    texts = j13_texts(vals)
+    if texts is None:
+        return ["review_calibrate: no text"]
+    out = []
+    for place, ts in sorted(texts.items()):
+        tables = set()
+        for t in ts:
+            v = verdicts(t)
+            if any(v[:-1]):
+                out.append("%s: a lock word %s" % (place, v[:-1]))
+            tables |= set(v[-1])
+        if sorted(tables) != JUDGED[place]["tables"]:
+            out.append("%s: the tables %s, the pin %s" % (place, sorted(tables), JUDGED[place]["tables"]))
+    return out
+
+
+def test_j13_the_counting_program_texts_hold_no_lock_word_and_name_their_tables(base):
+    ns, vals, _rows = base
+    assert j13_scan_failures(ns["verdicts"], vals) == []
 
 
 # ---- RULING-CENSUS-9 section 3 (d): the registry strings J6 and J7 write are read by J12's scan ----------
