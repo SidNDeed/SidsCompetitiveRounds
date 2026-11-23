@@ -1255,7 +1255,19 @@ def test_the_helper_closure_stays_affordable():
     # +12 here and reached _aer_rows and _aer_fail. The four report routes
     # measure 218 and enter above the rank; the rank position moves
     # 212 -> 214. Inside 87, so the bound stays.
-    assert code_median <= 87, f"median code closure {code_median} of {total}"
+    # The review counting program (review_calibrate.py, a program the server
+    # verb starts; no app module imports it) joins backend/api: 93 measured
+    # at GET /api/v1/i18n/pack/{locale} of 5986 indexed bindings over 438
+    # routes, against 86 at GET /api/v1/read-gate/probe of 5855 on main
+    # e36c1dcb, the rank position 219 on both. +7 on the median route by
+    # shared names, none executed by it: the route's closure names _refuse
+    # (read_gate's helper), which folds in the program's _refuse, and through
+    # it the names Refused and EXIT_USAGE, which fold in the program's own and
+    # review_rules', apt_lock's and build_manifest's Refused and review_rules'
+    # EXIT_USAGE. The sum was written before the measurement: 86 + 7 = 93.
+    # The bound moves to 98, ~5% over the measurement, for that reason and no
+    # other.
+    assert code_median <= 98, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
     #
