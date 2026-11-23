@@ -2110,7 +2110,7 @@
     "players"
    ],
    "keys": [
-    "admin_grant_achievement | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+    "_identity_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
     "A"
@@ -3569,7 +3569,7 @@
     "players"
    ],
    "keys": [
-    "unlock_achievement | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+    "_identity_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
    ],
    "phases": [
     "A"

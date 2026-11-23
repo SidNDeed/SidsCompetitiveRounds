@@ -169,7 +169,7 @@
           ],
           "main",
           "admin_grant_achievement",
-          "07961a3f7b2e18e20d3e1042a6a4211887266422"
+          "3b1f6ccb44a5b4ee5e8ac2d09dae773a8f8d8b76"
         ],
         [
           "/api/v1/admin/i18n/grants",
@@ -808,7 +808,7 @@
           ],
           "main",
           "generate_link_code",
-          "cbab600f053950c0afe1d789b75543c7de0b8bb0"
+          "09f7b165e749124c3a9b99601b07d95238077b1e"
         ],
         [
           "/api/v1/players/link-discord",
@@ -1309,7 +1309,7 @@
           ],
           "main",
           "unlock_achievement",
-          "206b0fd96f054d7d40156049d443f4d7f7713d00"
+          "4cfebb0cb26c834ad09e425798fa71231c6e37f8"
         ],
         [
           "/api/v1/achievements/{key}/earners",
@@ -2281,7 +2281,7 @@
           ],
           "main",
           "toggle_ranked",
-          "8084d06e8bf0fdaf73c5753149a106cd88805226"
+          "7a3f00fc7bea8feda96d092f57c6aade999d5bf2"
         ],
         [
           "/api/v1/music/rate",
@@ -3518,7 +3518,7 @@
           ],
           "tournaments",
           "signup",
-          "7ba18d068b731963a197e1fa81c37391e7284fd9"
+          "7f11e56acba424fce0b8238e58124c1e5c35fde1"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3668,7 +3668,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "17ea37a958ff30371ec3f6cd7a68ef871c00e5ab"
+          "fda8ba88cc5e39488245ba6a9ea8c0874defbe2b"
         ],
         [
           "/api/v1/internal/logs/auto/prune",
