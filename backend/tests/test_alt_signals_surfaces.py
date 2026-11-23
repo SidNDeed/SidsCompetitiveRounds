@@ -95,40 +95,147 @@ def _ddl_unknown(sql):
     return out
 
 
-# Every statement form that makes or changes a column (holder H3): ALTER of
-# a table, foreign table, view, type or domain; CREATE of a table in any
-# form (UNLOGGED, TEMP, IF NOT EXISTS, AS, OF, PARTITION OF), of a view or
-# materialized view, of a type or a domain; SELECT ... INTO TEMP, UNLOGGED
-# or TABLE.
-# Case and line breaks do not matter; comments are not read.
-_COLUMN_MAKER = re.compile(
-    r"\bALTER\s+(?:FOREIGN\s+TABLE|TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
-    r"|\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+|FOREIGN\s+)?"
-    r"(?:TABLE|MATERIALIZED\s+VIEW|VIEW|TYPE|DOMAIN)\b"
-    r"|\bINTO\s+(?:TEMPORARY|TEMP|UNLOGGED|TABLE)\b", re.I)
-_READ_CREATE = re.compile(r"^\s*CREATE TABLE \w+ \($")
+# The closed table of statement heads (holder H3). 427 is read statement by
+# statement: the top level split at its semicolons, and each DO body split
+# the same way; quoted and dollar-quoted text is skipped and a -- comment is
+# dropped; inside a body DECLARE, BEGIN and ELSE, and an IF or ELSIF up to
+# its THEN, are taken off, and the first line left is the head. A head on no
+# row of _HEADS is refused, naming its line; so are a /* comment, an E'' or
+# U&'' string and a double-quoted name outside quoted text, which 427 does
+# not hold. An EXECUTE is read only as format() of one literal whose only
+# placeholder is %L, and the literal's head must stand on an "execute" row.
+_HEADS = (
+    ("top", r"BEGIN$", "passed: opens the transaction"),
+    ("top", r"SET LOCAL \w+ = ", "passed: a setting of the transaction"),
+    ("top", r"DO \$\w+\$$", "read: its body, by this table"),
+    ("top", r"COMMIT$", "passed: ends the transaction"),
+    ("declare", r"[a-z_]+ (CONSTANT )?(text|integer)( :=|$)", "passed: a variable of the block"),
+    ("body", r"[a-z_]+ := ", "passed: sets a variable"),
+    ("body", r"RAISE EXCEPTION '", "passed: aborts the file"),
+    ("body", r"END( IF)?$", "passed: closes a block"),
+    ("body", r"SELECT ", "passed: in PL/pgSQL its INTO fills variables and makes no table"),
+    ("body", r"PERFORM ", "passed: runs a query and keeps no result"),
+    ("body", r"UPDATE ", "passed: writes rows, not columns"),
+    ("body", r"GET DIAGNOSTICS ", "passed: reads a row count"),
+    ("body", r"CREATE TABLE [a-z_]+ \($", "read: its body, by the body reader"),
+    ("body", r"CREATE INDEX ", "passed: an index makes no column"),
+    ("body", r"EXECUTE format\('[^']*'(, [a-z_]+)*\)$", "read: its literal, by the execute rows"),
+    ("execute", r"COMMENT ON TABLE [a-z_]+ IS %L$", "passed: a comment on a table makes no column"),
+)
 
 
-def _ddl_outside(sql):
-    """Every statement of `sql` that makes or changes a column and that the
-    readers above do not read, as "line N: text": anything the closed form
-    finds, except a `CREATE TABLE <name> (` line of _CREATE's own form.
-    LIMIT: a statement whose words are built at run time (concatenated
-    strings) and a SELECT ... INTO with no keyword after INTO are not seen."""
-    lines = sql.replace("\r\n", "\n").split("\n")
-    bare = "\n".join(re.sub(r"--.*$", "", s) for s in lines)
+def _ddl_outside(text):
+    """Each statement of `text` that _HEADS does not read, as "line N: first
+    line": a head on no row, an EXECUTE whose literal's head is on no
+    "execute" row or whose form is not format() of one literal with %L, and
+    each /* comment, E'' or U&'' string and double-quoted name outside
+    quoted text. LIMIT: a statement run by a function that 427 calls is not
+    read."""
+    text = text.replace("\r\n", "\n")
+    lines = text.split("\n")
+    tag_re = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
     found = []
-    for m in _COLUMN_MAKER.finditer(bare):
-        i = bare.count("\n", 0, m.start())
-        if not _READ_CREATE.match(lines[i]):
-            found.append("line %d: %s" % (i + 1, lines[i].strip()))
+
+    def say(pos, what=None):
+        i = text.count("\n", 0, pos)
+        found.append("line %d: %s" % (i + 1, lines[i].strip() if what is None else what))
+
+    def mask(lo, hi):
+        # (bare, plain) of text[lo:hi]: bare blanks quoted text and comments, plain blanks comments only;
+        # line ends are kept, so a position means the same in both and in the text
+        bare, plain = list(text[lo:hi]), list(text[lo:hi])
+
+        def blank(a, b, both):
+            for k in range(a, b):
+                if text[k] != "\n":
+                    bare[k - lo] = " "
+                    if both:
+                        plain[k - lo] = " "
+        i = lo
+        while i < hi:
+            if text.startswith("--", i):
+                j = text.find("\n", i, hi)
+                j = hi if j < 0 else j
+                blank(i, j, True)
+                i = j
+            elif text.startswith("/*", i):
+                say(i)
+                i += 2
+            elif text[i] == "'":
+                if text[i - 1:i] in ("E", "e") and not re.match(r"\w", text[i - 2:i - 1] or " "):
+                    say(i)
+                elif text[i - 2:i] in ("U&", "u&") and not re.match(r"\w", text[i - 3:i - 2] or " "):
+                    say(i)
+                j = i + 1
+                while True:
+                    k = text.find("'", j, hi)
+                    if k < 0:
+                        k = hi
+                    elif k + 1 < hi and text[k + 1] == "'":
+                        j = k + 2
+                        continue
+                    break
+                blank(i + 1, k, False)
+                i = k + 1
+            elif text[i] == '"':
+                say(i)
+                k = text.find('"', i + 1, hi)
+                k = hi if k < 0 else k
+                blank(i + 1, k, False)
+                i = k + 1
+            elif text[i] == "$" and tag_re.match(text, i):
+                tag = tag_re.match(text, i).group(0)
+                k = text.find(tag, i + len(tag), hi)
+                k = hi if k < 0 else k
+                blank(i + len(tag), k, False)
+                i = k + len(tag)
+            else:
+                i += 1
+        return "".join(bare), "".join(plain)
+
+    def read(lo, hi, scope):
+        bare, plain = mask(lo, hi)
+        begun, s0 = False, 0
+        for e in [m.start() for m in re.finditer(";", bare)] + [len(bare)]:
+            s, s0 = s0, e + 1
+            while scope == "body":
+                m = re.match(r"\s*(DECLARE|BEGIN|ELSE)\b", bare[s:e])
+                if m:
+                    begun = begun or m.group(1) == "BEGIN"
+                    s += m.end()
+                    continue
+                m = re.match(r"\s*(IF|ELSIF)\b", bare[s:e])
+                t = re.search(r"\bTHEN\b", bare[s + m.end():e]) if m else None
+                if t is None:
+                    break
+                s += m.end() + t.end()
+            s += len(bare[s:e]) - len(bare[s:e].lstrip())
+            if s >= e:
+                continue
+            head = plain[s:e].split("\n", 1)[0].strip()
+            head = head[:-1] if head.endswith(";") else head
+            kinds = ("top",) if scope == "top" else ("body",) if begun else ("declare", "body")
+            row = next((r for r in _HEADS if r[0] in kinds and re.match(r[1], head)), None)
+            at = lo + s
+            if row is None:
+                say(at, head)
+                continue
+            if row[2] == "read: its body, by this table":
+                tag = tag_re.search(text, at, lo + e)
+                close = text.find(tag.group(0), tag.end(), lo + e)
+                read(tag.end(), close if close >= 0 else lo + e, "body")
+            elif row[2] == "read: its literal, by the execute rows":
+                literal = re.match(r"EXECUTE format\('([^']*)'", head).group(1)
+                if not any(r[0] == "execute" and re.match(r[1], literal) for r in _HEADS):
+                    say(at, head)
+    read(0, len(text), "top")
     return found
 
 
 def _disclosure_problems(sql, fixture, sentence):
     """Everything wrong between 427's DDL, the table and the sentence."""
     problems = ["a CREATE TABLE line the reader does not know: %s" % u for u in _ddl_unknown(sql)]
-    problems += ["a statement outside a CREATE TABLE body that makes or changes a column: %s" % u
+    problems += ["a statement the closed table of heads does not read: %s" % u
                  for u in _ddl_outside(sql)]
     tables = _ddl_columns(sql)
     if set(tables) != set(TABLES):
@@ -174,16 +281,29 @@ def test_every_column_of_the_three_tables_is_disclosed_or_bookkeeping():
         "steam_signin_facts": 14, "steam_family_shares": 5, "conn_markers": 9}, tables
 
 
-def test_the_disclosure_check_refuses_a_written_statement_that_makes_a_column_outside_a_create_table_body():
-    """Holder H3 (M2): the real 427 holds no such statement; each plant,
-    on the line after `-- DDL END`, is refused with its line named. (A
-    plain `CREATE TABLE <name> (` line is of the reader's own form: it is
-    read, and a fourth table is refused by the table-set check.)"""
+_TOP_PLANTS = ("IMPORT FOREIGN SCHEMA alt_remote FROM SERVER alt_server INTO public;",
+               "SELECT 1 AS a INTO TEMP alt_plant;")
+
+
+def test_the_disclosure_check_refuses_a_statement_its_closed_table_of_heads_does_not_read():
+    """Holder H3 (M2): the real 427 gives no finding. Each plant, in the
+    table step's DO body after `-- DDL END` or at the top level before
+    COMMIT, is refused with its line named: a head on no row (IMPORT FOREIGN
+    SCHEMA in both places, the column-making forms, SELECT ... INTO TEMP at
+    the top level), an EXECUTE that is not format() of one literal with %L
+    or whose literal's head is on no row, a /* comment, an E'' string, a
+    U&'' string and a double-quoted name each after a known head, and a
+    statement after a string that holds --. A plain `CREATE TABLE <name> (`
+    body is read by _CREATE, and the fourth table it makes is refused by the
+    table-set check."""
     sql, fixture = _read(MIGRATION_427), _fixture()
     assert _ddl_outside(sql) == []
     end = "    -- DDL END\n"
     assert sql.count(end) == 1
     line = sql[:sql.index(end)].count("\n") + 2
+    top = "\nCOMMIT;"
+    assert sql.count(top) == 1
+    top_line = sql[:sql.index(top)].count("\n") + 2
     plants = ("ALTER TABLE conn_markers ADD COLUMN port BIGINT NULL;",
               "alter table conn_markers add port bigint;",
               "CREATE UNLOGGED TABLE alt_plant (a TEXT NOT NULL);",
@@ -191,7 +311,6 @@ def test_the_disclosure_check_refuses_a_written_statement_that_makes_a_column_ou
               "CREATE TABLE IF NOT EXISTS alt_plant (a TEXT NOT NULL);",
               "CREATE TABLE alt_plant AS SELECT 1 AS a;",
               "CREATE VIEW alt_plant AS SELECT 1 AS a;",
-              "SELECT 1 AS a INTO TEMP alt_plant;",
               "ALTER\n      TABLE conn_markers ADD port BIGINT;",
               "CREATE TABLE alt_plant OF alt_type;",
               "CREATE TABLE alt_plant PARTITION OF conn_markers FOR VALUES IN (1);",
@@ -203,12 +322,27 @@ def test_the_disclosure_check_refuses_a_written_statement_that_makes_a_column_ou
               "CREATE TYPE alt_type AS (a TEXT);",
               "ALTER TYPE alt_type ADD ATTRIBUTE b TEXT;",
               "CREATE DOMAIN alt_domain AS TEXT;",
-              "ALTER DOMAIN alt_domain SET NOT NULL;")
-    for plant in plants:
-        grown = sql.replace(end, end + "    " + plant + "\n", 1)
-        got = _disclosure_problems(grown, fixture, alt_signals.DISCLOSURE)
-        assert any(p.startswith("a statement outside a CREATE TABLE body that makes or changes a column:"
-                                " line %d: " % line) for p in got), (plant, got)
+              "ALTER DOMAIN alt_domain SET NOT NULL;",
+              "IMPORT FOREIGN SCHEMA alt_remote FROM SERVER alt_server INTO public;",
+              "EXECUTE format('ALTER TABLE conn_markers ADD port %L', mark);",
+              "EXECUTE 'ALTER TABLE conn_markers ' || 'ADD port BIGINT';",
+              "EXECUTE format('COMMENT ON TABLE conn_markers IS %s', mark);",
+              "EXECUTE format('COMMENT ON TABLE conn_markers IS %I', mark);",
+              "PERFORM 1 /* a note */;",
+              "RAISE EXCEPTION 'a -- b'; ALTER TABLE conn_markers ADD port BIGINT;",
+              "PERFORM E'a';",
+              "PERFORM U&'a';",
+              'PERFORM "a";')
+    grown = [(sql.replace(end, end + "    " + plant + "\n", 1), line, plant) for plant in plants]
+    grown += [(sql.replace(top, "\n" + plant + top, 1), top_line, plant) for plant in _TOP_PLANTS]
+    for text_, at, plant in grown:
+        got = _disclosure_problems(text_, fixture, alt_signals.DISCLOSURE)
+        assert any(p.startswith("a statement the closed table of heads does not read:"
+                                " line %d: " % at) for p in got), (plant, got)
+    fourth = sql.replace(end, end + "    " + "CREATE TABLE alt_plant (\n      a TEXT NOT NULL\n    );" + "\n", 1)
+    got = _disclosure_problems(fourth, fixture, alt_signals.DISCLOSURE)
+    assert not [p for p in got if p.startswith("a statement the closed table")], got
+    assert any(p.startswith("the DDL creates") for p in got), got
 
 
 def test_the_disclosure_check_fails_on_each_of_its_classes():

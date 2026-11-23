@@ -312,6 +312,34 @@ def test_a_pass_that_fails_in_batch_two_of_three_says_what_it_did_and_what_is_le
                      " shares 0, facts 0 in 1 batch(es)", left], lines
 
 
+@pytest.mark.parametrize("where", ["in a batch", "in the count"])
+def test_a_cancelled_pass_re_raises_and_prints_nothing(monkeypatch, capsys, where):
+    """The pass's third end: a CancelledError raised in a batch, or in the
+    count of the due rows left, is raised again by the pass, and the pass
+    prints nothing."""
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def batch(db, table, at=None):
+        if where == "in a batch":
+            raise asyncio.CancelledError()
+        return 0
+
+    async def left(db, at=None):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(main, "_alt_retention_batch", batch)
+    monkeypatch.setattr(main, "_alt_retention_left", left)
+    capsys.readouterr()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main._alt_retention_pass(_Session))
+    assert capsys.readouterr().out == ""
+
+
 _PLANT_AT = {
     "facts": ("INSERT INTO steam_signin_facts (steam_id, first_seen_at, last_seen_at)"
               " VALUES (CAST(:s AS text) || '0001', CAST(:t AS timestamptz) - interval '10 days',"

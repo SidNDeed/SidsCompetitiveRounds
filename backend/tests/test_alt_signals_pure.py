@@ -363,6 +363,27 @@ def _lane_files():
     return files
 
 
+def _main_alt_texts(src):
+    """(name, first line, text) of each top-level function definition and
+    each top-level assignment of `src` (api/main.py's text) whose name
+    begins with _alt_, and of alt_signals_retention_loop, read by ast: at the
+    tip, the functions H1a derives (15) and one assignment."""
+    out = []
+    for node in ast.parse(src).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names = [node.name]
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        for name in names:
+            if name.startswith("_alt_") or name == "alt_signals_retention_loop":
+                out.append((name, node.lineno, ast.get_source_segment(src, node)))
+    return out
+
+
 def _literal_class(tok):
     """The admitted class of one address or network literal, or None."""
     host = tok.strip().split("%")[0]
@@ -435,10 +456,21 @@ def _literals(name, src):
     return out
 
 
-def test_every_address_literal_of_the_lane_is_special_purpose_multicast_or_a_published_resolver():
+def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_purpose_multicast_or_a_published_resolver():
+    """Each address literal _literals finds in the lane's files and in
+    main's _alt_ code (_main_alt_texts over main.py's text) is
+    special-purpose, multicast or a published resolver. LIMIT: main's other
+    code (the route handlers, the _ALT_ constants, the _Alt classes, the
+    deletion sweep) is not read here."""
     found = []
     for f in _lane_files():
         found += _literals(f.name, f.read_text(encoding="utf-8"))
+    texts = _main_alt_texts((BACKEND / "api" / "main.py").read_text(encoding="utf-8"))
+    defs = [n for n, _l, t in texts if t.startswith(("def ", "async def "))]
+    assert (len(defs), len(texts) - len(defs)) == (15, 1), [(n, l) for n, l, _t in texts]
+    for _name, first, text_ in texts:
+        found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
+                  for w, t, c in _literals("main.py", text_)]
     refused = [x for x in found if x[2] in (None, "UNKNOWN FORM")]
     assert refused == [], refused
     assert len(found) >= 20, found
@@ -470,3 +502,20 @@ def test_the_literal_scan_refuses_an_unlisted_public_address_a_public_network_an
         got = _literals(name, src)
         assert {(int(w.rsplit(":", 1)[1]), t) for w, t, _c in got} == want, (name, got)
         assert all(c is None for _w, _t, c in got), (name, got)
+
+
+def test_the_literal_scan_reads_mains_alt_code():
+    """A public address planted in a copy of main.py's text inside _alt_boot
+    is found by _main_alt_texts(copy) and refused; planted outside every
+    _alt_ definition and assignment, it is not read (E2's LIMIT)."""
+    v4 = ".".join(("1", "1", "2", "1"))
+    src = (BACKEND / "api" / "main.py").read_text(encoding="utf-8")
+    boot = "\ndef _alt_boot() -> None:\n"
+    assert src.count(boot) == 1
+    inside = src.replace(boot, boot + "    # seen at %s\n" % v4, 1)
+    outside = "# seen at %s\n" % v4 + src
+
+    def scan(copy):
+        return [(t, c) for _n, _l, text_ in _main_alt_texts(copy) for _w, t, c in _literals("main.py", text_)]
+    assert (v4, None) in scan(inside), [x for x in scan(inside) if x[1] is None]
+    assert all(t != v4 for t, _c in scan(outside))

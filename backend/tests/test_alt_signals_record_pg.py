@@ -1131,37 +1131,62 @@ def _alt_functions():
 # (none today; derived in the test, so a logger main adds is read too).
 _STREAMS = frozenset({"stdout", "stderr", "__stdout__", "__stderr__"})
 _LOGGER_WORDS = frozenset({"logging", "logger", "log", "_log", "_logger", "LOG", "LOGGER"})
+# The bound (holder H1): of the modules below, the lane's functions read only
+# the attributes _STREAM_READS lists, each with its reason; an attribute of
+# one of them that the list does not name, a module name read other than as
+# the base of an attribute, and an import of one of them are each refused.
+_STREAM_MODULES = frozenset({"sys", "os", "traceback", "logging", "warnings"})
+_STREAM_READS = {("os", "getenv"): "_alt_boot reads the signal key's variable; getenv reads the environment and writes no stream"}
+_REFUSED_NAMES = frozenset({"builtins", "__builtins__", "__import__", "globals", "vars", "eval", "exec"})
 
 
-def _direct_writes(src, loggers):
-    """Every place in the source `src` that writes past print(): a use of
-    sys.stdout or sys.stderr (or of those names imported bare), of the
-    logging module, or of a logger object by the names main uses."""
+def _stream_refusals(name, src, loggers):
+    """Each read in the source `src` of the function `name` that the bound
+    refuses, as (line, what): the name print, read anywhere unless `name` is
+    _alt_print ("name print"); a name in _REFUSED_NAMES ("name N"); a name in
+    _STREAM_MODULES read other than as the base of an attribute ("module
+    name M"); an attribute of one of them that _STREAM_READS does not list
+    ("attribute M.A"); an import of one of them or of builtins ("import M");
+    a name in _STREAMS, _LOGGER_WORDS or `loggers` ("name N")."""
     import ast
     import textwrap
+    tree = ast.parse(textwrap.dedent(src))
+    bases = {id(n.value) for n in ast.walk(tree)
+             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in _STREAM_MODULES}
     out = []
-    for n in ast.walk(ast.parse(textwrap.dedent(src))):
-        if isinstance(n, ast.Attribute) and n.attr in _STREAMS:
-            out.append((n.lineno, "stream " + n.attr))
-        elif isinstance(n, ast.Name) and (n.id in _STREAMS or n.id in _LOGGER_WORDS or n.id in loggers):
-            out.append((n.lineno, "name " + n.id))
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name):
+            if n.id == "print" and name != "_alt_print":
+                out.append((n.lineno, "name print"))
+            if n.id in _REFUSED_NAMES:
+                out.append((n.lineno, "name " + n.id))
+            if n.id in _STREAM_MODULES and id(n) not in bases:
+                out.append((n.lineno, "module name " + n.id))
+            if n.id in _STREAMS or n.id in _LOGGER_WORDS or n.id in loggers:
+                out.append((n.lineno, "name " + n.id))
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in _STREAM_MODULES:
+            if (n.value.id, n.attr) not in _STREAM_READS:
+                out.append((n.lineno, "attribute %s.%s" % (n.value.id, n.attr)))
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
             mods = [a.name for a in n.names] + ([n.module] if isinstance(n, ast.ImportFrom) and n.module else [])
-            if any(m.split(".")[0] == "logging" for m in mods):
-                out.append((n.lineno, "import logging"))
+            for top in sorted({m.split(".")[0] for m in mods}):
+                if top in _STREAM_MODULES or top == "builtins":
+                    out.append((n.lineno, "import " + top))
     return out
 
 
-def test_the_recordings_functions_print_only_through_the_guarded_logger():
+def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed_stream_attributes():
     """Finding R2-14 and claims C3 and C32, by the code (holder H1). The
     functions are DERIVED: every function of main whose name begins with
-    _alt_, and the retention loop. None of them but _alt_print calls print()
-    itself (a raising print inside the abandon's own guard would change
-    nothing the caller sees, so the runtime holders cannot tell it from
-    _alt_print), and none of them writes past print(): no sys.stdout or
-    sys.stderr, no logging, no logger object. LIMIT: a function they call
-    that is named otherwise (the ban helper, alt_signals.py) is not read
-    here; its print() calls are seen by the runtime holder above."""
+    _alt_, and the retention loop (15). In none of them does
+    _stream_refusals find a read, so a call of print stands only inside
+    _alt_print, and the name builtins is not read; of sys, os, traceback,
+    logging and warnings only the attributes _STREAM_READS lists are read. A
+    stream reached through another module is not read by this test, nor an
+    attribute named by a string at run time (getattr; _alt_table_missing
+    calls it on an exception). LIMIT: a function they call that is named
+    otherwise (the ban helper, alt_signals.py) is not read here; its print()
+    calls are seen by the runtime holder above."""
     import ast
     import inspect
     import logging
@@ -1171,32 +1196,34 @@ def test_the_recordings_functions_print_only_through_the_guarded_logger():
     assert len(fns) == 15, (len(fns), sorted(fns))
     loggers = {n for n, v in vars(main).items() if isinstance(v, logging.Logger)}
     for name, fn in fns.items():
-        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-        bare = [n.lineno for n in ast.walk(tree)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "print"]
-        assert bare == ([] if name != "_alt_print" else bare), (name, bare)
-        assert _direct_writes(inspect.getsource(fn), loggers) == [], (name, _direct_writes(inspect.getsource(fn),
-                                                                                         loggers))
+        got = _stream_refusals(name, inspect.getsource(fn), loggers)
+        assert got == [], (name, got)
     tree = ast.parse(textwrap.dedent(inspect.getsource(main._alt_print)))
     assert [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "print"]
 
 
-def test_the_direct_write_census_refuses_each_form_it_reads():
-    """The plants of holder H1(b): each form is refused by name, and a
-    function that only calls _alt_print is not."""
-    plants = {
-        "stream stderr": "def f():\n    import sys\n    sys.stderr.write('x')\n",
-        "stream stdout": "def f():\n    import sys\n    print('x', file=sys.stdout)\n",
-        "name stderr": "def f():\n    from sys import stderr\n    stderr.write('x')\n",
-        "import logging": "def f():\n    import logging\n",
-        "name logging": "def f():\n    logging.warning('x')\n",
-        "name logger": "def f():\n    logger.info('x')\n",
-        "name _alt_plant_log": "def f():\n    _alt_plant_log.info('x')\n",
-    }
-    for want, src in plants.items():
-        got = _direct_writes(src, {"_alt_plant_log"})
+def test_the_stream_bound_refuses_each_planted_read_and_admits_an_alt_print_call():
+    """The plants of holder H1: each kind of read the bound refuses is found
+    by name, and a function that calls only _alt_print and a listed
+    attribute is not."""
+    plants = (("name print", "def f():\n    print('x')\n"),
+              ("name print", "def f():\n    p = print\n    p('x')\n"),
+              ("name builtins", "def f():\n    import builtins\n    builtins.print('x')\n"),
+              ("attribute sys.stderr", "def f():\n    sys.stderr.write('x')\n"),
+              ("attribute os.write", "def f():\n    os.write(2, b'x')\n"),
+              ("attribute traceback.print_exc", "def f():\n    traceback.print_exc()\n"),
+              ("attribute logging.warning", "def f():\n    logging.warning('x')\n"),
+              ("attribute sys.argv", "def f():\n    return sys.argv\n"),
+              ("import traceback", "def f():\n    from traceback import print_exc\n"),
+              ("name __import__", "def f():\n    __import__('sys')\n"),
+              ("module name sys", "def f():\n    getattr(sys, 'stderr')\n"),
+              ("name stderr", "def f():\n    stderr.write('x')\n"),
+              ("name logger", "def f():\n    logger.info('x')\n"),
+              ("name _alt_plant_log", "def f():\n    _alt_plant_log.info('x')\n"))
+    for want, src in plants:
+        got = _stream_refusals("f", src, {"_alt_plant_log"})
         assert any(w == want for _l, w in got), (want, got)
-    assert _direct_writes("def f():\n    _alt_print('x')\n", {"_alt_plant_log"}) == []
+    assert _stream_refusals("f", "def f():\n    _alt_print('x')\n    os.getenv('K')\n", {"_alt_plant_log"}) == []
 
 
 # -- the commands the driver sends under the production pool (finding R2-12) ------
@@ -1275,6 +1302,26 @@ def test_the_wire_lists_every_public_method_of_the_connection():
     assert sum(len(s) for s in lists) == len(public), lists
     for n in _WIRE_SENDS:
         assert _Wire.__dict__[n].__name__ == n and _Wire.__dict__[n] is not asyncpg.Connection.__dict__[n], n
+    # Each wrapper, called once over a stub connection, adds exactly one
+    # record to the log, and the record names its method.
+    import inspect
+
+    class _Stub:
+        pass
+    _Wire.log = []
+    try:
+        for n in _WIRE_SENDS:
+            before = list(_Wire.log)
+            try:
+                got = _Wire.__dict__[n](_Stub(), "SELECT 1")
+                if inspect.iscoroutine(got):
+                    _run(got)
+            except Exception:
+                pass   # the real method fails on the stub; the wrapper has logged before it is called
+            after = list(_Wire.log)
+            assert len(after) == len(before) + 1 and after[-1][0] == n, (n, after[len(before):])
+    finally:
+        _Wire.log = None
 
 
 def test_the_commands_the_driver_sends_for_one_recording_under_the_production_pool(case, env, monkeypatch):
