@@ -110,12 +110,24 @@ def test_k1_a_checkout_without_the_server_module_is_refused(tmp_path, monkeypatc
 
 
 def test_k1_the_server_module_absent_from_its_own_checkout_is_refused(tmp_path, monkeypatch):
-    # API_DIR and the cached module stay the server's own, so the loaded-module path check would pass;
-    # only the file is absent. The refusal must come from the existence guard itself, so that removing
-    # the guard lets the run through (CENSUS-R1 M1: mutant M25 was killed by wording alone before).
-    want = os.path.join(rrd.API_DIR, "card_measures.py")
-    real_isfile = os.path.isfile
-    monkeypatch.setattr(rrd.os.path, "isfile", lambda p: False if rrd._same_file(p, want) else real_isfile(p))
+    # The checkout is a stand-in: API_DIR is an empty folder, and the cached card_measures and the
+    # review_measures it holds name files of that folder by their paths. The loaded-module path check
+    # would pass on those names, and no file stands behind them. The refusal must come from the existence
+    # guard itself, so that removing the guard lets the run through (CENSUS-R1 M1: mutant M25 was killed
+    # by wording alone before).
+    # No path function is replaced here: os.path.isfile is a name the review tripwire guards, and where a
+    # guarded call ran while it was replaced (the argument parser's catalogue lookup makes one under some
+    # locale settings) the tripwire kept trips that failed the review tools' tests later in the process.
+    api = tmp_path / "api"
+    api.mkdir()
+    stand_in_rm = type(sys)("review_measures")
+    stand_in_rm.__file__ = str(api / "review_measures.py")
+    stand_in = type(sys)("card_measures")
+    stand_in.__file__ = str(api / "card_measures.py")
+    stand_in.rm = stand_in_rm
+    monkeypatch.setattr(rrd, "API_DIR", str(api))
+    monkeypatch.setitem(sys.modules, "card_measures", stand_in)
+    monkeypatch.setattr(sys, "path", list(sys.path))
     with pytest.raises(rrd.Refused, match="is not in this checkout"):
         rrd.server_census_check()
     code, out = _run(["--census", _write(tmp_path, cf.VALID["client_file"]), "--dry-run"])
