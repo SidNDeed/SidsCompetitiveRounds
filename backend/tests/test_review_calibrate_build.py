@@ -4,7 +4,10 @@ In the form of test_lfp_casual.py's H1, with no database: both arms of health_ch
 _REVIEW_CALIBRATE_BUILD under the key review_calibrate_build, its value is 1, HealthResponse declares it
 as a required int, and the degraded answer carries it. The mutants run the same check on edited texts.
 One more assertion: the tool's module file stands beside main.py in backend/api. And the holder at the
-end: by the route manifest's own index and walk, no route's or entry point's closure holds the tool's code."""
+end, by the route manifest's own index and walk: no route's or entry point's closure enters a binding of
+the tool whose kind is other than import, and no binding of the tool that the index files as an import
+carries a statement that is not an import. What stays in closures of the tool is its import statements,
+each with the header of a block it stands in."""
 import asyncio
 import os
 import sys
@@ -113,11 +116,12 @@ def test_the_tool_module_stands_beside_main_py():
 # match, so a module-level binding of the counting program whose name an app binding also reads is
 # entered from that app binding, although the app never imports the program and no route runs it.
 # The program's bindings carry its mark (calibrate_*, _calibrate_*, CalibrateRefused, ...) so that no
-# such edge exists. This holds it, by the manifest test file's OWN index and walk (imported, never a
-# second walk), over every route the manifest enumerates and every non-route entry point: no closure
-# holds a code binding of review_calibrate.py. The program's import leaves are the normal course for
-# every module (an app function naming `os` reaches every module's `os` line) and stay outside the
-# assertion. Every file of backend/api stays in the index; there is no table of modules.
+# such edge exists. This holds two things, by the manifest test file's OWN index and walk (imported,
+# never a second walk), over every route the manifest enumerates and every non-route entry point:
+# (1) no closure enters a binding of review_calibrate.py whose kind is other than import; (2) no
+# binding of the program that the index files as an import carries a statement that is not an
+# import. What stays in closures of the program is its import statements, each with the header of a
+# block it stands in. Every file of backend/api stays in the index; there is no table of modules.
 
 PROGRAM = "review_calibrate"
 ALLOWED = frozenset()       # program code bindings a closure may hold: none
@@ -181,6 +185,27 @@ def program_code_entries(manifest, surfaces, index=None):
     return out
 
 
+def import_bindings_with_more(manifest, source, program_index, tmp_path):
+    """The names `program_index` (the index of `source`) files with the kind "import" that the index
+    still binds once every import statement of `source`, at any depth, is replaced by `pass`: an
+    import binding that carries a statement other than an import. Asked of the manifest's own
+    _index_module; no walk of statements here."""
+    import ast
+
+    class _NoImports(ast.NodeTransformer):
+        def visit_Import(self, node):
+            return ast.copy_location(ast.Pass(), node)
+
+        visit_ImportFrom = visit_Import
+
+    stripped = ast.unparse(ast.fix_missing_locations(_NoImports().visit(ast.parse(source))))
+    path = tmp_path / (PROGRAM + "_without_imports.py")
+    path.write_text(stripped + "\n", encoding="utf-8")
+    without = manifest._index_module(path)
+    return sorted(name for name, binding in program_index.items()
+                  if binding[0] == "import" and name in without)
+
+
 def _planted_index(manifest, tmp_path, tail):
     """The manifest's index with the program's file read again by the index's own reader, after
     `tail` is appended to its text."""
@@ -209,3 +234,30 @@ def test_no_route_or_entry_point_closure_holds_the_counting_programs_code(tmp_pa
     green = program_code_entries(manifest, surfaces,
                                  _planted_index(manifest, tmp_path, "from math import floor as render"))
     assert green == [], green[:5]
+
+    # the second assertion: no binding of the program that the index files as an import carries a
+    # statement that is not an import
+    real = manifest._binding_index()[PROGRAM]
+    with open(os.path.join(API, PROGRAM + ".py"), encoding="utf-8") as fh:
+        source = fh.read()
+    more = import_bindings_with_more(manifest, source, real, tmp_path)
+    assert more == [], "import bindings of the program that carry a statement other than an import: %r" % more
+    planted_file = tmp_path / (PROGRAM + ".py")
+    for tail in ("sys.tracebacklimit = 0", "sys = None", "sys: object = None",
+                 "def sys():\n    return None"):                      # plants: RED by the name sys
+        planted = _planted_index(manifest, tmp_path, tail)
+        rows = import_bindings_with_more(manifest, planted_file.read_text(encoding="utf-8"),
+                                         planted[PROGRAM], tmp_path)
+        assert rows == ["sys"], (tail, rows)
+    for tail in ("_calibrate_plant = {}\n_calibrate_plant['k'] = 1",   # plants: GREEN
+                 "import os"):
+        planted = _planted_index(manifest, tmp_path, tail)
+        rows = import_bindings_with_more(manifest, planted_file.read_text(encoding="utf-8"),
+                                         planted[PROGRAM], tmp_path)
+        assert rows == [], (tail, rows)
+    # self-check: the index files the first plant under the import binding sys, kind kept
+    planted = _planted_index(manifest, tmp_path, "sys.tracebacklimit = 0")
+    assert (planted[PROGRAM]["sys"][0] == "import"
+            and len(planted[PROGRAM]["sys"][1]) > len(real["sys"][1])), (
+        "the index no longer files a module-level assignment under the import binding its target "
+        "names; derive this assertion again from the manifest's _index_module")
