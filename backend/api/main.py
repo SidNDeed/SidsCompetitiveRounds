@@ -8177,7 +8177,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
-                              qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
+                              review_calibrate_build=_REVIEW_CALIBRATE_BUILD, qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
                               ban_sweep_build=_BAN_SWEEP_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -8255,7 +8255,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               admin_evidence_population=_admin_evidence.population_health_word(),
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
-                              qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
+                              review_calibrate_build=_REVIEW_CALIBRATE_BUILD, qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
                               ban_sweep_build=_BAN_SWEEP_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -87317,3 +87317,19 @@ async def _qapply_reporter_refused(db, lobby, lobby_uuid, g, report) -> bool:
     return bool(rep["late_admitted_at"] is not None or (short and not rep["start_roster"])
                 or (rep["gone_game"] is not None and g > int(rep["gone_game"]))
                 or g in [int(x) for x in (rep["lag_games"] or [])])
+
+
+# ── the counting tool's build marker (the rules lane) ────────────────────────
+# Release-train verification plumbing, not a design mechanism: the build marker
+# of the counting tool, reported on /health as `review_calibrate_build`. 1 = this
+# build carries backend/api/review_calibrate.py, the counting tool that stands
+# beside this file in backend/api and is run from the command line in the api
+# container. The app does not import it: no route, no startup step and no other
+# health word reads the tool, so its presence changes no answer of the app. It
+# names build identity only: the tool has no route, so without this key the
+# train could not tell a refreshed box from a stale one (learnings 780, 794,
+# 1186). A code constant, equal on both boxes by construction, probed by the
+# release train and read by nothing else (#306). Absent on any build before it.
+# Defined at the end of the module, so nothing above it in main.py moves; the
+# health route reads it at request time.
+_REVIEW_CALIBRATE_BUILD = 1
