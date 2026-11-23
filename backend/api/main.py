@@ -47155,7 +47155,7 @@ def _deletion_bounded(fn):
     params = _inspect.signature(fn)
 
     @_functools.wraps(fn)
-    async def bounded(*args, **kwargs):
+    async def _deletion_bounded_attempts(*args, **kwargs):
         bound = params.bind_partial(*args, **kwargs)
         arrived = bound.arguments.get("_arrived")
         if not isinstance(arrived, (int, float)):   # called directly: no dependency ran
@@ -47211,7 +47211,7 @@ def _deletion_bounded(fn):
             print(f"[PRIVACY] deletion attempt {attempt} met a held {signal.what}; "
                   f"{left:.1f}s left, next attempt after {pause:.2f}s")
             await asyncio.sleep(pause)
-    return bounded
+    return _deletion_bounded_attempts
 
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
