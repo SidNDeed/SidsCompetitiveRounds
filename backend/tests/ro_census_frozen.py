@@ -2166,8 +2166,8 @@ for _k, _v in R11_COARSE_FROZEN.items():
 # dsntext postgresql_readonly), 361 to 365, and its one complete form and its
 # one round-10 form below, which bring the total from 873 to 879. The
 # FROZEN_COUNT figures that the later blocks' comments give (855, 856, 860,
-# 867, with the coarse 365; 873, with the coarse 361) are the figures at those
-# blocks' own edits.
+# 867, with the coarse 365; 865 and 873, with the coarse 361) are the figures
+# at those blocks' own edits.
 COARSE_COUNT = 365
 COMPLETE_COUNT = 219
 # Hand edit at the round-9 merge (W30b; the ro child's question 1; reviewed

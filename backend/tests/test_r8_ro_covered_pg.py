@@ -1423,9 +1423,10 @@ def test_census_refuses_incomplete_opener_form(name):
 def test_census_complete_layer_frozen_whole():
     """G1: the complete layer is frozen for every census file, holds no
     refuse form, and each declared FORWARDING exception is frozen exactly
-    once as a call; the count is the coarse 361 (363, plus the two coarse forms
+    once as a call; the count is the coarse 365 (363, plus the two coarse forms
     of the round-11 merge, re-frozen once from the seat derivation, less the
-    four the bot text escape took out by hand), plus the
+    four the bot text escape took out by hand, plus the four coarse forms of
+    the snapshot reader's builder, frozen by hand), plus the
     one coarse form of the B10 merge (B10_MERGE_FROZEN, frozen by hand), plus
     the one coarse form of migration 415's change (MAIL_SEND_RECEIPTS_FROZEN,
     frozen by hand), plus the four coarse forms of migration 416's change
@@ -1435,7 +1436,9 @@ def test_census_complete_layer_frozen_whole():
     hand), plus the two coarse forms of QAPPLY-1 (QAPPLY_FROZEN) and the one
     coarse form of the ban sweep (BAN_SWEEP_FROZEN), both frozen by hand at
     the stack, plus the complete layer, which also holds the moderator log
-    block's two complete forms and the ban sweep block's five."""
+    block's two complete forms and the ban sweep block's five; the snapshot
+    reader's builder adds one more form to the complete layer and one more of
+    round 10's kinds, both frozen by hand."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1529,7 +1532,7 @@ def test_census_complete_layer_frozen_whole():
                                + fz.B10_MERGE_COUNT + fz.MAIL_SEND_RECEIPTS_COUNT
                                + fz.LOBBY_INVITES_COUNT + fz.BOT_TEXT_ESCAPE_COUNT
                                + fz.QAPPLY_COUNT
-                               + rows_count) == 860 + rows_count
+                               + rows_count) == 866 + rows_count
     assert not [f for k in complete for f in fz.FROZEN[k] if f[0] == "refuse"]
     assert {f[0] for k in complete for f in fz.R10_FROZEN[k]} <= set(R10_KINDS)
     # the declared forwarding wrapper is bound whole, exactly once
