@@ -133,6 +133,7 @@ def test_every_engine_database_py_builds_hides_bound_values():
     import database
     built = {name: getattr(database, name) for name in ENGINES}
     built["make_asm_engine()"] = database.make_asm_engine(UNREACHABLE)
+    built["make_snapshot_reader_engine()"] = database.make_snapshot_reader_engine(UNREACHABLE, lambda: None)
     built.update((k, v) for k, v in vars(database).items() if isinstance(v, AsyncEngine))
     for name, eng in built.items():
         assert eng.sync_engine.hide_parameters is True, name

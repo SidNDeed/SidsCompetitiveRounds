@@ -56,7 +56,7 @@ OPENER_SITE_KINDS = frozenset({"opener", "call", "ref", "refuse", "wrapper", "ar
 # session factories, the session dependencies, the engine builders.
 DATABASE_OPENERS = frozenset({
     "engine", "async_session", "release_engine", "release_session", "asm_engine",
-    "asm_session", "make_asm_engine", "create_async_engine", "get_db",
+    "asm_session", "make_asm_engine", "make_snapshot_reader_engine", "create_async_engine", "get_db",
     "get_release_db", "get_asm_db"})
 # A driver's own opener functions, by the module root they resolve to.
 DRIVER_OPENERS = frozenset({"connect", "create_pool", "create_async_engine", "create_engine",
