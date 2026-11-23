@@ -1142,15 +1142,21 @@ _REFUSED_NAMES = frozenset({"builtins", "__builtins__", "__import__", "globals",
 
 def _stream_bindings(src):
     """The names the module text `src` binds to one of _STREAM_MODULES or to
-    an attribute of one, read by ast outside every function and class body
-    (the bodies of an if, try or with outside them are read), as two maps:
-    aliases, name to module, for `import M as N` and for an assignment whose
-    right side is the bare name of one of the modules or of an alias; and
-    members, name to (module, dotted attribute), for `from M import a` with
-    or without `as` and for an assignment whose right side is an attribute
-    chain that begins at one of the modules or at an alias (and `import
-    M.a as N`, the member N of (M, a)). A star import of one of them is the
-    member "*". A module under its own name is in neither map."""
+    an attribute of one, as two maps, read by ast from two kinds of
+    statement wherever one stands outside a function and a class (at the
+    top or inside any other statement): an import, and a plain or an
+    annotated assignment (not an augmented one), read for each plain name
+    that is a target of it. aliases, name to module: `import M as N` with N
+    another name, and an assignment whose right side is the bare name of
+    one of the modules or of an alias read earlier in the text. members,
+    name to (module, dotted attribute): `from M import a` and `from M.x
+    import a`, with or without `as`; `import M.a as N` (the member N of
+    (M, a)); and an assignment whose right side is an attribute chain that
+    begins at one of the modules or at an alias read earlier in the text.
+    A star import of one of them or of a submodule is the member "*".
+    `import M` and `import M.a` without `as` give no entry. _UNREAD_PLANTS
+    holds, one a row, forms that name one of the modules and still give no
+    entry; they are examples, not a closed list."""
     import ast
     aliases, members = {}, {}
 
@@ -1170,11 +1176,14 @@ def _stream_bindings(src):
     def statements(body):
         for s in body:
             yield s
-            if isinstance(s, (ast.If, ast.Try, ast.With)) or type(s).__name__ == "TryStar":
-                for field in ("body", "orelse", "finalbody"):
-                    yield from statements(getattr(s, field, []))
-                for h in getattr(s, "handlers", []):
-                    yield from statements(h.body)
+            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            for _field, value in ast.iter_fields(s):
+                for held in value if isinstance(value, list) else ():
+                    if isinstance(held, ast.stmt):
+                        yield from statements([held])
+                    elif isinstance(getattr(held, "body", None), list):
+                        yield from statements(held.body)
 
     for s in statements(ast.parse(src).body):
         if isinstance(s, ast.Import):
@@ -1252,16 +1261,18 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
     _alt_ or alt_ (16). In none of them does _stream_refusals find a read,
     so a call of print stands only inside _alt_print, and the name builtins
     is not read; of sys, os, traceback, logging and warnings only the
-    attributes _STREAM_READS lists are read. A name main binds outside every
-    function and class to one of those modules or to an attribute of one (an
-    import under another name, a from-import, an assignment) is derived from
-    main.py's text by _stream_bindings and read as the module or refused as
-    a name: none stands today. A
-    stream reached through another module is not read by this test, nor an
-    attribute named by a string at run time (getattr; _alt_table_missing
-    calls it on an exception). LIMIT: a function they call that is named
-    otherwise (the ban helper, alt_signals.py) is not read here; its print()
-    calls are seen by the runtime holder above."""
+    attributes _STREAM_READS lists are read. Of the other names under which
+    main.py's text binds one of those modules or an attribute of one, the
+    test knows those _stream_bindings reads (its docstring says which
+    bindings it reads; _UNREAD_PLANTS holds forms that give no entry):
+    _stream_refusals reads an alias as its module and refuses a member's
+    name unless _STREAM_READS lists its pair, and the member "*" (a star
+    import) fails the test. A stream reached through another module is not
+    read by this test, nor an attribute named by a string at run time
+    (getattr; _alt_table_missing calls it on an exception). LIMIT: a
+    function they call that is named otherwise (the ban helper,
+    alt_signals.py) is not read here; its print() calls are seen by the
+    runtime holder above."""
     import ast
     import inspect
     import logging
@@ -1282,17 +1293,22 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
 def test_the_stream_bound_refuses_each_planted_read_and_admits_an_alt_print_call():
     """The plants of holder H1: each kind of read the bound refuses is found
     by name, and a function that calls only _alt_print and a listed
-    attribute is not. The plants of _stream_bindings: an alias import (in
-    an if body), a from-import under another name (in a try body), an
-    assignment of an attribute and an assignment of an alias's attribute
-    each give their entry; a control text (a module under its own name,
-    another module under an alias, a plain assignment, an alias inside a
-    function) gives two empty maps; a star import is the member "*".
-    Through _stream_refusals with those maps: an unlisted attribute through
-    an alias is refused as "attribute os.write", the alias passed bare as
-    "module name os", a member read as "name w"; getenv through the alias
-    and a member whose pair _STREAM_READS lists are not refused; the same
-    texts with empty maps give no refusal."""
+    attribute is not. The plants of _stream_bindings: each text of
+    _BINDING_PLANTS gives the two maps written beside it; a star import is
+    the member "*"; each text of _UNREAD_PLANTS names one of the modules
+    and gives two empty maps. The nesting plants are made from
+    _NEST_PLANTS, which must hold a text for each statement class of the
+    running ast that has a field named body, orelse, finalbody, handlers or
+    cases, the function and class definitions left out; each text has as
+    many `pass` as its class has such fields; with an alias import in the
+    place of each `pass` in turn the alias is read, and the same text
+    inside a function, an async function and a class gives two empty maps.
+    The rows of _BOUND_PLANTS go end to end: the row's module text is read
+    by _stream_bindings, which must give an entry, and its function text by
+    _stream_refusals with the maps that reading gave; the refusals are the
+    row's, and the same function text with two empty maps gives none."""
+    import ast
+    import textwrap
     plants = (("name print", "def f():\n    print('x')\n"),
               ("name print", "def f():\n    p = print\n    p('x')\n"),
               ("name builtins", "def f():\n    import builtins\n    builtins.print('x')\n"),
@@ -1314,29 +1330,95 @@ def test_the_stream_bound_refuses_each_planted_read_and_admits_an_alt_print_call
     for what, src, want in _BINDING_PLANTS:
         assert _stream_bindings(src) == want, (what, _stream_bindings(src))
     assert _stream_bindings("from os import *\n") == ({}, {"*": ("os", "*")})
-    for what, src, (aliases, members), want in _BOUND_PLANTS:
-        assert _stream_refusals("f", src, set(), aliases, members) == want, what
-        assert _stream_refusals("f", src, set(), {}, {}) == [], what
+    assert _stream_bindings("from os.path import *\n") == ({}, {"*": ("os", "*")})
+    for what, src in _UNREAD_PLANTS:
+        assert any(isinstance(n, ast.Name) and n.id in _STREAM_MODULES for n in ast.walk(ast.parse(src))), what
+        assert _stream_bindings(src) == ({}, {}), (what, _stream_bindings(src))
+    nesting = {c.__name__: c for c in vars(ast).values()
+               if isinstance(c, type) and issubclass(c, ast.stmt) and set(_NEST_FIELDS) & set(c._fields)}
+    assert set(_NEST_SCOPES) <= set(nesting), sorted(nesting)
+    assert set(nesting) - set(_NEST_SCOPES) <= set(_NEST_PLANTS), sorted(nesting)
+    for cls in sorted(set(nesting) - set(_NEST_SCOPES)):
+        parts = _NEST_PLANTS[cls].split("pass")
+        assert type(ast.parse(_NEST_PLANTS[cls]).body[0]) is nesting[cls], cls
+        assert len(parts) - 1 == len(set(_NEST_FIELDS) & set(nesting[cls]._fields)), cls
+        for field in sorted(set(_NEST_FIELDS) & set(nesting[cls]._fields)):
+            held = getattr(ast.parse(_NEST_PLANTS[cls]).body[0], field)
+            held = [s for h in held for s in ([h] if isinstance(h, ast.stmt) else h.body)]
+            assert [type(s) for s in held] == [ast.Pass], (cls, field)
+        for i in range(1, len(parts)):
+            src = "pass".join(parts[:i]) + "import os as o" + "pass".join(parts[i:])
+            assert _stream_bindings(src) == ({"o": "os"}, {}), (cls, i)
+            for head in ("def f():\n", "async def f():\n", "class K:\n"):
+                assert _stream_bindings(head + textwrap.indent(src, "    ")) == ({}, {}), (cls, i, head)
+    for what, mod_src, fn_src, want in _BOUND_PLANTS:
+        aliases, members = _stream_bindings(mod_src)
+        assert aliases or members, what
+        assert _stream_refusals("f", fn_src, set(), aliases, members) == want, what
+        assert _stream_refusals("f", fn_src, set(), {}, {}) == [], what
 
 
 # The binding plants (module texts, each with the maps _stream_bindings must
-# give) and the reads through those maps (function text, maps, refusals).
+# give), the unread forms (module texts that name a module and give no
+# entry), the nesting texts (one for each statement class that can hold
+# statements, the function and class definitions left out, with one `pass`
+# in each place where it holds them) and the reads end to end (module text,
+# function text, refusals).
 _BINDING_PLANTS = (
     ("an alias import", "if True:\n    import os as o\n", ({"o": "os"}, {})),
     ("a from-import under another name", "try:\n    from os import write as w\nexcept ImportError:\n    pass\n",
      ({}, {"w": ("os", "write")})),
+    ("a from-import under its own name", "from os import write\n", ({}, {"write": ("os", "write")})),
+    ("a from-import from a submodule under another name", "from os.path import join as j\n",
+     ({}, {"j": ("os", "path.join")})),
+    ("a submodule import under another name", "import os.path as p\n", ({}, {"p": ("os", "path")})),
+    ("a second name for a module and for an alias", "import os\no = os\np = o\n", ({"o": "os", "p": "os"}, {})),
     ("an assignment of an attribute", "import os\nw = os.write\n", ({}, {"w": ("os", "write")})),
     ("an assignment of an alias's attribute", "import sys as s\nerr = s.stderr\n",
      ({"s": "sys"}, {"err": ("sys", "stderr")})),
-    ("the control", "import os\nimport json as j\nx = 1\ndef f():\n    import os as o\n", ({}, {})),
+    ("a chained and an annotated assignment", "import os\na = b = os.write\nc: object = os\n",
+     ({"c": "os"}, {"a": ("os", "write"), "b": ("os", "write")})),
+    ("the control: forms that give no entry",
+     "import os\nimport os.path\nimport os as os\nimport json as j\nx = 1\ndef f():\n    import os as o\n", ({}, {})),
+    ("a member, and a second name for it that is not followed", "from os import write as w\nn = w\n",
+     ({}, {"w": ("os", "write")})),
 )
+_UNREAD_PLANTS = (
+    ("names in a tuple on the left", "a, b = os, os.write\n"),
+    ("a name in a list on the left", "[c] = [os]\n"),
+    ("a loop's target", "for d in (os,):\n    pass\n"),
+    ("a with's target", "with os as e:\n    pass\n"),
+    ("a match's capture", "match os:\n    case g:\n        pass\n"),
+    ("a walrus", "(h := os)\n"),
+    ("an assignment under a global statement inside a function", "def r():\n    global t\n    t = os\n"),
+    ("a write into the module's namespace by a subscript", "globals()['i'] = os\n"),
+    ("a write into the module's namespace by a call", "globals().update(u=os)\n"),
+    ("an augmented assignment", "q += os\n"),
+    ("a call's result as the right side", "k = os.getcwd()\n"),
+    ("a subscript as the right side", "m = os.environ['K']\n"),
+)
+_NEST_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
+_NEST_SCOPES = ("FunctionDef", "AsyncFunctionDef", "ClassDef")
+_NEST_PLANTS = {
+    "If": "if a:\n    pass\nelse:\n    pass\n",
+    "For": "for x in y:\n    pass\nelse:\n    pass\n",
+    "AsyncFor": "async for x in y:\n    pass\nelse:\n    pass\n",
+    "While": "while a:\n    pass\nelse:\n    pass\n",
+    "With": "with a:\n    pass\n",
+    "AsyncWith": "async with a:\n    pass\n",
+    "Try": "try:\n    pass\nexcept E:\n    pass\nelse:\n    pass\nfinally:\n    pass\n",
+    "TryStar": "try:\n    pass\nexcept* E:\n    pass\nelse:\n    pass\nfinally:\n    pass\n",
+    "Match": "match a:\n    case 1:\n        pass\n",
+}
 _BOUND_PLANTS = (
-    ("an unlisted attribute through an alias", "def f():\n    o.write(2, b'x')\n",
-     ({"o": "os"}, {}), [(2, "attribute os.write")]),
-    ("the alias passed bare", "def f():\n    getattr(o, 'write')\n", ({"o": "os"}, {}), [(2, "module name os")]),
-    ("a member read", "def f():\n    w(2, b'x')\n", ({}, {"w": ("os", "write")}), [(2, "name w")]),
-    ("getenv through the alias", "def f():\n    return o.getenv('K')\n", ({"o": "os"}, {}), []),
-    ("a listed member read", "def f():\n    return g('K')\n", ({}, {"g": ("os", "getenv")}), []),
+    ("an unlisted attribute through an alias", "import os as o\n", "def f():\n    o.write(2, b'x')\n",
+     [(2, "attribute os.write")]),
+    ("the alias passed bare", "import os as o\n", "def f():\n    getattr(o, 'write')\n", [(2, "module name os")]),
+    ("a member read", "from os import write as w\n", "def f():\n    w(2, b'x')\n", [(2, "name w")]),
+    ("getenv through the alias, and beside it an unlisted attribute", "import os as o\n",
+     "def f():\n    o.getenv('K')\n    o.write(2, b'x')\n", [(3, "attribute os.write")]),
+    ("a listed member read, and beside it an unlisted one", "from os import getenv as g, write as w\n",
+     "def f():\n    g('K')\n    w(2, b'x')\n", [(3, "name w")]),
 )
 
 
