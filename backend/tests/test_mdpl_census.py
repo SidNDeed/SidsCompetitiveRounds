@@ -26,12 +26,15 @@ drop by dynamic SQL are read from each migration's own lookup. The reader
 holds a plain INSERT without a wait; that the deletion's plain inserts cannot
 wait (gold_transactions alone, keyed by its generated id) is read here too.
 
-STACK-SEAM-1 has two guards here. The owed judgements are held fixed by
-key: the sites whose "why" opens with "OWED under " are exactly
-OWED_SITES, _qapply_credit's three, and one is added or taken out only by
-a change of that test. The pin reads the client's string literals: no
-statement of a .cs file under plugin/ builds the quarantine's credit path,
-the precondition the owed sentence names.
+STACK-SEAM-1 has two guards here. No judgement is owed at this tip: the
+sites whose "why" opens with "OWED under " are exactly OWED_SITES, the
+empty set, and one is added only by a change of that test. _qapply_credit's
+three were owed until main's STACK-SEAM-1 met this lane: the function takes
+each listed player's identity key and makes the ban read through
+_ban_lock_and_gate before its first read of a players row, and that read
+leaves out a deleted account. The pin reads the client's string literals:
+no statement of a .cs file under plugin/ builds the quarantine's credit
+path; a lane that ships such a control reads this census again.
 
 Pure Python: no database. Refreeze after a reviewed change with
 `python mdpl_census.py --freeze` (it keeps every judgement and writes an
@@ -859,23 +862,22 @@ def test_a_new_entry_at_a_frozen_site_moves_its_record(frozen, src, mutated):
     assert got[site]["class"] == fz["class"], got[site]  # the entry alone moved: red at the comparison
 
 
-# STACK-SEAM-1: the judgements this lane owes. A site whose "why" opens with
+# STACK-SEAM-1: the owed judgements. A site whose "why" opens with
 # "OWED under " is one the census marks as not covered, with the work it waits
 # for named in the sentence. The set is fixed here, by key.
-OWED_SITES = frozenset({
-    "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0",
-    "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0",
-    "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0",
-})
+# None is owed at this tip: _qapply_credit's three were judged met where main's STACK-SEAM-1 met this lane.
+OWED_SITES = frozenset()
 _OWED_HEAD = "OWED under "
 
 
-def _owed_failures(frozen):
-    """The site keys whose "why" opens with "OWED under ", against OWED_SITES, both ways."""
+def _owed_failures(frozen, owed=OWED_SITES):
+    """The site keys whose "why" opens with "OWED under ", against the owed set, both ways.
+
+    owed: the keys held as owed; the module's OWED_SITES unless a control passes its own."""
     got = {k for k, d in frozen["sites"].items() if d.get("why", "").startswith(_OWED_HEAD)}
-    out = [f"{k}: an owed judgement not in OWED_SITES" for k in sorted(got - OWED_SITES)]
+    out = [f"{k}: an owed judgement not in OWED_SITES" for k in sorted(got - owed)]
     out += [f"{k}: in OWED_SITES and its why no longer opens with {_OWED_HEAD!r}"
-            for k in sorted(OWED_SITES - got)]
+            for k in sorted(owed - got)]
     return out
 
 
@@ -884,12 +886,13 @@ _OWED_MSG = ("STACK-SEAM-1: the owed judgements of mdpl_census_frozen.json are e
 
 
 def test_the_owed_judgements_are_the_listed_ones(frozen):
-    """STACK-SEAM-1. The credit route of the quarantine (POST
-    /api/v1/admin/quarantine/{qid}/credit, _qapply_credit) writes a credited
-    player's row without that player's identity key; the census judges its
-    three sites OWED. This test holds that set fixed, and the PIN test below
-    holds the precondition the owed sentence names: no shipped control builds
-    the credit path."""
+    """STACK-SEAM-1. The sites of mdpl_census_frozen.json whose "why" opens
+    with "OWED under " are exactly OWED_SITES, the empty set at this tip: the
+    credit route of the quarantine (POST /api/v1/admin/quarantine/{qid}/credit,
+    _qapply_credit) takes each listed player's identity key before it writes
+    that player's row, and its three sites are KEY. This test holds that set
+    fixed, and the PIN test below reads that no shipped control builds the
+    credit path."""
     bad = _owed_failures(frozen)
     assert not bad, (_OWED_MSG, bad)
 
@@ -904,11 +907,20 @@ def test_a_planted_fourth_owed_judgement_is_named(frozen):
 
 
 def test_an_owed_judgement_rewritten_is_named(frozen):
-    """Control: one of the three with its why changed turns the check red."""
+    """A listed owed site whose "why" no longer opens with the owed head is named.
+
+    This control does not use OWED_SITES, which is empty at this tip: on a copy
+    of the frozen record it plants the owed opening on one site, passes that one
+    key as the owed set and reads no failure; then it rewrites the site's "why"
+    and reads the one failure line that names the key."""
     d = copy.deepcopy(frozen)
-    k = sorted(OWED_SITES)[0]
+    # The site: the first key of the record in sorted order.
+    k = sorted(d["sites"])[0]
+    d["sites"][k]["why"] = _OWED_HEAD + "STACK-SEAM-1, planted by the control"
+    assert _owed_failures(d, owed=frozenset({k})) == []
     d["sites"][k]["why"] = "covered, rewritten by the control"
-    assert _owed_failures(d) == [f"{k}: in OWED_SITES and its why no longer opens with {_OWED_HEAD!r}"]
+    assert _owed_failures(d, owed=frozenset({k})) == [
+        f"{k}: in OWED_SITES and its why no longer opens with {_OWED_HEAD!r}"]
 
 
 PLUGIN = os.path.normpath(os.path.join(HERE, "..", "..", "plugin"))
@@ -1057,21 +1069,21 @@ _SHIPPED_ACCEPT = ('            string url = $"{baseUrl}/api/v1/admin/quarantine
 
 
 def test_no_shipped_control_builds_the_credit_path():
-    """STACK-SEAM-1, the PIN. The owed judgements of _qapply_credit rest on
-    the credit route answering an admin's request alone: no control in the
-    plugin builds POST /api/v1/admin/quarantine/{qid}/credit. A C# literal
+    """STACK-SEAM-1, the PIN. No control in the plugin builds POST
+    /api/v1/admin/quarantine/{qid}/credit; a lane that ships such a control
+    reads this census again. A C# literal
     reader over every .cs file under plugin/ ("...", @"...", $"...", $@"...",
     literals nested in a hole; comments skipped) trips on a statement that
     holds "admin/quarantine" and a literal ending in "/credit" (or "/credit"
     then "?", "/" or a hole). Its limit: it sees literals within one statement, so a
-    path built from a variable that holds "credit" is not seen; the item's
-    precondition stays a reading at the lane that builds the control."""
+    path built from a variable that holds "credit" is not seen; such a path
+    stays a reading at the lane that builds the control."""
     found = []
     for path in _plugin_cs_files():
         for line, lit in _credit_path_trips(_cs_text(path)):
             found.append(f"{os.path.relpath(path, os.path.dirname(PLUGIN))}:{line}: {lit!r}")
     assert not found, ("STACK-SEAM-1: a plugin statement builds the quarantine's credit path; "
-                       "the owed judgements of _qapply_credit must be met first", found)
+                       "a lane that ships such a control reads the census again", found)
 
 
 def test_the_pin_reads_the_shipped_accept_statement_as_no_credit_path():

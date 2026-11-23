@@ -1521,7 +1521,8 @@
    "phases": []
   },
   "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = each listed player's: _qapply_credit runs _ban_lock_and_gate over the steam id of every listed player and the reporter, shared, before the lobby lock; row = a listed player's own players row: every pid it locks or credits comes from _QAPPLY_SQL_LIVE_PLAYERS, read after the key by those steam ids with deleted_at IS NULL, so when the row is P's the key is P's",
    "entries": [
     "admin_credit_quarantine"
    ],
@@ -1529,11 +1530,12 @@
    "held": [
     "ffa_lobbies"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
-   ],
-   "why": "OWED under STACK-SEAM-1, not covered: neither the credit route (POST /api/v1/admin/quarantine/{qid}/credit), which calls this function, nor the function takes the credited player's identity key or reads the player's row again by id before this statement. At this tip the route answers an admin's request alone; before any control that reaches the route ships, the route takes each credited player's identity key, reads the row again by id and makes the ban read."
+   ]
   },
   "_qapply_credit | UPDATE match_report_quarantine SET status = 'credited', reviewed_at = NO | 0": {
    "class": "CLEAR",
@@ -1546,7 +1548,8 @@
    "phases": []
   },
   "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = each listed player's: _qapply_credit runs _ban_lock_and_gate over the steam id of every listed player and the reporter, shared, before the lobby lock; row = a listed player's own players row: every pid it locks or credits comes from _QAPPLY_SQL_LIVE_PLAYERS, read after the key by those steam ids with deleted_at IS NULL, so when the row is P's the key is P's",
    "entries": [
     "admin_credit_quarantine"
    ],
@@ -1555,14 +1558,16 @@
     "ffa_lobbies",
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
-   ],
-   "why": "OWED under STACK-SEAM-1, not covered: neither the credit route (POST /api/v1/admin/quarantine/{qid}/credit), which calls this function, nor the function takes the credited player's identity key or reads the player's row again by id before this statement. At this tip the route answers an admin's request alone; before any control that reaches the route ships, the route takes each credited player's identity key, reads the row again by id and makes the ban read."
+   ]
   },
   "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0": {
-   "class": "READ",
+   "class": "KEY",
+   "covers": "key = each listed player's: _qapply_credit runs _ban_lock_and_gate over the steam id of every listed player and the reporter, shared, before the lobby lock; row = a listed player's own players row: every pid it locks or credits comes from _QAPPLY_SQL_LIVE_PLAYERS, read after the key by those steam ids with deleted_at IS NULL, so when the row is P's the key is P's",
    "entries": [
     "admin_credit_quarantine"
    ],
@@ -1571,11 +1576,12 @@
     "ffa_lobbies",
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
-   ],
-   "why": "OWED under STACK-SEAM-1, not covered: neither the credit route (POST /api/v1/admin/quarantine/{qid}/credit), which calls this function, nor the function takes the credited player's identity key or reads the player's row again by id before this statement. At this tip the route answers an admin's request alone; before any control that reaches the route ships, the route takes each credited player's identity key, reads the row again by id and makes the ban read."
+   ]
   },
   "_qapply_finish | UPDATE match_report_quarantine SET status = 'accepted', reviewed_at = NO | 0": {
    "class": "CLEAR",

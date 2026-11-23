@@ -1234,20 +1234,22 @@
    "phases": []
   },
   "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_credit_quarantine"
    ],
    "held": [
     "ffa_lobbies"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
   },
   "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_credit_quarantine"
    ],
@@ -1255,13 +1257,15 @@
     "ffa_lobbies",
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
   },
   "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0": {
-   "class": "READ",
+   "class": "KEY",
    "entries": [
     "admin_credit_quarantine"
    ],
@@ -1269,7 +1273,9 @@
     "ffa_lobbies",
     "players"
    ],
-   "keys": [],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
    "phases": [
     "A"
    ]
