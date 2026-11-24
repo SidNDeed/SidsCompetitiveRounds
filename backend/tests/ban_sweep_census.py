@@ -821,11 +821,10 @@ SINGLE_KEY_TAKERS = {
     ("main", "cancel_lobby_bet"): _ONE,
     ("main", "set_allow_spectators"): _ONE,
     ("main", "_invite_identity_lock"): _ONE,
-    # MDPL-GATE-REREAD-1 (b), round mdplg-r1 F1: P's identity key, SHARED,
-    # bounded, taken once per call for one steam id; its four callers
-    # (toggle_ranked, generate_link_code, unlock_achievement and
-    # admin_grant_achievement, the target's) take the key only through it.
-    ("main", "_identity_key_shared_bounded"): _ONE,
+    # MDPL-GATE-REREAD-1 (b), round mdplg-r2: the four routes of part (b) and
+    # their helper, main._player_deletion_key_shared_bounded, take no identity
+    # key; the helper takes the two-key PLAYER_DELETION_LOCK_CLASS key, another
+    # family, so it is not listed here (test_mdpl_gate_bound_pg.py holds its takers).
     ("tournaments", "signup"): _ONE,
 }
 

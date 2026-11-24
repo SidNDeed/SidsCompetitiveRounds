@@ -194,12 +194,13 @@ def test_r11_res_sweep_production_settings_statements():
     # and the literal names lock_timeout and statement_timeout, both already
     # measured.
     # Both lanes on one tree (claude/mdpl-stack-1120): 23 + 1 + 1 = 25.
-    # Judged, +2 (MDPL-GATE-REREAD-1, round mdplg-r1 F1): the bounded shared
-    # identity key, main._identity_key_shared_bounded: SET LOCAL lock_timeout
+    # Judged, +2 (MDPL-GATE-REREAD-1, round mdplg-r1 F1; renamed in round
+    # mdplg-r2): the bounded shared deletion key wait,
+    # main._player_deletion_key_shared_bounded: SET LOCAL lock_timeout
     # to the bound in milliseconds directly before its one key statement, and
     # SET LOCAL lock_timeout = DEFAULT directly after it, the two forms
     # main._identity_lock_many holds for its barrier. The value is an int()
-    # of the module constant SHARED_IDENTITY_KEY_TIMEOUT_MS, at least 1,
+    # of the module constant PLAYER_DELETION_KEY_TIMEOUT_MS, at least 1,
     # interpolated, never a request input; lock_timeout is a literal name,
     # already measured. The count moves from 25 to 27 for these two and no
     # other reason.

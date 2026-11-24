@@ -1,7 +1,8 @@
 """MDPL-GATE-REREAD-1 (b): four routes read their player with no key, before a
 wait the account deletion can end, and wrote after it from that read. Each now
-takes the player's identity key SHARED before the read (the statement
-_pc_verified_actor and _ban_lock_and_gate take), then reads, then reads the
+takes the player's deletion key SHARED before the read (main's two-key class
+PLAYER_DELETION_LOCK_CLASS, through main._player_deletion_key_shared_bounded;
+no identity key), then reads, then reads the
 row again by id (main._reread_player_or_404, which sends no flush).
 
   route                      the key's id            taken
@@ -12,8 +13,10 @@ row again by id (main._reread_player_or_404, which sends no flush).
 
 On PostgreSQL through inv_pg, with test_mdpl_gate_reread_pg.py's seeds and
 checks (_player, _armed, _spy, _tombstone, _row, _naming). Each scene: a second
-connection H takes P's identity key EXCLUSIVE, as delete_player_data does
-first, and tombstones P's row as delete_player_data does (_tombstone), not yet
+connection H takes P's identity key EXCLUSIVE and then P's deletion key
+EXCLUSIVE, as delete_player_data does first (the deletion key's statement built
+from main's own text, DELETION_KEY_SQL), and tombstones P's row as
+delete_player_data does (_tombstone), not yet
 committed; the route starts and waits on H; H commits. Then, in this order:
 the route answers 404 (admin_grant_achievement with its own "Target player not
 found"); the statement it waited at was the shared key; the read by id ran as
@@ -35,7 +38,7 @@ link code rows, so the mutant waits there and then writes onto the tombstone,
 as the routes did before the key.
 
 Each mutant takes the new key out (inv_pg's rewriting: the statement runs as
-SELECT (hashtext(...)), which takes no lock) and runs its route's test, which
+SELECT (CAST(...), hashtext(...)), which takes no lock) and runs its route's test, which
 must fail at its FIRST assertion, the answer: a 200 for the deleted player
 (lesson 1294 rule 6). The rewriting must have changed exactly one statement,
 the route's key. The control runs every scene without the deletion: each
@@ -63,8 +66,9 @@ have taken out exactly one call, the route's; that premise is checked first
 (lesson 1300 rule 4: a mutant that cut nothing is red on its premise, not on
 the product).
 
-Every route takes one identity key (the admin's is not taken), so no scene
-has a second key whose order could change its outcome.
+Every route takes one key, its player's deletion key (the admin's is not
+taken; no identity key), so no scene has a second key whose order could
+change its outcome.
 """
 
 import asyncio
@@ -91,10 +95,24 @@ from test_mdpl_gate_reread_pg import (  # noqa: E402
 ADMIN_SECRET = "mdpl-reread-b-admin-secret"
 UNLOCK_KEY = "stacked_deck"      # client-detected (CLIENT_UNLOCK_KEYS), pays gold
 GRANT_KEY = "rosetta"            # pays gold; its title item is ACHIEVEMENT_TITLE_SKUS["rosetta"]
-# The new key's statement as it reaches the wire, and the mutant's spelling of
-# it: the same statement, taking no lock.
-SHARED_KEY = "pg_advisory_xact_lock_shared(hashtext("
-NO_KEY = "(hashtext("
+# The new key's statement as it reaches the wire (its two binds as $1 and $2),
+# and the mutant's spelling of it: the same arguments as a row, taking no lock.
+SHARED_KEY = "pg_advisory_xact_lock_shared(CAST("
+NO_KEY = "(CAST("
+
+
+def deletion_key_sql(fn):
+    """The deletion key's statement for a second connection, `fn` over
+    main._PLAYER_DELETION_KEY_ARGS, the module's own text, never a typed key:
+    its binds renamed for asyncpg, $1 the class (main.PLAYER_DELETION_LOCK_CLASS)
+    and $2 the steam id."""
+    args = main._PLAYER_DELETION_KEY_ARGS
+    assert args.count(":cls") == 1 and args.count(":sid") == 1, args
+    return "SELECT %s(%s)" % (fn, args.replace(":cls", "$1").replace(":sid", "$2"))
+
+
+# The deletion key EXCLUSIVE, as delete_player_data takes it after its identity key.
+DELETION_KEY_SQL = deletion_key_sql("pg_advisory_xact_lock")
 
 
 def _sig(canonical, secret=SECRET):
@@ -184,8 +202,26 @@ def _seams(env, tmp_path):
     env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
 
 
+async def _end(*tasks):
+    """Ends the tasks a row started, whatever the row's outcome. A row calls
+    it in a finally, after it released its holders: each task is waited for
+    within BOUND, and what still stands then is cancelled and waited for.
+    The outcomes are gathered, so the ending raises nothing over the row's
+    own error. On the path where every assertion held, the row has read
+    each task's answer before, and this finds them done."""
+    tasks = [t for t in tasks if t is not None]
+    if not tasks:
+        return
+    await asyncio.wait(tasks, timeout=BOUND)
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _scene(env, s, *, delete):
-    """H takes P's identity key exclusive and, with `delete`, tombstones P and
+    """H takes P's identity key exclusive, then P's deletion key exclusive
+    (DELETION_KEY_SQL), and, with `delete`, tombstones P and
     reads P's row and the rows naming P, not yet committed; the route starts
     and waits on H; H commits. Returns (the route's answer, the statement it
     waited at, P's row as H left it, the rows naming P as H left them)."""
@@ -193,16 +229,25 @@ async def _scene(env, s, *, delete):
     holder = await side.fetchval("SELECT pg_backend_pid()")
     await side.execute("BEGIN")
     await side.execute(KEY_SQL, s.p.sid)
+    await side.execute(DELETION_KEY_SQL, main.PLAYER_DELETION_LOCK_CLASS, s.p.sid)
     left = named = None
     if delete:
         await _tombstone(side, s.p)
         left = await _row(side, s.p)
         named = await _naming(side, s)
     task = asyncio.create_task(env.call(s.call))
-    state, w = await _settle(env, task, by=holder)
-    assert state == "waits", ("the route did not wait on the holder", s.route, state, _outcome(task))
-    await side.execute("COMMIT")
-    return await asyncio.wait_for(task, BOUND), (w or {}).get("query") or "", left, named
+    committed = False
+    try:
+        state, w = await _settle(env, task, by=holder)
+        assert state == "waits", ("the route did not wait on the holder", s.route, state, _outcome(task))
+        await side.execute("COMMIT")
+        committed = True
+        return await asyncio.wait_for(task, BOUND), (w or {}).get("query") or "", left, named
+    finally:
+        if not committed:                       # the holder released first, its own error kept below the row's
+            with contextlib.suppress(Exception):
+                await side.execute("ROLLBACK")
+        await _end(task)
 
 
 def _route_case(monkeypatch, tmp_path, route, *, cut=False, record=None):
@@ -396,7 +441,7 @@ def test_mutant_generate_link_code_without_the_read_by_id_stores_a_code(monkeypa
 # -- the control -----------------------------------------------------------------------------------
 
 def test_control_without_the_deletion_every_route_answers_as_before(monkeypatch, tmp_path):
-    """Every scene of the four, H holding P's key and committing nothing: each
+    """Every scene of the four, H holding P's two keys and committing nothing: each
     route waited at its key and answers as before, the read by id run once on
     P's id with nothing pending. Then toggle_ranked for a Steam id never seen:
     it still creates the player under the key; at the read by id the new
