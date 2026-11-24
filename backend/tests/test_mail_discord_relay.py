@@ -1944,11 +1944,15 @@ def test_a_settlement_that_names_no_claim_is_dropped_rather_than_applied():
     # -- one definition, one call, inside a loop over the two buckets. Two
     # call sites would be two places for a looser path to the same statement
     # to appear (#432); the loop is what makes that impossible rather than
-    # merely absent today.
+    # merely absent today. The loop is a for statement or a comprehension:
+    # since MDPL R4 the pairs of both buckets are built in one comprehension
+    # first, so that every row the ack writes is locked in one id-ordered
+    # pass before the first write (_PENDING_DM_ACK_LOCK_SQL).
     assert body.count("_settle_pairs") == 2, (
         "expected one definition and one call site, found %d references"
         % body.count("_settle_pairs"))
-    loops = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, ast.For)
+    loops = [ast.unparse(x) for x in ast.walk(node)
+             if isinstance(x, (ast.For, ast.ListComp, ast.GeneratorExp))
              and "_settle_pairs" in ast.unparse(x)]
     assert len(loops) == 1, loops
     assert "retry_ids" in loops[0] and "not_attempted_ids" in loops[0], loops[0]

@@ -180,8 +180,8 @@ GOLDEN = (
     "- Cedar: 0, 2, 13\n"
     "- Fern: 0, 0, 10\n"
     "Reported by Ash. 1 report.\n"
-    "What you can do: in the Admin tab, Rejected Reports. Accept only marks the report as approved for a "
-    "later ordered replay; it records nothing now. Discard marks it as dismissed. Accept is blocked: "
+    "What you can do: in the Admin tab, Rejected Reports. Accept records the game with its ratings, wins, "
+    "XP and gold. Discard marks it as dismissed. Accept is blocked: "
     "6 players have played rated games since; adding this game now would need a full replay.\n"
     "[c2c2c2c2]\n"
     "\n"
@@ -195,8 +195,8 @@ GOLDEN = (
     "- Birch: 0, 3, 20\n"
     "- Fern: 0, 0, 3\n"
     "Reported by Ash. 1 report.\n"
-    "What you can do: in the Admin tab, Rejected Reports. Accept only marks the report as approved for a "
-    "later ordered replay; it records nothing now. Discard marks it as dismissed. Accept is blocked: "
+    "What you can do: in the Admin tab, Rejected Reports. Accept records the game with its ratings, wins, "
+    "XP and gold. Discard marks it as dismissed. Accept is blocked: "
     "6 players have played rated games since; adding this game now would need a full replay.\n"
     "[c3c3c3c3]")
 
@@ -591,3 +591,19 @@ def test_the_reminder_says_when_it_stopped_counting():
     (msg,) = texts(channel)
     assert msg.startswith("Held game reports: at least 2 games still need a decision (counting stopped: "
                           "1 held report was not yet described)"), msg
+
+def test_r9_the_digest_says_what_accept_does_now():
+    """STACK-SEAM-1 R9: since QAPPLY-1 Accept records the held game (its
+    ratings, wins, XP and gold); the digest says so, and no text of the bot
+    or the api says that Accept records nothing or waits for a later replay.
+    Credit is not named while no control of the bot or the client offers it."""
+    import re
+    ns, _channel, _ = new_bot(FakeFeed(live_feed()))
+    line = ns["QDIG_WHAT_YOU_CAN_DO"]
+    assert "Accept records the game with its ratings, wins, XP and gold." in line, line
+    assert "Credit" not in line, line
+    old = re.compile(r"records nothing now|later ordered replay|approved for a later", re.I)
+    for rel in ("discord_bot.py", os.path.join("api", "main.py")):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", rel), encoding="utf-8") as f:
+            hits = [n for n, s in enumerate(f, 1) if old.search(s)]
+        assert hits == [], ("R9 the old Accept wording is back", rel, hits)

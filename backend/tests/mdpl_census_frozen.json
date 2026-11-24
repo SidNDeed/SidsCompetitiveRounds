@@ -1,0 +1,5143 @@
+{
+ "about": "MDPL point 5: the census of mdpl_census.py, frozen. test_mdpl_census.py computes it again from the source and compares: red on a new statement (site), a new entry at a site, a changed class, a changed step 1 or a new unread statement. A READ site's 'why' is its judgement by hand; a site's class is the highest of its rows.",
+ "bound_iii": "(iii) Circles through a row of another table are not excluded. What one costs is bounded: every wait of the deletion is armed with lock_timeout = min(time left, 0.5 s), below deadlock_timeout (1 s), so PostgreSQL never ends the deletion; a wait that reaches 0.5 s rolls its attempt back whole and the next attempt runs inside the 15 s budget (503 when spent). The other side is ended only when its own wait for P's row began 0.5 to 1 s before the deletion's wait in the circle: one request answered 500 and sent again. No result is lost; the lead forfeit's three tries with no outbox are the narrow case (lane CMPL-ORDER-1, the open partner row of the lock map).",
+ "classes": {
+  "CLEAR": "computed: the entry holds no row the deletion waits for later in that phase",
+  "KEY": "computed: an identity key is taken before the statement and before every held lock",
+  "READ": "a judgement by hand: the site's 'why'",
+  "UPGRADE": "computed: the one held lock that conflicts is a FOR KEY SHARE on a players row (a foreign key naming the player) against the tombstone's upgrade of P's row; the deletion's wait there ends at 0.5 s like any other, bound (iii); scene: test_a_route_that_named_the_player_in_an_insert_and_a_deletion_both_finish"
+ },
+ "scenes": {
+  "test_a_lobby_writer_holding_the_deletion_s_lobby_and_the_deletion_both_finish": "step 4's lobby locks without a wait; controls test_r1h_a_control_with_the_step_4_lock_waiting_the_circle_closes and test_r1h_a_mirror_the_holder_gone_before_the_attempt_answers_200_at_once",
+  "test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends": "phase A, a peer holding a row of another table waits for P's row first and the deletion's wait begins before the peer's deadlock check: the cap ends the deletion's wait, both finish; control test_r1h_option_control_with_waits_of_the_time_left_postgresql_ends_the_peer",
+  "test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish": "phase B, after the tombstone: a route holding P's inbox-revision row names P in an insert; the deletion's wait begins after the route's deadlock check; the cap ends it, both finish; control test_r1h_phase_b_control_with_waits_of_the_time_left_the_deletion_is_ended",
+  "test_a_route_that_named_the_player_in_an_insert_and_a_deletion_both_finish": "the UPGRADE class: control test_r1h_upgrade_control_with_waits_of_the_time_left_the_deletion_is_ended"
+ },
+ "sites": {
+  "_admin_pc_trade_reverse_tx | UPDATE pc_prints SET owner_player_id = CAST(:to AS uuid), acquired_by_tr | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_pc_trade_reverse"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_apply_ban_core | UPDATE players SET pc_collection_public = false, pc_announce = false, pc | 0": {
+   "class": "KEY",
+   "covers": "key = the ban target's: _apply_ban_core keys {\"sid\": target_steam_id}, and admin_ban and _moderation_case_act lock the target with their actor before the core; row = the target's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "internal_moderation_case_act"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_apply_series_rating_pass | RatingHistory(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_apply_series_rating_pass | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_asm_hold_after_gone | INSERT INTO ffa_seat_readmissions (lobby_id, player_id, n, anchor_at, he | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_queue_leave"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_asm_insert_seat_rows | INSERT INTO ffa_assembly_seats (lobby_id, player_id, slot, locked_at, lo | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_asm_reform | INSERT INTO ffa_lobbies ( id, status, photon_room_id, region, player_cou | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_queue_leave",
+    "ffa_queue_poll"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_asm_start_short | UPDATE ffa_lobbies SET host_player_id = :h WHERE id = :lid | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_queue_leave",
+    "ffa_queue_poll"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: when a member leaves or a poll moves an FFA lobby's assembly, it bumps the lobby's invite revisions (_invite_bump: the invitees' inbox-revision rows) and then makes a remaining member the lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards bumps the revisions of the invitees of P's lobbies and deletes P's, so a circle is possible when a co-member's lobby action and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_bind_one_lobby_bet | INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "team_lobby_start"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_bind_one_lobby_bet | INSERT INTO team_bets (player_id, team_series_id, bet_on_team, amount, o | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "team_lobby_start"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_check_steam_session | UPDATE players SET steam_auth_seen_at = COALESCE(steam_auth_seen_at, NOW | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "block_player",
+    "cancel_lobby_bet",
+    "chat_moderate_bridge_unmute",
+    "chat_moderate_delete",
+    "chat_moderate_list_mutes",
+    "chat_moderate_mute",
+    "chat_moderate_mute_by_message",
+    "chat_moderate_unmute",
+    "ffa_lobby_assembly",
+    "ffa_lobby_connect",
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "ffa_lobby_kick",
+    "ffa_lobby_readmit",
+    "ffa_lobby_release",
+    "ffa_lobby_settings",
+    "ffa_lobby_start",
+    "ffa_queue_join",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "ffa_readmit_offer",
+    "invite_accept",
+    "invite_send",
+    "lfp_ping",
+    "match_hold:match_game_start",
+    "match_hold:match_hold_beat",
+    "match_hold:match_hold_bind",
+    "match_hold:match_hold_by_room",
+    "match_hold:match_hold_claim",
+    "match_hold:match_hold_end",
+    "match_hold:match_hold_entered",
+    "match_hold:match_hold_mine",
+    "match_hold:match_hold_open",
+    "match_hold:match_hold_state",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "ovt_lobby_kick",
+    "ovt_lobby_leave",
+    "ovt_lobby_prefs",
+    "ovt_lobby_resolve",
+    "ovt_lobby_settings",
+    "ovt_lobby_start",
+    "ovt_lobby_state",
+    "ovt_queue_join",
+    "ovt_queue_leave",
+    "ovt_queue_poll",
+    "place_bet",
+    "place_discord_bet",
+    "place_discord_ffa_bet",
+    "place_discord_lobby_bet",
+    "place_discord_team_bet",
+    "place_ffa_bet",
+    "place_lobby_bet",
+    "place_team_bet",
+    "presence_ping",
+    "purchase_item",
+    "queue_decline",
+    "queue_join",
+    "queue_leave",
+    "queues_escape",
+    "report_casual_dc",
+    "report_disconnect",
+    "set_active_color",
+    "set_active_cursor_color",
+    "set_active_player_color",
+    "set_active_player_effect",
+    "set_active_title",
+    "set_active_trail",
+    "set_appear_offline",
+    "set_hide_gold",
+    "set_pref_same_cards",
+    "set_show_discord",
+    "submit_ffa_match",
+    "submit_macro_evidence",
+    "submit_match",
+    "submit_ovt_match",
+    "submit_team_match",
+    "team_lobby_create",
+    "team_lobby_join",
+    "team_lobby_kick",
+    "team_lobby_leave",
+    "team_lobby_prefs",
+    "team_lobby_resolve",
+    "team_lobby_settings",
+    "team_lobby_start",
+    "team_lobby_state",
+    "team_queue_join",
+    "team_queue_leave",
+    "team_queue_manual_pick_toggle",
+    "team_queue_poll",
+    "team_queue_preferred_team",
+    "team_queue_ready",
+    "toggle_color",
+    "toggle_nametag_style",
+    "toggle_ranked",
+    "tournaments:force_vote",
+    "tournaments:forfeit_match",
+    "tournaments:play_now",
+    "tournaments:ready",
+    "tournaments:signup",
+    "tournaments:time_vote",
+    "tournaments:unsignup",
+    "unblock_player",
+    "unlock_achievement"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "lobby_invites",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_enrollment_identity_gate | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: P's own request (the session check's stamp of steam_auth_seen_at, reached after the entry's own lobby, invite and queue locks) holds P's lobby, queue, lease or series rows when it writes or locks P's players row, and the deletion of P later deletes or cancels the same rows, so a circle is possible when P's client acts during P's deletion; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_complete_team_series_with_ratings | GlickoRating2v2(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_complete_team_series_with_ratings | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_complete_team_series_with_ratings | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_complete_team_series_with_ratings | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_queue",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ],
+   "why": "key = the whole roster's on one of the function's two callers alone: admin_resolve_team_series runs _ban_lock_and_gate over the four members before its series row lock, but team_series_report_dc runs it over the named leaver and the reporter alone and reads the other members' bans under the series row lock (the integrator's item TEAM-DC-REPORT-ROSTER-KEY-1 would have it key the whole roster before that lock); row = each member's players row, so on the report path when the member is P the key is not P's, and the site is judged at its class without the key, READ: phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, team_gold_ear | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_queue",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ],
+   "why": "key = the whole roster's on one of the function's two callers alone: admin_resolve_team_series runs _ban_lock_and_gate over the four members before its series row lock, but team_series_report_dc runs it over the named leaver and the reporter alone and reads the other members' bans under the series row lock (the integrator's item TEAM-DC-REPORT-ROSTER-KEY-1 would have it key the whole roster before that lock); row = each member's players row, so on the report path when the member is P the key is not P's, and the site is judged at its class without the key, READ: phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_queue",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ],
+   "why": "key = never the bettor's: the function's two callers key the roster, all of it (admin_resolve_team_series) or the leaver and the reporter (team_series_report_dc), and a roster member cannot bet on its own match; row = the bettor's players row, so when the bettor is P the key is not P's, and the site is judged at its class without the key, READ: phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_complete_team_series_with_ratings | UPDATE team_series SET status='completed', winner_team=:wt, completed_at | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_credit_bet_fighter_tax | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_report_dc",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_credit_bet_fighter_tax | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :tax WHERE id | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_report_dc",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_ffa_lobby_create_core | INSERT INTO ffa_lobbies (id, status, player_count, member_ids, host_play | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_lobby_create",
+    "invite_send"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_lobby_enroll_caller | INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "invite_accept",
+    "invite_send"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_report_gate | INSERT INTO ffa_report_journal (lobby_id, game, reporter_id, cls, receiv | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_report_window_settled | INSERT INTO ffa_report_windows (lobby_id, game, opened_at, settle_after, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_grant_achievement_inline | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_grant_achievement_inline | PlayerAchievement(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_grant_achievement_inline | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id  | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_entries",
+    "i18n_portal_sessions",
+    "i18n_proposals",
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and i18n_review holds the reviewed proposal's rows when it grants its proposer an achievement, while the deletion of P rewrites the i18n rows that name P, the same circle when the proposer is P"
+  },
+  "_grant_title_item | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_grant_achievement",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_lease_acquire | INSERT INTO queue_leases (player_id, mode, group_id, generation, acquire | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "invite_accept",
+    "invite_send",
+    "match_hold:match_hold_claim",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "ovt_lobby_start",
+    "ovt_queue_poll",
+    "ovt_series_continuation",
+    "queue_poll",
+    "queue_ready",
+    "team_lobby_create",
+    "team_lobby_join",
+    "team_lobby_start",
+    "team_queue_poll",
+    "team_series_continuation"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_lease_admission_gate | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "invite_accept",
+    "invite_send",
+    "match_hold:match_hold_claim",
+    "match_hold:match_hold_open",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "ovt_lobby_start",
+    "ovt_queue_poll",
+    "ovt_series_continuation",
+    "queue_poll",
+    "queue_ready",
+    "team_lobby_create",
+    "team_lobby_join",
+    "team_lobby_start",
+    "team_queue_poll",
+    "team_series_continuation"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_seat_readmissions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_inbox_rev",
+    "match_seat_holds",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "player_blocks",
+    "players",
+    "queue_blocks",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_enrollment_identity_gate | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: P's own request (the admission gate's FOR NO KEY UPDATE of P's row, reached after the entry's own lobby and queue locks) holds P's lobby, queue, lease or series rows when it writes or locks P's players row, and the deletion of P later deletes or cancels the same rows, so a circle is possible when P's client acts during P's deletion; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the same lock, reached by an invite action after it wrote the invite's inbox-revision or recipient rows, waits for the deletion, which then deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_lobby_create_core | INSERT INTO {?d:lobbies} (id, status, player_count, member_ids, host_pla | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "invite_send",
+    "ovt_lobby_create",
+    "team_lobby_create"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_lobby_enroll_caller | INSERT INTO {?d:queue} (player_id, steam_id, display_name, rating, ratin | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "invite_accept",
+    "invite_send",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "team_lobby_create",
+    "team_lobby_join"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_lobby_seat_left_core | UPDATE {?t:ffa_lobbies|ovt_lobbies|team_lobbies} SET host_player_id = :h | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "internal_moderation_case_act",
+    "ovt_lobby_leave",
+    "team_lobby_leave"
+   ],
+   "fallback": "READ",
+   "held": [
+    "moderation_cases"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the actor's and the subject's: a ban and a moderation case's act lock those two identities (_identity_lock_many through _mail_lock_identities) before the case row and the ban core; row = the lobby's new host's players row (host_player_id, a foreign key: FOR KEY SHARE on a remaining member's row), so when the new host is P the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone the host update waits for the deletion while the route's transaction holds the case's row, and the deletion afterwards updates the cases that name P, so a circle is possible when the host of P's lobby is banned and the host passes to P during P's deletion; the route also holds the lobby's row (its caller's lock: the ban core's FOR NO KEY UPDATE at main.py:51692, and the leave entries' FOR UPDATE through _lock_queue_group_for_player, :19019, from _lobby_leave_impl :62007 and ffa_queue_leave :64398; lines at 6fe44c5d), and that pair makes no circle: the deletion takes P's lobby rows before its tombstone and without a wait (take-or-yield: a held one ends the attempt), so the host update's key share waits only once the deletion already holds P's lobbies; the three leave entries hold the lobby's row alone; whichever of the two takes the lobby first, the stored host is not left on the deleted account: the deletion passes the host on when it finds P stored (:47646-47648, :47681-47683), and a route that waited reads the members after P's queue row is gone; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_lobby_start_common | UPDATE {?d:lobbies} SET host_player_id=:h WHERE id=:lid | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's: _lobby_start_common runs _identity_lock_many over the roster and the caller before the update; row = the new host's players row (host_player_id's foreign key), and the update runs only when the effective host is the caller (_fail answers 403 otherwise), so when the row is P's the key is P's",
+   "entries": [
+    "ovt_lobby_start",
+    "team_lobby_start"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_censor_or_raise | INSERT INTO mail_censor_hits (sender_id) VALUES (:sid) | 0": {
+   "class": "KEY",
+   "covers": "key = the sender's: mail_send and _mail_reply_core lock their caller through _mail_lock_identities; row = the sender's players row (mail_censor_hits.sender_id, the statement's only players reference), so when the row is P's the key is P's",
+   "entries": [
+    "mail_reply",
+    "mail_send"
+   ],
+   "fallback": "READ",
+   "held": [
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_finish_send | INSERT INTO mail_inbox_rev (recipient_id, rev) SELECT r.recipient_id, 1  | 0": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_send"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "moderation_cases"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the sender's alone: mail_send and _mail_reply_core lock only their caller's identity (_mail_lock_identities over me); rows = each recipient's players row (mail_inbox_rev.recipient_id, FOR KEY SHARE per recipient), so when a recipient is P the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone the insert of P's revision row waits for the deletion while the sender's transaction holds earlier recipients' revision rows and the case it may have opened, and the deletion afterwards bumps or deletes revision rows and updates the cases that name P, so a circle is possible when a message reaches P during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_mail_lock_identities | SELECT id, steam_id, deleted_at FROM players WHERE id = :pid FOR NO KEY  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_ban",
+    "admin_mail_broadcast",
+    "admin_mail_bulk_grant",
+    "admin_mail_bulk_grant_revoke",
+    "admin_moderation_case_act",
+    "admin_unban",
+    "internal_moderation_case_act",
+    "invite_send",
+    "mail_block_add",
+    "mail_block_remove",
+    "mail_reply",
+    "mail_report",
+    "mail_send"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_mail_open_case | INSERT INTO moderation_cases (kind, subject_player_id, reporter_id, mess | 0": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_report",
+    "mail_send"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "moderation_cases"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the caller's alone: mail_send, _mail_reply_core and mail_report lock only their caller's identity; rows = the case's subject's and reporter's players rows (subject_player_id, reporter_id: FOR KEY SHARE), and the subject can be another player (the sender of a reported message), P among them, so the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone a case opened on P waits for the deletion while the route holds revision rows and earlier case rows, and the deletion afterwards bumps or deletes revision rows and updates the cases that name P, so a circle is possible when P's message is reported during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_mail_open_case | INSERT INTO moderation_cases (kind, subject_player_id, reporter_id, mess | 1": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_report",
+    "mail_send"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "moderation_cases"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the caller's alone: mail_send, _mail_reply_core and mail_report lock only their caller's identity; rows = the case's subject's and reporter's players rows (subject_player_id, reporter_id: FOR KEY SHARE), and the subject can be another player (the sender of a reported message), P among them, so the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone a case opened on P waits for the deletion while the route holds revision rows and earlier case rows, and the deletion afterwards bumps or deletes revision rows and updates the cases that name P, so a circle is possible when P's message is reported during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_mail_write_message | INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to,  | 0": {
+   "class": "KEY",
+   "covers": "key = the sender's: mail_send, _mail_reply_core and invite_send lock their caller through _mail_lock_identities; row = the sender's players row (mail_messages.sender_id, the table's only players reference), so when the row is P's the key is P's",
+   "entries": [
+    "invite_send",
+    "mail_reply",
+    "mail_send"
+   ],
+   "fallback": "READ",
+   "held": [
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_write_message | INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) S | 0": {
+   "class": "KEY",
+   "entries": [
+    "invite_send",
+    "mail_reply",
+    "mail_send"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "moderation_cases"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the sender's alone: mail_send, _mail_reply_core and invite_send lock only their caller's identity; rows = each recipient's players row (mail_recipients.recipient_id, FOR KEY SHARE), so when a recipient is P the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone the insert of P's recipient row waits for the deletion while the sender's transaction holds earlier revision and case rows, and the deletion afterwards deletes P's recipient and revision rows and updates the cases that name P, so a circle is possible when a message or an invite reaches P during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_mark_mod_seen | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_join",
+    "series_preflight",
+    "submit_bug_report",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked",
+    "unlock_achievement"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_mark_mod_seen | ORM player.active_title_id = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_join",
+    "series_preflight",
+    "submit_bug_report",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked",
+    "unlock_achievement"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: in the team report (submit_team_match through _settle_team_report) it stamps the reporter's own players row (mod version, seen time, active title) while holding the team game's report window, journal, seat-hold and series rows; match_hold._guard_identities takes every party's identity key before any of those rows, but the reporter's session stamp locks the reporter's players row before that key, so a circle is possible when the reporter is P (at P's key or P's row); bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; its other entries hold nothing there or only a FOR KEY SHARE on a players row (the UPGRADE case)"
+  },
+  "_mark_mod_seen | ORM player.mod_seen_at = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_join",
+    "series_preflight",
+    "submit_bug_report",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked",
+    "unlock_achievement"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: in the team report (submit_team_match through _settle_team_report) it stamps the reporter's own players row (mod version, seen time, active title) while holding the team game's report window, journal, seat-hold and series rows; match_hold._guard_identities takes every party's identity key before any of those rows, but the reporter's session stamp locks the reporter's players row before that key, so a circle is possible when the reporter is P (at P's key or P's row); bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; its other entries hold nothing there or only a FOR KEY SHARE on a players row (the UPGRADE case)"
+  },
+  "_mark_mod_seen | ORM player.mod_version = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_join",
+    "series_preflight",
+    "submit_bug_report",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked",
+    "unlock_achievement"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: in the team report (submit_team_match through _settle_team_report) it stamps the reporter's own players row (mod version, seen time, active title) while holding the team game's report window, journal, seat-hold and series rows; match_hold._guard_identities takes every party's identity key before any of those rows, but the reporter's session stamp locks the reporter's players row before that key, so a circle is possible when the reporter is P (at P's key or P's row); bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; its other entries hold nothing there or only a FOR KEY SHARE on a players row (the UPGRADE case)"
+  },
+  "_maybe_grant_level_rewards | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_maybe_grant_level_rewards | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_claim_daily | INSERT INTO pc_daily_claims (player_id, claimed_on) VALUES (CAST(:pid AS | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_daily",
+    "pc_daily_claim"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_claim_daily | INSERT INTO pc_packs (player_id, source, reference_id, status) VALUES (C | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_daily",
+    "pc_daily_claim"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_claim_daily | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_daily",
+    "pc_daily_claim"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_clear_portrait_unit | SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players WHERE  | 0": {
+   "class": "KEY",
+   "covers": "key = the target's: admin_pc_portrait_clear keys the steam id it then resolves to the player whose portrait it clears; row = that player's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "admin_pc_portrait_clear"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)"
+   ],
+   "keys": [
+    "admin_pc_portrait_clear | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_clear_portrait_unit | UPDATE players SET {?} WHERE id = CAST(:pid AS uuid) RETURNING pc_game_p | 0": {
+   "class": "KEY",
+   "covers": "key = the target's: admin_pc_portrait_clear keys the steam id it then resolves to the player whose portrait it clears; row = that player's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "admin_pc_portrait_clear"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)"
+   ],
+   "keys": [
+    "admin_pc_portrait_clear | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_grant_earned_packs | INSERT INTO pc_packs (player_id, source, mode, kind, reference_id, statu | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "_pc_reconcile_earned_packs",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_ovt_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_mint | INSERT INTO pc_cards (subject_player_id, edition_id, variant) VALUES (CA | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_mint | INSERT INTO pc_events (kind, player_id, subject_player_id, print_id, dup | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_mint | INSERT INTO pc_prints (card_id, owner_player_id, snapshot_id, rarity, fo | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_motion_janitor | UPDATE players p SET active_dance_id = NULL WHERE p.id = CAST(:pid AS uu | 0": {
+   "class": "READ",
+   "entries": [
+    "_pc_snapshot_janitor_step"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_delivery_leases",
+    "pc_portrait_nonces",
+    "pc_portraits"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A, no circle: the reader flattens _pc_snapshot_janitor_step into one order and reads this UPDATE as a wait for P's players row with the portrait blob's key (_pc_lock_blob) and P's portrait, lease and nonce rows held; none of that is so. The step commits those locks (M:31499) before it calls _pc_motion_janitor; the helper commits its discovery read (M:35037), then takes P's players row FOR NO KEY UPDATE SKIP LOCKED (M:35042-35044) and runs the UPDATE only when that returned the row (M:35045-35049), committing after each row (M:35051). While the deletion of P holds P's row (from its first write, phase A, and from the tombstone, phase B) the guard skips P and the UPDATE does not run; when the guard got P's row the janitor already owns it, so the UPDATE waits for no one, and the deletion's own wait for that row (its first write) is on a transaction that holds nothing else of P's and ends at the commit after the row; bound (iii) is not needed here; no scene: there is no circle to stage"
+  },
+  "_pc_open_for | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_open_for | INSERT INTO pc_packs (player_id, source, nonce, status, pay, price) VALU | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_open_for | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_open_for | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + CAST(:amt AS i | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_open_for | UPDATE players SET pc_shards = pc_shards - CAST(:amt AS integer) WHERE i | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_claim | WITH due AS ( SELECT p.id FROM players p WHERE p.deleted_at IS NULL AND  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_pc_steam_batch",
+    "_pc_steam_prime"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_steam_write | SELECT p.pc_game_portrait_hash AS game_hash, p.pc_steam_portrait_hash AS | 0": {
+   "class": "KEY",
+   "covers": "key = the claimed player's: _pc_steam_write keys claimed[\"steam_id\"]; row = the same claimed player's row (claimed[\"id\"]), so when the row is P's the key is P's",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_fail = 0, pc_steam_avatar_ref = CAS | 0": {
+   "class": "KEY",
+   "covers": "key = the claimed player's: _pc_steam_write keys claimed[\"steam_id\"]; row = the same claimed player's row (claimed[\"id\"]), so when the row is P's the key is P's",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_fail = CAST(:fail AS smallint), pc_ | 0": {
+   "class": "KEY",
+   "covers": "key = the claimed player's: _pc_steam_write keys claimed[\"steam_id\"]; row = the same claimed player's row (claimed[\"id\"]), so when the row is P's the key is P's",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_hash = CAST(:h AS text), pc_steam_a | 0": {
+   "class": "KEY",
+   "covers": "key = the claimed player's: _pc_steam_write keys claimed[\"steam_id\"]; row = the same claimed player's row (claimed[\"id\"]), so when the row is P's the key is P's",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_hash = NULL, pc_steam_avatar_ref =  | 0": {
+   "class": "KEY",
+   "covers": "key = the claimed player's: _pc_steam_write keys claimed[\"steam_id\"]; row = the same claimed player's row (claimed[\"id\"]), so when the row is P's the key is P's",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_trade_accept_tx | UPDATE pc_prints SET owner_player_id = CAST(:to AS uuid), acquired_by_tr | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_accept"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_trade_accept_tx | UPDATE pc_trades SET status = 'executing', closed_by = CAST(:actor AS uu | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_accept"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_trade_close | UPDATE pc_trades SET status = CAST(:state AS text), closed_at = now(), c | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_cancel",
+    "pc_trade_decline"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_trade_lock_players | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_pc_trade_reverse",
+    "pc_trade_accept",
+    "pc_trade_cancel",
+    "pc_trade_decline",
+    "pc_trade_propose"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "judged": "UPGRADE",
+   "keys": [
+    "_pc_verified_actor | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ],
+   "why": "key = the caller's (_pc_verified_actor takes it shared; the deletion takes the same key exclusive, so the two conflict when the caller is P); rows = both parties' players rows, ascending id, FOR NO KEY UPDATE, so when the counterparty is P the key is not P's, and the site is judged at its class without the key, UPGRADE: the one lock a route holds there that the deletion waits for later is pc_trade_accept's FOR KEY SHARE on the caller's own players row (pc_trades.closed_by, the actor) against the tombstone's upgrade of P's row, another row when the caller is not P, and the deletion's wait there ends at the cap whatever the row; bound (iii); scene: test_a_route_that_named_the_player_in_an_insert_and_a_deletion_both_finish"
+  },
+  "_pc_trade_propose_tx | INSERT INTO pc_trade_spent_nonces (proposer, propose_nonce, trade_id) VA | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_propose"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_trade_propose_tx | INSERT INTO pc_trades (id, pair_lo, pair_hi, proposer, a_prints, b_print | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_propose"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_publish_pair_sitting | INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id) VAL | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_poll",
+    "queue_ready",
+    "series_preflight",
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "KEY",
+   "covers": "key = each listed player's: _qapply_credit runs _ban_lock_and_gate over the steam id of every listed player and the reporter, shared, before the lobby lock; row = a listed player's own players row: every pid it locks or credits comes from _QAPPLY_SQL_LIVE_PLAYERS, read after the key by those steam ids with deleted_at IS NULL, so when the row is P's the key is P's",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_credit | UPDATE match_report_quarantine SET status = 'credited', reviewed_at = NO | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0": {
+   "class": "KEY",
+   "covers": "key = each listed player's: _qapply_credit runs _ban_lock_and_gate over the steam id of every listed player and the reporter, shared, before the lobby lock; row = a listed player's own players row: every pid it locks or credits comes from _QAPPLY_SQL_LIVE_PLAYERS, read after the key by those steam ids with deleted_at IS NULL, so when the row is P's the key is P's",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0": {
+   "class": "KEY",
+   "covers": "key = each listed player's: _qapply_credit runs _ban_lock_and_gate over the steam id of every listed player and the reporter, shared, before the lobby lock; row = a listed player's own players row: every pid it locks or credits comes from _QAPPLY_SQL_LIVE_PLAYERS, read after the key by those steam ids with deleted_at IS NULL, so when the row is P's the key is P's",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_finish | UPDATE match_report_quarantine SET status = 'accepted', reviewed_at = NO | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
+    "submit_ffa_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
+    "submit_ffa_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
+    "submit_ffa_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_queue_join_upsert | INSERT INTO ranked_queue (player_id, steam_id, display_name, rating, rat | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_join"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_rdm_attempt | INSERT INTO ffa_readmit_attempts (lobby_id, player_id, n, attempt_no, ki | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "ffa_queue_leave",
+    "ffa_readmit_offer"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: after the tombstone it inserts a row naming a player (FOR KEY SHARE on that players row) while it holds inbox-revision or recipient rows from ending or bumping invites earlier in the same transaction; when the player is P the insert waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a lobby action of a co-member and P's deletion meet on one lobby's invites; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "_reconcile_team_series_bets | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_reconcile_team_series_bets | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_reconcile_team_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_record_seat_attestation | INSERT INTO series_progress (surface, subject_id, player_id, observed_po | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "update_ffa_live_points",
+    "update_live_points",
+    "update_team_live_points"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_region_pings_store_task | INSERT INTO player_region_pings (player_id, pings, measured_at, received | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_region_pings_store_task"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_report_disconnect_once | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "report_disconnect"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_report_disconnect_once | UPDATE players SET ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1 WH | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "report_disconnect"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_return_stake_exactly | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_series",
+    "admin_reverse_team_series",
+    "cancel_lobby_bet",
+    "ffa_lobby_assembly",
+    "ffa_lobby_connect",
+    "ffa_lobby_readmit",
+    "ffa_lobby_release",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "get_active_series",
+    "internal_moderation_case_act",
+    "ovt_lobby_leave",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "submit_match",
+    "team_lobby_leave",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_return_stake_exactly | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS i | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_series",
+    "admin_reverse_team_series",
+    "cancel_lobby_bet",
+    "ffa_lobby_assembly",
+    "ffa_lobby_connect",
+    "ffa_lobby_readmit",
+    "ffa_lobby_release",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "get_active_series",
+    "internal_moderation_case_act",
+    "ovt_lobby_leave",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "submit_match",
+    "team_lobby_leave",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "cancel_lobby_bet | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_reverse_match_gold_xp | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_reverse_match_gold_xp | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_reverse_match_gold_xp | ORM player_obj.total_xp = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_reverse_match_gold_xp | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_reverse_match_gold_xp | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 1": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_ffa_bets_for_game | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_settle_ffa_bets_for_game | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_settle_ffa_bets_for_game | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "_settle_ovt_report | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | INSERT INTO glicko_ratings_1v2 (player_id, completed_series, solo_games, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | INSERT INTO ovt_match_cards (match_id, player_id, card_name, pick_order) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id, sol | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | UPDATE ovt_series SET solo_id = :solo, duo_a_id = :da, duo_b_id = :db WH | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "ovt_series",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; its two-argument key is the OVT room key (class OVT_REPORT_ROOM_LOCK_CLASS, 391120), which shares only its form with the deletion's portrait blob key (class PC_P_LOCK_CLASS, 770902): two keys of different classes never conflict"
+  },
+  "_settle_series_bets | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | GlickoRating2v2(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 3": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_settle_team_report | TeamMatch(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | TeamMatchCard(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | TeamMatchTelemetry(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :p WHERE id  | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, team_gold | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, team_gold | 1": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_settle_team_report | UPDATE players SET total_xp = COALESCE(total_xp,0) + :delta, team_xp_ear | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "_settle_team_report | UPDATE team_series SET t1a_id=:t1a, t1b_id=:t1b, t2a_id=:t2a, t2b_id=:t2 | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_sync_podium_holders | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_sync_podium_holders"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_sync_podium_holders | UPDATE players p SET active_title_id = NULL FROM shop_items si WHERE si. | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "_sync_podium_holders"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_team_dc_fallback_sweep_once | UPDATE team_series SET status = 'dc_incomplete', dc_player_id = COALESCE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_dc_fallback_sweep_loop"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_discard_quarantine | UPDATE match_report_quarantine SET status='discarded', reviewed_at=NOW() | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_discard_quarantine"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_ffa_g3_seat | INSERT INTO ffa_g3_seats (player_id, added_at, expires_at) VALUES (:pid, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_ffa_g3_seat"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | PlayerAchievement(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "KEY",
+   "covers": "key = the target's: admin_grant_achievement keys req.target_steam_id (shared) after the admin check and before the target read; row = the target it then reads by that steam_id and again by id, whose gold it credits, so when the row is P's the key is P's",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_mail_broadcast | INSERT INTO mail_inbox_rev (recipient_id, rev) SELECT r.recipient_id, 1  | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_mail_broadcast"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the sending admin's alone (_mail_lock_admin); rows = every recipient's players row, every player's for a broadcast (FOR KEY SHARE per row), so the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone the broadcast's insert of P's revision row waits for the deletion while it holds the revision rows of the recipients before P, and the deletion afterwards bumps the revisions of the invitees of P's lobbies and deletes P's, so a circle is possible when a broadcast goes out during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "admin_mail_broadcast | INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to,  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_mail_broadcast"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_mail_broadcast | INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) S | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_mail_broadcast"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "judged": "READ",
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ],
+   "why": "key = the sending admin's alone (_mail_lock_admin); rows = every recipient's players row, every player's for a broadcast (FOR KEY SHARE per row), so the key is not P's, and the site is judged at its class without the key, READ: phase B, after P's tombstone the broadcast's insert of P's recipient row waits for the deletion while it holds the revision rows of the recipients before P, and the deletion afterwards bumps the revisions of the invitees of P's lobbies and deletes P's, so a circle is possible when a broadcast goes out during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "admin_rebuild_team_glicko | INSERT INTO glicko_ratings_2v2 (player_id, rating, rating_deviation, vol | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_rebuild_team_glicko"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_rebuild_team_glicko | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_rebuild_team_glicko"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_record_exclude | INSERT INTO record_exclusions (board, match_id, player_id, reason, creat | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_record_exclude"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_series | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_series | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_series | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_reverse_team_series | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_team_series | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "fallback": "READ",
+   "held": [
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "admin_reverse_team_series | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "admin_reverse_team_series | UPDATE players SET team_gold_earned = GREATEST(0, COALESCE(team_gold_ear | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "artist_gift | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "artist_gift"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "auto_logs:upload_auto_log | INSERT INTO bug_reports (id, player_id, steam_id, display_name, mod_vers | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "auto_logs:upload_auto_log"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "block_player | INSERT INTO player_blocks (blocker_id, blocked_id) VALUES (:b, :bl) ON C | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "block_player"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "booster_grant | BoosterGrant(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "booster_grant"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "booster_grant | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "booster_grant"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "booster_grant | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "KEY",
+   "covers": "key = the booster's: booster_grant runs _ban_lock_and_gate over the steam_id of the player it read by discord_id, before the update; row = that player, read again by id directly after the gate, whose gold it credits, so when the row is P's the key is P's",
+   "entries": [
+    "booster_grant"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "card_evidence:_recompute_daily | INSERT INTO card_player_daily (subject_player_id, day, source, coverage, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "card_evidence:games_pass"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "card_evidence:_write_contrib | INSERT INTO card_contrib (stable_game_key, pair_lo, pair_hi, recorder_pl | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "card_evidence:games_pass"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "card_evidence:store_record | INSERT INTO card_evidence (stable_game_key, attach_key, seat_player_id,  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_card_evidence"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "combat_evidence:_reroll_daily | INSERT INTO combat_player_daily (subject_player_id, utc_day, source, cov | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "combat_evidence:games_pass"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "combat_evidence:_write_contributions | INSERT INTO combat_contrib (stable_game_key, pair_lo, pair_hi, subject_p | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "combat_evidence:games_pass"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "combat_evidence:store_record | INSERT INTO combat_evidence (stable_game_key, attach_key, seat_player_id | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_combat_evidence"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ffa_lobby_start | UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_lobby_start"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ffa_queue_join | INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_queue_join"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "generate_link_code | LinkCode(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "generate_link_code"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "get_or_create_player | GlickoRating(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_join",
+    "report_casual_dc",
+    "series_preflight",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "get_or_create_player | ORM player.display_name = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_join",
+    "report_casual_dc",
+    "series_preflight",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: in the team report (submit_team_match through _settle_team_report) it writes the name and last-seen time of each of the game's four players, P's row among them when P plays, while holding the team game's report window, journal, seat-hold and series rows; match_hold._guard_identities takes every party's identity key before any of those rows, but the reporter's session stamp locks the reporter's players row before that key, so a circle is possible when the reporter is P (at P's key or P's row); bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; its other entries hold nothing there or only a FOR KEY SHARE on a players row (the UPGRADE case)"
+  },
+  "get_or_create_player | ORM player.last_seen = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_join",
+    "report_casual_dc",
+    "series_preflight",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked"
+   ],
+   "fallback": "READ",
+   "held": [
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: in the team report (submit_team_match through _settle_team_report) it writes the name and last-seen time of each of the game's four players, P's row among them when P plays, while holding the team game's report window, journal, seat-hold and series rows; match_hold._guard_identities takes every party's identity key before any of those rows, but the reporter's session stamp locks the reporter's players row before that key, so a circle is possible when the reporter is P (at P's key or P's row); bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; its other entries hold nothing there or only a FOR KEY SHARE on a players row (the UPGRADE case)"
+  },
+  "identity_clock_evidence:ice_store_record | INSERT INTO identity_clock_evidence (stable_game_key, attach_key, seat_p | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_identity_clock_evidence"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "internal_pc_lease | INSERT INTO pc_delivery_leases (subject_id, print_id, event_ids, portrai | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_lease"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "invite_send | INSERT INTO lobby_invites (mode, lobby_id, sender_player_id, invitee_pla | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "invite_send"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "link_discord | ORM existing_player.discord_id = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "link_discord"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "link_discord | ORM player.discord_display_name = | 0": {
+   "class": "KEY",
+   "covers": "key = the code's player's: link_discord runs _ban_lock_and_gate over the steam_id of the player the code names (read by id), before the release of the Discord id from any other holder and before this store; row = that player, read again by id directly after the gate, so when the row is P's the key is P's",
+   "entries": [
+    "link_discord"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "link_discord | ORM player.discord_id = | 0": {
+   "class": "KEY",
+   "covers": "key = the code's player's: link_discord runs _ban_lock_and_gate over the steam_id of the player the code names (read by id), before the release of the Discord id from any other holder and before this store; row = that player, read again by id directly after the gate, so when the row is P's the key is P's",
+   "entries": [
+    "link_discord"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "link_discord | ORM player.discord_username = | 0": {
+   "class": "KEY",
+   "covers": "key = the code's player's: link_discord runs _ban_lock_and_gate over the steam_id of the player the code names (read by id), before the release of the Discord id from any other holder and before this store; row = that player, read again by id directly after the gate, so when the row is P's the key is P's",
+   "entries": [
+    "link_discord"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "mail_block_add | INSERT INTO mail_blocks (blocker_id, blocked_id) VALUES (:me, :t) ON CON | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_block_add"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "mail_delete | INSERT INTO mail_inbox_rev (recipient_id, rev) SELECT r.recipient_id, 1  | 0": {
+   "class": "READ",
+   "entries": [
+    "mail_delete"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "pending_dms"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: mail_delete holds the deleted message's recipient rows (P's among them when P received it), its relay rows and revision rows when it inserts each recipient's revision row (FOR KEY SHARE on the recipient's players row); for P that insert waits for the deletion, which then deletes P's recipient rows, so a circle is possible when a sender deletes a message to P during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish"
+  },
+  "mail_discord:mail_relay_pref | SELECT steam_id FROM players WHERE discord_id = :d FOR UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_discord:mail_relay_pref"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "mail_discord:mail_relay_pref | UPDATE players SET mail_discord_relay = :v WHERE discord_id = :d RETURNI | 0": {
+   "class": "READ",
+   "entries": [
+    "mail_discord:mail_relay_pref"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phases A and B, no circle: the route's players statements address the row that holds the Discord id. Turning the relay off, RELAY_OFF_GATE_BY_DISCORD_SQL takes that row FOR UPDATE first and this UPDATE, by the same id, finds the same row (a re-link that moves the id writes the old holder's row first, and that row is held), so it waits for no one; turning it on, this UPDATE is the route's first statement. The deletion waits for another player's row only through a foreign key (a lobby's new host); the route waits for no row but the one that holds the id, and only before it holds anything, so when that row is P's it holds nothing the deletion waits for."
+  },
+  "mail_settings_put | SELECT steam_id FROM players WHERE id = :me FOR UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_settings_put"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "mail_settings_put | UPDATE players SET mail_discord_relay = :r WHERE id = :me | 0": {
+   "class": "READ",
+   "entries": [
+    "mail_settings_put"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phases A and B, no circle: every players statement of the route is on the caller's own row (the session check's stamp; RELAY_OFF_GATE_BY_ID_SQL, FOR UPDATE, when it turns the relay off; its two writes). The deletion waits for another player's row only through a foreign key (a lobby's new host), so a circle needs the route to hold that player's row and then wait for P's; the route waits for no row but the caller's, and only for its first statement on it, holding nothing the deletion waits for (after that it holds the row and this write waits for no one)."
+  },
+  "mail_settings_put | UPDATE players SET mail_from = :v WHERE id = :me | 0": {
+   "class": "READ",
+   "entries": [
+    "mail_settings_put"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phases A and B, no circle: every players statement of the route is on the caller's own row (the session check's stamp; RELAY_OFF_GATE_BY_ID_SQL, FOR UPDATE, when it turns the relay off; its two writes). The deletion waits for another player's row only through a foreign key (a lobby's new host), so a circle needs the route to hold that player's row and then wait for P's; the route waits for no row but the caller's, and only for its first statement on it, holding nothing the deletion waits for (after that it holds the row and this write waits for no one)."
+  },
+  "match_hold:_claim_open_ledger | INSERT INTO match_hold_open_attempts (request_id, room_name, game_id, he | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "match_hold:match_hold_open"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "match_hold:_write_open_attempt | INSERT INTO match_hold_open_attempts (request_id, room_name, game_id, he | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "match_hold:match_hold_open"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "match_hold:match_hold_beat | INSERT INTO match_seat_presence (room_name, player_id, mode, series_id,  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "match_hold:match_hold_beat"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "match_hold:match_hold_open | INSERT INTO match_seat_holds (mode, room_name, series_id, game_id, playe | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "match_hold:match_hold_open"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "match_report_window:_mark_settled | UPDATE match_report_windows SET settled_at = CAST(:now AS timestamptz),  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_report_window_janitor",
+    "match_hold:match_hold_entered",
+    "submit_ovt_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "match_report_window:journal | INSERT INTO match_report_journal (room_name, game_id, reporter_id, mode, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "music_rate | INSERT INTO music_ratings (player_id, sku, track_idx, pending_stars, pen | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "music_rate"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ovt_lobby_start | INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_rank | 0": {
+   "class": "KEY",
+   "covers": "keys = every roster member's and the caller's: _lobby_start_common runs _identity_lock_many over the roster plus the caller; rows = the roster members' players rows (the series' member references), so when a row is P's, P's key is among the keys",
+   "entries": [
+    "ovt_lobby_start"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "ovt_queue_join | INSERT INTO ovt_queue (player_id, steam_id, display_name, rating, rating | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ovt_queue_join"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ovt_queue_poll | INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_rank | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ovt_queue_poll"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ovt_series_continuation | INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_rank | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ovt_series_continuation"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_dance_select | INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS u | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_dance_select"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_dance_select | SELECT p.active_dance_id FROM players p WHERE p.id = CAST(:pid AS uuid)  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_dance_select"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_dance_select | UPDATE players SET active_dance_id = CAST(:item AS bigint) WHERE id = CA | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's: pc_dance_select keys steam_id before _pc_verified_actor resolves the same player; row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_dance_select"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "pc_dance_select | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_discard_batch | INSERT INTO pc_shard_batches (player_id, batch_key, print_ids, prints, s | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_discard_batch"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_discard_batch | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_discard_batch"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_discard_batch | UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer) WHERE | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's, taken shared by _pc_verified_actor (the deletion takes the same key exclusive, so the two conflict); row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_discard_batch"
+   ],
+   "fallback": "READ",
+   "held": [
+    "pc_delivery_leases"
+   ],
+   "keys": [
+    "_pc_verified_actor | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_discard_print | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_discard_print"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_discard_print | UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer) WHERE | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's, taken shared by _pc_verified_actor (the deletion takes the same key exclusive, so the two conflict); row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_discard_print"
+   ],
+   "fallback": "READ",
+   "held": [
+    "pc_delivery_leases"
+   ],
+   "keys": [
+    "_pc_verified_actor | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_motion_upload | INSERT INTO pc_motions (player_id, motion_hash, source_sha256, bytes, by | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_motion_upload | INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS u | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_motion_upload | SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor, EXTRACT(E | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_motion_upload | SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor, EXTRACT(E | 1": {
+   "class": "KEY",
+   "covers": "key = the caller's: pc_motion_upload keys steam_id before _pc_verified_actor resolves the same player; row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "fallback": "READ",
+   "held": [
+    "pc_motions",
+    "players"
+   ],
+   "keys": [
+    "pc_motion_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_motion_upload | UPDATE players SET pc_motion_at = now(), pc_motion_day_count = CASE WHEN | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's: pc_motion_upload keys steam_id before _pc_verified_actor resolves the same player; row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "fallback": "READ",
+   "held": [
+    "pc_motions",
+    "players"
+   ],
+   "keys": [
+    "pc_motion_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_portrait_upload | INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS u | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_portrait_upload"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_portrait_upload | SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor, EXTRACT(E | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's: pc_portrait_upload keys steam_id before _pc_verified_actor resolves the same player; row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_portrait_upload"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)"
+   ],
+   "keys": [
+    "pc_portrait_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_portrait_upload | UPDATE players SET pc_game_portrait_hash = CAST(:h AS text), pc_game_por | 0": {
+   "class": "KEY",
+   "covers": "key = the caller's: pc_portrait_upload keys steam_id before _pc_verified_actor resolves the same player; row = the caller's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "pc_portrait_upload"
+   ],
+   "fallback": "READ",
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits",
+    "players"
+   ],
+   "keys": [
+    "pc_portrait_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_set_setting | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_set_setting"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_set_setting | UPDATE players SET pc_collection_public = (CAST(:value AS integer) = 1), | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_set_setting"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_bet | Bet(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_bet",
+    "place_discord_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_bet",
+    "place_discord_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_bet",
+    "place_discord_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_ffa_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_ffa_bet",
+    "place_ffa_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_ffa_bet | INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_ffa_bet",
+    "place_ffa_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_ffa_bet | UPDATE players SET gold_spent = COALESCE(gold_spent,0) + :amt WHERE id = | 0": {
+   "class": "KEY",
+   "covers": "key = the bettor's: place_ffa_bet runs _ban_lock_and_gate over the request's steam_id (place_discord_ffa_bet passes its linked player's) before it reads the bettor; row = the bettor, read by that steam_id after the gate, whose gold it charges, so when the row is P's the key is P's",
+   "entries": [
+    "place_discord_ffa_bet",
+    "place_ffa_bet"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "place_lobby_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_lobby_bet",
+    "place_lobby_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_lobby_bet | INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_lobby_bet",
+    "place_lobby_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_lobby_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "KEY",
+   "covers": "key = the bettor's: place_lobby_bet (and place_discord_lobby_bet through it) keys steam_id as hashtext(:sid), the same value as the deletion's hashtext(CAST(:sid AS text)) for a text parameter; row = the bettor's own players row, so when the row is P's the key is P's",
+   "entries": [
+    "place_discord_lobby_bet",
+    "place_lobby_bet"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_lobbies",
+    "team_lobbies"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "place_team_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_team_bet",
+    "place_team_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_team_bet | INSERT INTO team_bets (player_id, team_series_id, bet_on_team, amount, o | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_team_bet",
+    "place_team_bet"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_team_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "KEY",
+   "covers": "key = the bettor's: place_team_bet runs _ban_lock_and_gate over the request's steam_id (place_discord_team_bet passes its linked player's) before it reads the bettor; row = the bettor, read by that steam_id after the gate, whose gold it charges, so when the row is P's the key is P's",
+   "entries": [
+    "place_discord_team_bet",
+    "place_team_bet"
+   ],
+   "fallback": "READ",
+   "held": [
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "presence_ping | WITH ok AS ( SELECT EXISTS ( SELECT 1 FROM steam_sessions ss WHERE ss.to | 0": {
+   "class": "READ",
+   "entries": [
+    "presence_ping"
+   ],
+   "fallback": "READ",
+   "held": [
+    "queue_leases",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: P's own request (the presence ping, which renews P's lease and series presence first) holds P's lobby, queue, lease or series rows when it writes or locks P's players row, and the deletion of P later deletes or cancels the same rows, so a circle is possible when P's client acts during P's deletion; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "purchase_item | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "purchase_item | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "purchase_item | PlayerItem(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "purchase_item | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "purchase_item"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "purchase_item | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_cleanup_loop | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "queue_cleanup_loop | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "queue_cleanup_loop | UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the queue cleanup pass, in a loop that ends invites (inbox-revision and recipient rows), makes a remaining member a lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when the pass cleans a lobby of P's during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "queue_cleanup_loop | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "pending_dms",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends; and phase B: the ledger row it writes for a player (an ORM insert, FOR KEY SHARE on that players row) waits for the deletion when the player is P, and the entry may hold inbox-revision or recipient rows from ending invites or sending a notice earlier in the same transaction; the deletion afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when a game of P's settles or is cleaned up during P's deletion; bound (iii); scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "queue_cleanup_loop | UPDATE {?t:ovt_lobbies|team_lobbies} SET host_player_id=:h WHERE id=:lid | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients",
+    "moderation_cases",
+    "pending_dms"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ],
+   "why": "phase B: the queue cleanup pass, in a loop that ends invites (inbox-revision and recipient rows), makes a remaining member a lobby's host (host_player_id, a foreign key: FOR KEY SHARE on that member's players row); when the new host is P after P's tombstone the update waits for the deletion, which afterwards deletes P's recipient and revision rows and bumps the revisions of the invitees of P's lobbies, so a circle is possible when the pass cleans a lobby of P's during P's deletion; bound (iii), the side that can be ended being a background pass whose next pass does the work; scene: test_a_route_holding_the_player_s_inbox_row_after_the_tombstone_and_a_deletion_both_finish No-wait holds (NB_HOLDS): the reader also counts as held, through queue_cleanup_loop's hoist, the moderation_cases and pending_dms rows _mail_purge_due takes FOR NO KEY UPDATE SKIP LOCKED in the loop's mail-retention arm; that arm runs in a session of its own and commits (M:6126) before the loop reaches another arm, and every arm opens its own session, so those rows are never held while this statement waits and they add no circle."
+  },
+  "queue_decline | INSERT INTO queue_blocks (blocker_id, blocked_id, expires_at) VALUES (:b | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_decline"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_join | ORM player.ranked_enabled = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "queue_join"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "queue_poll | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_poll"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_poll | UPDATE ranked_queue SET status = 'matched', matched_with = :opp_id, room | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_poll"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_ready | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_ready"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "report_casual_dc | INSERT INTO casual_dc_events (room_id, leaver_id, reporter_id, game_room | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "report_casual_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "report_casual_dc | UPDATE players SET casual_dc_count = COALESCE(casual_dc_count, 0) + 1 WH | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "report_casual_dc"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "seat_evidence:store_compat | INSERT INTO client_compat_events (player_id, outcome, other_plugin_count | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_compat_outcome"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "seat_evidence:store_record | INSERT INTO seat_evidence (stable_game_key, attach_key, seat_player_id,  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_seat_evidence"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "series_preflight | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "series_preflight"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_active_color | ORM player.active_color_ids = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_active_color"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_allow_spectators | UPDATE players SET allow_spectators = :v WHERE steam_id = :sid | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_allow_spectators"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_appear_offline | ORM player.appear_offline = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_appear_offline"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_discord_username | UPDATE players SET discord_display_name = :d WHERE discord_id = :did | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_discord_username"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_discord_username | UPDATE players SET discord_username = :u WHERE discord_id = :did | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_discord_username"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_hide_gold | ORM player.hide_gold = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_hide_gold"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_player_card_tier | INSERT INTO player_card_tiers (player_id, card_name, filter, tier) VALUE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_player_card_tier"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_pref_same_cards | ORM player.pref_same_cards = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_pref_same_cards"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_show_discord | ORM player.show_discord = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_show_discord"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "steam_auth | UPDATE players SET steam_auth_seen_at = COALESCE(steam_auth_seen_at, NOW | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "steam_auth"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_bug_report | BugReport(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_bug_report"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | GoldTransaction(...) | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_card_offers (match_id, player_id, round_number, card_nam | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_match_cards (match_id, player_id, card_name, card_rarity | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, po | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count, win | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO glicko_ratings_ffa (player_id, rating, rating_deviation, vol | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "submit_ffa_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, ffa_gold_ | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "submit_ffa_match | UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp, ffa_xp_earned  | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: it settles, reverses or cleans up a series, match or lobby that P plays in or hosts, holding that game's rows (its held tables) when it writes each party's players row, P's among them, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open series and lobbies and deletes P's queue rows, leases, seat holds and report rows, so a circle is possible while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "submit_match | CardOffer(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 3": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | Match(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | MatchCard(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | MatchCard(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | ORM loser.casual_win_streak = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM loser.consecutive_sweeps = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM p1.total_xp = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM p2.total_xp = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM reporter.active_seconds_total = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM reporter.blocks_activated = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM reporter.blocks_successful = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM reporter.bullets_fired = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM reporter.bullets_hit = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM reporter.keys_pressed_total = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM winner.casual_win_streak = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | ORM winner.consecutive_sweeps = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 1": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 2": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 3": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET record_bounce_kill = GREATEST(COALESCE(record_bounce_ | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET record_max_health = GREATEST(COALESCE(record_max_heal | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET record_max_single_hit = GREATEST(COALESCE(record_max_ | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "team_lobby_start | INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, was | 0": {
+   "class": "KEY",
+   "covers": "keys = every roster member's and the caller's: _lobby_start_common runs _identity_lock_many over the roster plus the caller; rows = the roster members' players rows (the series' member references), so when a row is P's, P's key is among the keys",
+   "entries": [
+    "team_lobby_start"
+   ],
+   "fallback": "READ",
+   "held": [
+    "mail_inbox_rev"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "team_queue_join | ORM player.ranked_enabled = | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "team_queue_join"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "team_queue_poll | INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, was | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_queue_poll"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "team_series_continuation | INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, was | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_series_continuation"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "team_series_report_dc | INSERT INTO team_matches (series_id, t1a_id, t1b_id, t2a_id, t2b_id, t1_ | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "team_series_report_dc | UPDATE team_series SET status = 'dc_incomplete', dc_player_id = :dpid, d | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_series_report_dc"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "title_ladders:record_completed_games | INSERT INTO title_ladder_credits (player_id, reference_id, line, mode) V | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "title_ladders:record_completed_games | INSERT INTO title_ladder_progress (player_id, line, games, tier) VALUES  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "title_ladders:record_completed_games | INSERT INTO title_ladder_progress (player_id, line, games, tier, streak, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "title_ladders:record_completed_games | SELECT p.active_title_id, si.sku FROM players p LEFT JOIN shop_items si  | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: when a game completes (submit_ffa_match, submit_match, submit_team_match, and the FFA readmission janitor's settlement) it reads and may set the active title of each player of the game while holding that game's rows (its held tables: lobby, queue, seat, report, series and lease rows), P's row among those written when P plays, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open lobbies and series and deletes P's queue, seat, report and lease rows, so a circle is possible while P's own game settles; bound (iii), the janitor's side being a background pass whose next pass does the work; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "title_ladders:record_completed_games | UPDATE players SET active_title_id = si.id FROM shop_items si WHERE si.s | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "match_report_journal",
+    "match_report_windows",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: when a game completes (submit_ffa_match, submit_match, submit_team_match, and the FFA readmission janitor's settlement) it reads and may set the active title of each player of the game while holding that game's rows (its held tables: lobby, queue, seat, report, series and lease rows), P's row among those written when P plays, and the deletion of P, holding P's players row from its first write, later waits on rows of the same tables when it cancels P's open lobbies and series and deletes P's queue, seat, report and lease rows, so a circle is possible while P's own game settles; bound (iii), the janitor's side being a background pass whose next pass does the work; scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "toggle_color | ORM player.active_color_id = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "toggle_color"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "toggle_color | ORM player.active_color_ids = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "toggle_color"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "toggle_nametag_style | ORM player.nametag_style_ids = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "toggle_nametag_style"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "toggle_ranked | ORM player.display_name = | 0": {
+   "class": "KEY",
+   "covers": "key = the player's own: toggle_ranked keys the request's steam_id (shared) as its first statement, before the session check and the player read; row = the player it then reads by that steam_id and again by id, whose name it sets, so when the row is P's the key is P's",
+   "entries": [
+    "toggle_ranked"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "toggle_ranked | ORM player.ranked_enabled = | 0": {
+   "class": "KEY",
+   "covers": "key = the player's own: toggle_ranked keys the request's steam_id (shared) as its first statement, before the session check and the player read; row = the player it then reads (or creates) by that steam_id and reads again by id, whose ranked flag it sets, so when the row is P's the key is P's",
+   "entries": [
+    "toggle_ranked"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "tournaments:_activate_ready_matches | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:_enqueue_completion_notices_inner._ins | INSERT INTO tournament_notices (tournament_id, player_id, notice_type, p | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:_enqueue_match_ready_notices | INSERT INTO tournament_notices (tournament_id, player_id, notice_type, p | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match",
+    "tournaments:play_now"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:_pay_prizes.do_grant | INSERT INTO gold_transactions (player_id, amount, reason, reference_id,  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:_pay_prizes.do_grant | INSERT INTO gold_transactions (player_id, amount, reason, reference_id,  | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:_pay_prizes.do_grant | INSERT INTO gold_transactions (player_id, amount, reason, reference_id,  | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:_pay_prizes.do_grant | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id  | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: when a reported 1v1 match ends a tournament, submit_match pays the tournament's prizes (tournaments._pay_prizes) while holding the match's lease rows and the FOR KEY SHARE locks of its inserts (its held tables) and credits each prize winner's players row, so when P plays that match and wins a prize the entry can hold P's lease row when it waits for P's players row, and the deletion of P, holding P's row from its first write, later deletes P's lease rows: a circle while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "tournaments:_pay_prizes.do_grant | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id  | 1": {
+   "class": "READ",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: when a reported 1v1 match ends a tournament, submit_match pays the tournament's prizes (tournaments._pay_prizes) while holding the match's lease rows and the FOR KEY SHARE locks of its inserts (its held tables) and credits each prize winner's players row, so when P plays that match and wins a prize the entry can hold P's lease row when it waits for P's players row, and the deletion of P, holding P's row from its first write, later deletes P's lease rows: a circle while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "tournaments:_pay_prizes.do_grant | UPDATE players SET gold_earned = gold_earned + :g WHERE id = :pid | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: when a reported 1v1 match ends a tournament, submit_match pays the tournament's prizes (tournaments._pay_prizes) while holding the match's lease rows and the FOR KEY SHARE locks of its inserts (its held tables) and credits each prize winner's players row, so when P plays that match and wins a prize the entry can hold P's lease row when it waits for P's players row, and the deletion of P, holding P's row from its first write, later deletes P's lease rows: a circle while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "tournaments:_pay_prizes.do_grant | UPDATE players SET total_xp = COALESCE(total_xp, 0) + :x WHERE id = :pid | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_match"
+   ],
+   "fallback": "READ",
+   "held": [
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ],
+   "why": "phase A: when a reported 1v1 match ends a tournament, submit_match pays the tournament's prizes (tournaments._pay_prizes) while holding the match's lease rows and the FOR KEY SHARE locks of its inserts (its held tables) and credits each prize winner's players row, so when P plays that match and wins a prize the entry can hold P's lease row when it waits for P's players row, and the deletion of P, holding P's row from its first write, later deletes P's lease rows: a circle while P's own game settles; bound (iii); scene: test_a_peer_that_began_to_wait_first_is_not_the_one_postgresql_ends"
+  },
+  "tournaments:_replace_time_votes | TournamentTimeVote(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "tournaments:signup",
+    "tournaments:time_vote"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:signup | TournamentSignup(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "tournaments:signup"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "tournaments:unsignup | SELECT discord_id FROM players WHERE id = :pid FOR UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "tournaments:unsignup"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "unlock_achievement | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "unlock_achievement"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "unlock_achievement | PlayerAchievement(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "unlock_achievement"
+   ],
+   "fallback": "CLEAR",
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "unlock_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "KEY",
+   "covers": "key = the player's own: unlock_achievement keys the request's steam_id (shared) as its first statement, before the session check and the player read; row = the player it then reads by that steam_id and again by id, whose gold it credits, so when the row is P's the key is P's",
+   "entries": [
+    "unlock_achievement"
+   ],
+   "fallback": "UPGRADE",
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  }
+ },
+ "step1": {
+  "A": [
+   "admin_actions / NO KEY UPDATE",
+   "chat_messages / NO KEY UPDATE",
+   "chat_mutes / NO KEY UPDATE",
+   "deleted_steam_ids / INS",
+   "ffa_assembly_seats / NO KEY UPDATE",
+   "ffa_bets / NO KEY UPDATE",
+   "ffa_lobbies / NO KEY UPDATE",
+   "ffa_queue / NO KEY UPDATE",
+   "ffa_queue / UPDATE",
+   "ffa_readmit_attempts / UPDATE",
+   "ffa_report_journal / NO KEY UPDATE",
+   "ffa_report_journal / UPDATE",
+   "ffa_report_windows / NO KEY UPDATE",
+   "ffa_seat_readmissions / UPDATE",
+   "i18n_entries / NO KEY UPDATE",
+   "i18n_portal_sessions / UPDATE",
+   "i18n_proposals / NO KEY UPDATE",
+   "i18n_review_events / NO KEY UPDATE",
+   "key:770902, hashtext(:p) / KEY",
+   "language_grants / NO KEY UPDATE",
+   "lobby_bets / NO KEY UPDATE",
+   "lobby_invites / NO KEY UPDATE",
+   "mail_blocks / UPDATE",
+   "mail_bulk_grants / NO KEY UPDATE",
+   "mail_bulk_grants / UPDATE",
+   "mail_censor_hits / UPDATE",
+   "mail_inbox_rev / NO KEY UPDATE",
+   "mail_inbox_rev / UPDATE",
+   "mail_recipients / UPDATE",
+   "mail_send_receipts / UPDATE",
+   "match_games / KEY SHARE",
+   "match_hold_attempts / UPDATE",
+   "match_hold_open_attempts / UPDATE",
+   "match_report_journal / NO KEY UPDATE",
+   "match_report_journal / UPDATE",
+   "match_report_windows / INS",
+   "match_report_windows / NO KEY UPDATE",
+   "match_seat_holds / NO KEY UPDATE",
+   "match_seat_holds / UPDATE",
+   "match_seat_presence / NO KEY UPDATE",
+   "match_seat_presence / UPDATE",
+   "moderation_cases / NO KEY UPDATE",
+   "music_ratings / UPDATE",
+   "ovt_lobbies / NO KEY UPDATE",
+   "ovt_queue / NO KEY UPDATE",
+   "ovt_queue / UPDATE",
+   "ovt_series / NO KEY UPDATE",
+   "pc_delivery_leases / UPDATE",
+   "pc_motions / UPDATE",
+   "pc_portrait_nonces / UPDATE",
+   "pc_portraits / NO KEY UPDATE",
+   "pending_dms / UPDATE",
+   "player_blocks / UPDATE",
+   "players / KEY SHARE",
+   "players / UPDATE OWN ROW",
+   "queue_blocks / UPDATE",
+   "queue_leases / UPDATE",
+   "ranked_queue / UPDATE",
+   "steam_sessions / UPDATE",
+   "team_bets / NO KEY UPDATE",
+   "team_lobbies / NO KEY UPDATE",
+   "team_queue / NO KEY UPDATE",
+   "team_queue / UPDATE",
+   "team_series / NO KEY UPDATE"
+  ],
+  "B": [
+   "deleted_steam_ids / INS",
+   "mail_inbox_rev / NO KEY UPDATE",
+   "mail_inbox_rev / UPDATE",
+   "mail_recipients / UPDATE",
+   "moderation_cases / NO KEY UPDATE",
+   "pending_dms / UPDATE",
+   "players / KEY SHARE"
+  ]
+ },
+ "unread": {
+  "_discord_fix_probe | text(_DISCORD_FIX_PROBE)": "no lock: _discord_fix_read returns the one statement among _pc_open_for's string constants that _DISCORD_FIX_READ matches, a SELECT from pc_packs whose pattern ends at the nonce predicate, so it carries no FOR clause and writes nothing (test_mdpl_census pins the pattern)",
+  "_report_rows | text(sql)": "no lock: every caller passes one of the session report's _REPORT_* statements, each a SELECT with no FOR clause, no advisory key and no write (test_mdpl_census reads them all)",
+  "admin_evidence:_section_rows | text(sql)": "no lock: every caller passes one of the section statements admin_evidence builds for the page (keys, records, games, switches, by_match, contrib_keys, daily), each a SELECT with no FOR clause, no advisory key and no write; the module's one write (AUDIT_SQL) runs elsewhere (test_mdpl_census reads them all)",
+  "seat_evidence:sitting_pass | text(sql)": "no lock: the statement is rs.sitting_statement(rule), built by review_measures, whose source holds no FOR clause, no advisory key and no write; the pass's own writes (the dirty marks' DELETE) are separate statements the census reads (test_mdpl_census reads the builder's source)"
+ },
+ "untyped": {
+  "version_gate | ORM request.state.mod_version =": "version_gate is the HTTP middleware (@app.middleware(\"http\")): request.state is Starlette's per-request State object, and the store keeps the X-Mod-Version the request sent on the request itself; no Player object and no column of a players row is written"
+ }
+}

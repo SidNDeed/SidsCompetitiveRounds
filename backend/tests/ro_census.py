@@ -38,7 +38,7 @@ DRIVER_ROOTS = frozenset({"asyncpg", "sqlalchemy", "psycopg", "psycopg2",
 OPENER_NAMES = frozenset({
     "connect", "create_async_engine", "create_engine", "create_pool",
     "connect_bound", "bound_engine", "CaseSchema", "fresh_database",
-    "make_asm_engine", "case", "checkout", "engine_from_config",
+    "make_asm_engine", "make_snapshot_reader_engine", "case", "checkout", "engine_from_config",
     "async_engine_from_config", "_sqlalchemy_create_async_engine", "make_url",
 })
 IDENTITY_KWARGS = frozenset({"user", "username", "password", "role", "options",

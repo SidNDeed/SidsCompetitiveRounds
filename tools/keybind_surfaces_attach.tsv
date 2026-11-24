@@ -1948,6 +1948,7 @@ hop	CombatEvidenceCore.cs:Add#1	24e293655fd5cfe5	CompetitiveUI.cs:DrawInGameChat
 hop	CombatEvidenceCore.cs:Add#1	25c1ab7446a731f8	FfaReadmitRules.cs:GrantMissing	ref>FfaReadmitRules.cs:GrantMissing
 hop	CombatEvidenceCore.cs:Add#1	25cf5ac959dcf3af	FfaAssembly.cs:JsonObjects	ref>FfaAssembly.cs:JsonObjects
 hop	CombatEvidenceCore.cs:Add#1	268cdb18991a2642	NativeUI.Settings.cs:SelfTestA2aCells	ref[case SettingsKind.Switch]>NativeUI.Settings.cs:SelfTestA2aCells
+hop	CombatEvidenceCore.cs:Add#1	26f0e2b4ad92d65a	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	CombatEvidenceCore.cs:Add#1	2708c5fc6585800c	RosterCensusRules.cs:SelfTest	ref>RosterCensusRules.cs:SelfTest
 hop	CombatEvidenceCore.cs:Add#1	271fbe45a7cb7522	PortraitRenderDance.cs:DanceFinished	ref[case DanceUploadResult.Invalid]>PortraitRenderDance.cs:DanceFinished
 hop	CombatEvidenceCore.cs:Add#1	27415f8110f75b0b	PlayerCardMotion.cs:OnAtlas	ref>PlayerCardMotion.cs:OnAtlas
@@ -2428,7 +2429,6 @@ hop	CombatEvidenceCore.cs:Add#1	9a8e3b39c3bf7778	SpectatorTeardownProbe.cs:Snaps
 hop	CombatEvidenceCore.cs:Add#1	9b5e16d9b898e7d0	ApiClient.cs:ParseTitleLadders	ref>ApiClient.cs:ParseTitleLadders
 hop	CombatEvidenceCore.cs:Add#1	9b604ee0d5be43f4	VanillaFixes.cs:TargetMethods#4	ref>VanillaFixes.cs:TargetMethods#4
 hop	CombatEvidenceCore.cs:Add#1	9b91f0dd161cd900	Plugin.cs:BuildDcPlan	ref>Plugin.cs:BuildDcPlan
-hop	CombatEvidenceCore.cs:Add#1	9bdbf3cceb276075	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	CombatEvidenceCore.cs:Add#1	9be55a05a10c75ad	CustomCosmetics.cs:ArtDownloadWorker	ref>CustomCosmetics.cs:ArtDownloadWorker
 hop	CombatEvidenceCore.cs:Add#1	9c7bc7aa17754a42	PcQuickShardRules.cs:PackDupes	ref>PcQuickShardRules.cs:PackDupes
 hop	CombatEvidenceCore.cs:Add#1	9cb26f0915dbe53e	RosterCensusRules.cs:LatchesToRelease	ref>RosterCensusRules.cs:LatchesToRelease
@@ -2922,7 +2922,6 @@ hop	CombatEvidenceCore.cs:Add#2	13a122782213d084	NativeUI.cs:CollectSpectateLive
 hop	CombatEvidenceCore.cs:Add#2	13a29a05b0713fcf	DanceMotionCore.cs:SelfCheck	ref>DanceMotionCore.cs:SelfCheck
 hop	CombatEvidenceCore.cs:Add#2	13baaec8b708abbd	ApiClient.cs:ParseAdminUsers	ref>ApiClient.cs:ParseAdminUsers
 hop	CombatEvidenceCore.cs:Add#2	13c861035b55c428	NativeUI.cs:GetOrCreateLiveRow	ref>NativeUI.cs:GetOrCreateLiveRow
-hop	CombatEvidenceCore.cs:Add#2	140fed95895e6619	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	CombatEvidenceCore.cs:Add#2	14127b90bf635bd5	PerfPatches.cs:Prefix#3	ref>PerfPatches.cs:Prefix#3
 hop	CombatEvidenceCore.cs:Add#2	146f197705d913cc	CompetitiveUI.cs:ParsePairSeries	ref>CompetitiveUI.cs:ParsePairSeries
 hop	CombatEvidenceCore.cs:Add#2	14a10ec2dcbb5ef4	DanceEmotes.cs:OwnedDanceIndexes	ref>DanceEmotes.cs:OwnedDanceIndexes
@@ -3249,6 +3248,7 @@ hop	CombatEvidenceCore.cs:Add#2	621c899b9d274f69	FfaNumberingRules.cs:StartCurre
 hop	CombatEvidenceCore.cs:Add#2	62494e2f8d60cb19	NativeUI.cs:OpenAdminRosterPicker	delegate[ApiClient.FetchAdminAdmins(#1=>)/=>{}/ShowPicker(#1=>)/=>{}]>NativeUI.cs:OpenAdminRosterPicker
 hop	CombatEvidenceCore.cs:Add#2	628a775a688b6f65	TeamHoldPatches.cs:BootLine	ref>TeamHoldPatches.cs:BootLine
 hop	CombatEvidenceCore.cs:Add#2	62bfa55bcf1751bc	PostSessionReport.cs:BuildCellsFfaGame	ref[case 1]>PostSessionReport.cs:BuildCellsFfaGame
+hop	CombatEvidenceCore.cs:Add#2	6330b5e4d0cdf2f6	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	CombatEvidenceCore.cs:Add#2	6344e59ae2eb796e	EmojiSprites.cs:ParseSequences	ref>EmojiSprites.cs:ParseSequences
 hop	CombatEvidenceCore.cs:Add#2	63b716ec1577878c	SpectatorTeardownProbe.cs:SnapshotRoster	ref>SpectatorTeardownProbe.cs:SnapshotRoster
 hop	CombatEvidenceCore.cs:Add#2	63edbe5dd87c8255	PlayerCardsUI.cs:StartCompose	ref>PlayerCardsUI.cs:StartCompose
@@ -4651,6 +4651,7 @@ hop	CompetitiveUI.cs:ShowNotification	20f82bfdb8e28333	CompetitiveUI.cs:DropChat
 hop	CompetitiveUI.cs:ShowNotification	22b1bb43a3e3a793	ApiClient.cs:SendLfpPing	dispatch[Plugin.Instance.StartCoroutine(#0)/PostRequest(#2=>)/=>{}/case "cooldown"]{cooldown}>ApiClient.cs:SendLfpPing
 hop	CompetitiveUI.cs:ShowNotification	24494cbe531b8d46	MailUI.cs:Unblock	delegate[MailClient.RemoveBlock(#1=>)/=>{}]>MailUI.cs:Unblock
 hop	CompetitiveUI.cs:ShowNotification	266f0be4cf9dd87a	CompetitiveUI.cs:SubmitFlagRestorationComplete	delegate[ApiClient.AdminResolveFlagRestoration(#2=>)/=>{}]>CompetitiveUI.cs:SubmitFlagRestorationComplete
+hop	CompetitiveUI.cs:ShowNotification	27225e0015b6589b	NativeUI.cs:OnLfpButton	ref>NativeUI.cs:OnLfpButton
 hop	CompetitiveUI.cs:ShowNotification	273216b0bac6ef29	ApiClient.cs:OpenTranslatePortal	ref[case SecureRouteRules.PressAction.RefusePlaintext]>ApiClient.cs:OpenTranslatePortal
 hop	CompetitiveUI.cs:ShowNotification	27ef0422c8efb186	ApiClient.cs:StartLobby	delegate[Plugin.Instance.StartCoroutine(#0)/PostRequest(#2=>)/=>{}]>ApiClient.cs:StartLobby
 hop	CompetitiveUI.cs:ShowNotification	2b83d485ef805480	NativeUI.cs:ExportCardTierList	ref>NativeUI.cs:ExportCardTierList
@@ -4669,6 +4670,7 @@ hop	CompetitiveUI.cs:ShowNotification	3c6412d6d74b5054	FfaMode.cs:CheckRoundAfte
 hop	CompetitiveUI.cs:ShowNotification	3cd0d5a5c68c3722	NativeUI.cs:AddTeamBetButton	delegate[UIFactory.CreateButton(#6=>)/=>{}/ApiClient.PlaceTeamBet(#4=>)/=>{}]>NativeUI.cs:AddTeamBetButton
 hop	CompetitiveUI.cs:ShowNotification	3d392397516a703b	ApiClient.cs:ReportFfaMatch	delegate[Plugin.Instance.StartCoroutine(#0)/PostMatchReportWithRetry(#2=>)/=>{}]>ApiClient.cs:ReportFfaMatch
 hop	CompetitiveUI.cs:ShowNotification	3e248d353652a391	ApiClient.cs:ActionPreflight	ref>ApiClient.cs:ActionPreflight
+hop	CompetitiveUI.cs:ShowNotification	3ff35d63c2befda4	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	CompetitiveUI.cs:ShowNotification	4396675223f72956	ApiClient.cs:RequestSpectateGrantCore	delegate[PostRequest(#2=>)/=>{}]>ApiClient.cs:RequestSpectateGrantCore
 hop	CompetitiveUI.cs:ShowNotification	4417958b7af3e61b	NativeUI.cs:BuildFfaTab	delegate[UIFactory.CreateButton(#6=>)/=>{}]>NativeUI.cs:BuildFfaTab
 hop	CompetitiveUI.cs:ShowNotification	4798be2c43f7bad6	NativeUI.cs:TickRankedHint	ref>NativeUI.cs:TickRankedHint
@@ -4789,7 +4791,6 @@ hop	CompetitiveUI.cs:ShowNotification	d97519dd842f8a59	MailUI.cs:SubmitReport	de
 hop	CompetitiveUI.cs:ShowNotification	da2d4bae7b078a21	RoomRules.cs:OnGameStart	ref>RoomRules.cs:OnGameStart
 hop	CompetitiveUI.cs:ShowNotification	db0a12c6007d1bd2	NativeUI.cs:ToggleCompareSelect	ref>NativeUI.cs:ToggleCompareSelect
 hop	CompetitiveUI.cs:ShowNotification	dc74dc75fc3dfd9b	NativeUI.cs:BuildSettingsTab	delegate[SettingsSwitch(#4=>)/=>{}/ApiClient.SetAppearOffline(#2=>)/=>{}]>NativeUI.cs:BuildSettingsTab
-hop	CompetitiveUI.cs:ShowNotification	dcb90e8db2c9496d	NativeUI.cs:OnLfpButton	ref>NativeUI.cs:OnLfpButton
 hop	CompetitiveUI.cs:ShowNotification	dcf9e744e01ba38f	MailUI.cs:CopyCurrent	ref>MailUI.cs:CopyCurrent
 hop	CompetitiveUI.cs:ShowNotification	df354bef92bc856f	CompetitiveUI.cs:DwSend	ref>CompetitiveUI.cs:DwSend
 hop	CompetitiveUI.cs:ShowNotification	e10ccaad55647a7c	NativeUI.cs:CopyGameCode	ref>NativeUI.cs:CopyGameCode
@@ -7851,6 +7852,7 @@ hop	FfaLateRules.cs:Add	17d58569904b7224	DanceEmotes.cs:ObservableCancelSweep	re
 hop	FfaLateRules.cs:Add	17dad40c2923179f	SessionReportRules.cs:StatusTarget	ref>SessionReportRules.cs:StatusTarget
 hop	FfaLateRules.cs:Add	18361669a9e0e97a	PortraitRenderDance.cs:DanceFitDrawn	ref>PortraitRenderDance.cs:DanceFitDrawn
 hop	FfaLateRules.cs:Add	184517fc9e67b3d0	PoisonLedgerCore.cs:Capable	ref>PoisonLedgerCore.cs:Capable
+hop	FfaLateRules.cs:Add	1864928403b1e435	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	FfaLateRules.cs:Add	1887aa860d2ff8b9	DanceMotionCore.cs:SendStill	ref>DanceMotionCore.cs:SendStill
 hop	FfaLateRules.cs:Add	18d4d46c034ba08b	RoomActors.cs:PresentNonSpectators	ref>RoomActors.cs:PresentNonSpectators
 hop	FfaLateRules.cs:Add	1910126e04312b4a	CombatEvidence.cs:TickBody	ref>CombatEvidence.cs:TickBody
@@ -7935,7 +7937,6 @@ hop	FfaLateRules.cs:Add	2988cdb80e5a7414	ApiClient.cs:ParseMusicRatingsMine	ref>
 hop	FfaLateRules.cs:Add	29a092a9b7908ee2	MusicEngine.cs:TsRunS4Neg	ref[case 1]>MusicEngine.cs:TsRunS4Neg
 hop	FfaLateRules.cs:Add	2a045f2690ecb4c1	TeamHoldRules.cs:PinRoom	ref>TeamHoldRules.cs:PinRoom
 hop	FfaLateRules.cs:Add	2a41238a39049e61	CombatEvidenceCore.cs:CxRows	ref>CombatEvidenceCore.cs:CxRows
-hop	FfaLateRules.cs:Add	2a669a21500ea20e	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	FfaLateRules.cs:Add	2aeacdf0a4a21d7e	IdentityClockCore.cs:Count	ref>IdentityClockCore.cs:Count
 hop	FfaLateRules.cs:Add	2b04c75e10471913	PoisonLedgerCore.cs:ShooterArm	ref>PoisonLedgerCore.cs:ShooterArm
 hop	FfaLateRules.cs:Add	2b1146e72b0701ad	RoomActors.cs:UnionFighterRoster	ref>RoomActors.cs:UnionFighterRoster
@@ -11607,6 +11608,7 @@ hop	FfaReadmitRules.cs:Add	667e8a87444edaa1	PlayerCardsUI.cs:OnlyCopyNote	delega
 hop	FfaReadmitRules.cs:Add	66edc4d165990907	TeamHoldRules.cs:ExpiryActions	ref[case DcKind.Floor]>TeamHoldRules.cs:ExpiryActions
 hop	FfaReadmitRules.cs:Add	67092fcabb4fec83	FfaLateRules.cs:K45xiCount	ref>FfaLateRules.cs:K45xiCount
 hop	FfaReadmitRules.cs:Add	67453b7067e1a3d5	CardDrawEvidence.cs:EnsureCensusDump	ref>CardDrawEvidence.cs:EnsureCensusDump
+hop	FfaReadmitRules.cs:Add	67d23214c0bb6a3c	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	FfaReadmitRules.cs:Add	6889154707b61514	PlayerCardsUI.cs:FailShard	ref>PlayerCardsUI.cs:FailShard
 hop	FfaReadmitRules.cs:Add	6985dbe5d7f65efb	GameStateWatcher.cs:PresentFighterIds	ref>GameStateWatcher.cs:PresentFighterIds
 hop	FfaReadmitRules.cs:Add	69c5a67b5eaffaaa	MusicAssets.cs:BuildManifest	ref>MusicAssets.cs:BuildManifest
@@ -12032,7 +12034,6 @@ hop	FfaReadmitRules.cs:Add	d322b22000a01b3a	ApiClient.cs:ExtractTeamMemberList	r
 hop	FfaReadmitRules.cs:Add	d3c8c4e54512061e	IdentityClockCore.cs:List#1	ref>IdentityClockCore.cs:List#1
 hop	FfaReadmitRules.cs:Add	d3ce00c43019e305	FfaMode.cs:ReadmitReplayRun	ref>FfaMode.cs:ReadmitReplayRun
 hop	FfaReadmitRules.cs:Add	d41646f0bfa5afb9	ApiClient.cs:BlockPlayer	delegate[Plugin.Instance.StartCoroutine(#0)/PostRequest(#2=>)/=>{}]>ApiClient.cs:BlockPlayer
-hop	FfaReadmitRules.cs:Add	d45738646776b117	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	FfaReadmitRules.cs:Add	d46c5f2a6b173d70	MailUI.cs:Fingerprint	ref>MailUI.cs:Fingerprint
 hop	FfaReadmitRules.cs:Add	d47739a316498dc7	SeatEvidenceCore.cs:ToObj	ref>SeatEvidenceCore.cs:ToObj
 hop	FfaReadmitRules.cs:Add	d4e2731855bfbf16	ApiClient.cs:FetchPlayerFfaHistory	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchPlayerFfaHistory
@@ -12915,6 +12916,7 @@ hop	GameStateWatcher.cs:Add	308eecde9145233d	ApiClient.cs:ParsePcPrints	ref>ApiC
 hop	GameStateWatcher.cs:Add	30aff8adb07bd862	Plugin.cs:RawNamesFor	ref>Plugin.cs:RawNamesFor
 hop	GameStateWatcher.cs:Add	30bd1ee93ce9eda9	DanceMotionCore.cs:TryParseContainer	ref>DanceMotionCore.cs:TryParseContainer
 hop	GameStateWatcher.cs:Add	30bd5505d19384c5	SeatEvidenceCore.cs:Add#2	ref>SeatEvidenceCore.cs:Add#2
+hop	GameStateWatcher.cs:Add	30edcca132a2dcdd	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	GameStateWatcher.cs:Add	312346cbb33f8373	PoisonLedgerCore.cs:Receive	ref>PoisonLedgerCore.cs:Receive
 hop	GameStateWatcher.cs:Add	312fdc876e2c8ae7	PortraitRender.cs:OnLog	ref>PortraitRender.cs:OnLog
 hop	GameStateWatcher.cs:Add	315fbf4dbea4ddf9	NativeUI.cs:ToggleCompareSelect	ref>NativeUI.cs:ToggleCompareSelect
@@ -13670,7 +13672,6 @@ hop	GameStateWatcher.cs:Add	eab0f683329fe3e9	NativeUI.cs:BuildComparePlayerNemes
 hop	GameStateWatcher.cs:Add	eace126244c1086c	SeatEvidenceCore.cs:CompatBody	ref[Json(#0)]>SeatEvidenceCore.cs:CompatBody
 hop	GameStateWatcher.cs:Add	ead9cc2c9774eb50	NativeUI.cs:GetOrCreateArtistRow	ref>NativeUI.cs:GetOrCreateArtistRow
 hop	GameStateWatcher.cs:Add	eb07d96627ac1592	ReadGateRules.cs:ParseOpenList	ref>ReadGateRules.cs:ParseOpenList
-hop	GameStateWatcher.cs:Add	eb1ed6088cdc5db4	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	GameStateWatcher.cs:Add	eb8ad73ba1a5add6	PlayerCardsUI.cs:WriteIntent	ref>PlayerCardsUI.cs:WriteIntent
 hop	GameStateWatcher.cs:Add	ebb5bc14f2d4f85f	ApiClient.cs:ParseQuarantineReports	ref>ApiClient.cs:ParseQuarantineReports
 hop	GameStateWatcher.cs:Add	ebc9a7312e147ed5	PostSessionReport.cs:BuildCells2v2Game	ref[case 3]>PostSessionReport.cs:BuildCells2v2Game
@@ -16370,6 +16371,7 @@ hop	I18n.cs:Tr	469042029fa2fd00	PlayerCardsUI.cs:ReasonText	dispatch[case "rate_
 hop	I18n.cs:Tr	46c0c0502d3447f6	MailClient.cs:ErrorDetail	dispatch[case "body_control_character"]{body_control_character}>MailClient.cs:ErrorDetail
 hop	I18n.cs:Tr	46c33bb9f1c4b2b0	PlayerCardsUI.cs:RefreshShardDupesButton	ref[UIFactory.SetTextRaw(#1)]>PlayerCardsUI.cs:RefreshShardDupesButton
 hop	I18n.cs:Tr	46d5db732197363d	NativeUI.cs:PaintDamageNumbers	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:PaintDamageNumbers
+hop	I18n.cs:Tr	471523d1f625e463	CompetitiveUI.cs:DrawLfpPrompt	ref[GUI.Label(#1)]>CompetitiveUI.cs:DrawLfpPrompt
 hop	I18n.cs:Tr	472b92ab9bfffdc9	SettingsDescriptors.g.cs:ReasonTr	dispatch[case "SPrefSC"]{SPrefSC}>SettingsDescriptors.g.cs:ReasonTr
 hop	I18n.cs:Tr	4733a8364bae5856	SessionReportModel.cs:BuildTotalsPages	ref[MakeBars(#1)]>SessionReportModel.cs:BuildTotalsPages
 hop	I18n.cs:Tr	47688bdb8b134d21	NativeUI.cs:BuildMultimodeSeriesLine	ref>NativeUI.cs:BuildMultimodeSeriesLine
@@ -16857,7 +16859,6 @@ hop	I18n.cs:Tr	9b455e34f25fe2e7	NativeUI.cs:RefreshMyStats	ref[UIFactory.SetText
 hop	I18n.cs:Tr	9ba3900b33854617	InfoViz.cs:BuildRefreshSequences	ref[SeqTable(#2)]>InfoViz.cs:BuildRefreshSequences
 hop	I18n.cs:Tr	9bfef23b3003683b	SettingsDescriptors.g.cs:ReasonTr	dispatch[case "SAvMod"]{SAvMod}>SettingsDescriptors.g.cs:ReasonTr
 hop	I18n.cs:Tr	9c05446797d648eb	NativeUI.cs:BuildCardStatsTab	entry[[4]]>NativeUI.cs:BuildCardStatsTab
-hop	I18n.cs:Tr	9c42b281cefa748b	CompetitiveUI.cs:DrawLfpPrompt	ref[GUI.Button(#1)]>CompetitiveUI.cs:DrawLfpPrompt
 hop	I18n.cs:Tr	9c4dbd8d0c6d8554	NativeUI.Keybinds.cs:KeybindKeyName	dispatch[case "Home"]{Home}>NativeUI.Keybinds.cs:KeybindKeyName
 hop	I18n.cs:Tr	9c5531e844576cda	CompetitiveUI.cs:DrawPlayerComboGraph	ref[panel(#1)]>CompetitiveUI.cs:DrawPlayerComboGraph
 hop	I18n.cs:Tr	9c8c2169f08e5134	ApiClient.cs:NoteReadGateFallback	ref[CompetitiveUI.ShowNotification(#0)]>ApiClient.cs:NoteReadGateFallback
@@ -17067,7 +17068,6 @@ hop	I18n.cs:Tr	c7a61f86bc5570cf	NativeUI.Keybinds.cs:KeybindKeyName	dispatch[cas
 hop	I18n.cs:Tr	c7de5180f11a4c78	NativeUI.cs:BuildTeamCardsColumnChips	ref>NativeUI.cs:BuildTeamCardsColumnChips
 hop	I18n.cs:Tr	c821fab81c86bc91	MailUI.cs:BuildSettingsRow	ref[NativeUI.SettingsDropdown(#2)]>MailUI.cs:BuildSettingsRow
 hop	I18n.cs:Tr	c82d1a08077f8e8b	NativeUI.cs:ShowRecentTournamentsPopup	ref>NativeUI.cs:ShowRecentTournamentsPopup
-hop	I18n.cs:Tr	c8959a34dcb63d68	CompetitiveUI.cs:DrawLfpPrompt	ref[GUI.Label(#1)]>CompetitiveUI.cs:DrawLfpPrompt
 hop	I18n.cs:Tr	c8aa65205f697378	InfoLibrary.cs:Poison	ref>InfoLibrary.cs:Poison
 hop	I18n.cs:Tr	c8dfc0bcc3f7c3cf	CompetitiveUI.cs:DwSend	ref[ShowNotification(#0)]>CompetitiveUI.cs:DwSend
 hop	I18n.cs:Tr	c8ff4e127de7f07d	CompetitiveUI.cs:DrawRankedHintCallout	ref[GUI.Label(#1)]>CompetitiveUI.cs:DrawRankedHintCallout
@@ -17084,6 +17084,7 @@ hop	I18n.cs:Tr	cb3fcaf26dc3826a	NativeUI.cs:RefreshOneVTwoTab	ref[FillOvtRoleBoa
 hop	I18n.cs:Tr	cbba6f8bf4d9e78c	NativeUI.Keybinds.cs:KeybindKeyName	dispatch[case "PadEnter"]{PadEnter}>NativeUI.Keybinds.cs:KeybindKeyName
 hop	I18n.cs:Tr	cbc41a2305970b70	TitleLaddersUI.cs:OnWearClicked	ref[SetMsg(#0)]>TitleLaddersUI.cs:OnWearClicked
 hop	I18n.cs:Tr	cc2cd3b1782dd5cd	TabStatsOverlay.cs:EnsureLocaleStrings	entry[[3]]>TabStatsOverlay.cs:EnsureLocaleStrings
+hop	I18n.cs:Tr	cc7c0679b7cd3a92	CompetitiveUI.cs:DrawLfpPrompt	ref[GUI.Button(#1)]>CompetitiveUI.cs:DrawLfpPrompt
 hop	I18n.cs:Tr	ccd37bc279613105	NativeUI.cs:CreateFfaBrowserRow	delegate[UIFactory.CreateButton(#6=>)/=>{}/CompetitiveUI.OpenArtistInput(#1)]>NativeUI.cs:CreateFfaBrowserRow
 hop	I18n.cs:Tr	cd07bceadc5e44bc	InfoViz.cs:BuildKeyboard	entry[[5]]>InfoViz.cs:BuildKeyboard
 hop	I18n.cs:Tr	cd82d3b566c7898e	InfoViz.cs:BuildAnticheatPipeline	ref[Lbl(#1)]>InfoViz.cs:BuildAnticheatPipeline
@@ -17154,6 +17155,7 @@ hop	I18n.cs:Tr	d9ae0b0c50262903	H2HSummary.cs:Ago	ref[case H2HRules.AgoKind.Yest
 hop	I18n.cs:Tr	d9f0d9eb0d4cb038	NativeUI.Keybinds.cs:KeybindApplyFailedText	ref>NativeUI.Keybinds.cs:KeybindApplyFailedText
 hop	I18n.cs:Tr	dab192baccf351d7	NativeUI.cs:TrMetric	dispatch[case "Avg Game Length"]{Avg Game Length}>NativeUI.cs:TrMetric
 hop	I18n.cs:Tr	dab2b97496823946	ApiClient.cs:FfaEnrollResult	ref[CompetitiveUI.OpenArtistInput(#0)]>ApiClient.cs:FfaEnrollResult
+hop	I18n.cs:Tr	dac7180db2450e4e	NativeUI.cs:LfpModeLabel	ref>NativeUI.cs:LfpModeLabel
 hop	I18n.cs:Tr	db07d45ecf50e8ab	InfoLibrary.cs:Categories	entry[[2]/Category.Articles/Article{spectating}.Title=>]>InfoLibrary.cs:Categories
 hop	I18n.cs:Tr	db25d474494f1261	NativeUI.cs:JoinHostLobbyRow	ref[CompetitiveUI.OpenArtistInput(#0)]>NativeUI.cs:JoinHostLobbyRow
 hop	I18n.cs:Tr	db683245362691de	ApiClient.cs:BlocksOnPendingLeave	ref[CompetitiveUI.ShowNotification(#0)]>ApiClient.cs:BlocksOnPendingLeave
@@ -18154,6 +18156,7 @@ hop	IdentityClockCore.cs:Add#1	54bc55395690e82f	FfaLateEntry.cs:AfterPair	ref>Ff
 hop	IdentityClockCore.cs:Add#1	54c1713a6d1c09cd	PcQuickShardRules.cs:DuplicateShardIds	ref>PcQuickShardRules.cs:DuplicateShardIds
 hop	IdentityClockCore.cs:Add#1	54d890393a7e325f	SessionReportRules.cs:Parse	dispatch[case "players"]{players}>SessionReportRules.cs:Parse
 hop	IdentityClockCore.cs:Add#1	55829641793016a6	SeatEvidence.cs:BlockSent	ref>SeatEvidence.cs:BlockSent
+hop	IdentityClockCore.cs:Add#1	55fd06faf973e8ba	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	IdentityClockCore.cs:Add#1	5658bec56f3a490e	IdentityClockCore.cs:List#1	ref>IdentityClockCore.cs:List#1
 hop	IdentityClockCore.cs:Add#1	5676abc81e8efb80	IdentityClockEvidence.cs:BootCheck	ref>IdentityClockEvidence.cs:BootCheck
 hop	IdentityClockCore.cs:Add#1	56be188022461a5c	ApiClient.cs:AnnounceUnseenAlerts	ref>ApiClient.cs:AnnounceUnseenAlerts
@@ -18773,7 +18776,6 @@ hop	IdentityClockCore.cs:Add#1	ec7a7cfac45d1482	PortraitRender.cs:Dump	ref>Portr
 hop	IdentityClockCore.cs:Add#1	ecb7f2ca2d05bafa	AvatarDefaults.cs:VanillaOptionIds	ref>AvatarDefaults.cs:VanillaOptionIds
 hop	IdentityClockCore.cs:Add#1	ed3ab04e9b04e954	PostSessionReport.cs:FfaSessionMatches	ref>PostSessionReport.cs:FfaSessionMatches
 hop	IdentityClockCore.cs:Add#1	ed90e5c3964f4f43	SessionReportRules.cs:FlowChips	ref>SessionReportRules.cs:FlowChips
-hop	IdentityClockCore.cs:Add#1	edd140a0f3e5b409	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	IdentityClockCore.cs:Add#1	edfd49add13e551d	SessionReportRules.cs:StatusTarget	ref>SessionReportRules.cs:StatusTarget
 hop	IdentityClockCore.cs:Add#1	eebfb6fd46443e37	MusicEngine.cs:TsRunOpenAll	ref[case 0]>MusicEngine.cs:TsRunOpenAll
 hop	IdentityClockCore.cs:Add#1	eed8acad21bcba3c	DamageNumberRules.cs:SelfTest	ref>DamageNumberRules.cs:SelfTest
@@ -18873,6 +18875,7 @@ hop	IdentityClockCore.cs:Add#2	02fbf8afcc6f4d35	FfaMode.cs:ApplyManifestPick	ref
 hop	IdentityClockCore.cs:Add#2	0309f09c7d2a7754	KeybindRules.cs:HarnessKeyCodeScan	ref>KeybindRules.cs:HarnessKeyCodeScan
 hop	IdentityClockCore.cs:Add#2	03527fe145fde198	ProfileCard.cs:RequestData	ref>ProfileCard.cs:RequestData
 hop	IdentityClockCore.cs:Add#2	0353db24790f4b9c	MusicEngine.cs:SetSelected	ref>MusicEngine.cs:SetSelected
+hop	IdentityClockCore.cs:Add#2	039a8ce326a78787	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	IdentityClockCore.cs:Add#2	03b6b3f3e845d0a8	NativeUI.cs:BuildFfaTab	ref>NativeUI.cs:BuildFfaTab
 hop	IdentityClockCore.cs:Add#2	03b79b7a0845b241	TeamHoldWriter.cs:Release	ref>TeamHoldWriter.cs:Release
 hop	IdentityClockCore.cs:Add#2	04c8dce3606c5374	IdentityClockCore.cs:Add#1	ref>IdentityClockCore.cs:Add#1
@@ -19518,7 +19521,6 @@ hop	IdentityClockCore.cs:Add#2	9f5d1342b4a473ab	PlayerCardMotion.cs:OnAtlas	ref>
 hop	IdentityClockCore.cs:Add#2	9fc00e4be284df49	PlayerCardMotion.cs:NewVisit	ref>PlayerCardMotion.cs:NewVisit
 hop	IdentityClockCore.cs:Add#2	9feae18e9c8a11b9	PortraitRender.cs:PinParticles	ref>PortraitRender.cs:PinParticles
 hop	IdentityClockCore.cs:Add#2	9ff1b1c6d4c78005	FfaNumberingRules.cs:StallInbound	ref>FfaNumberingRules.cs:StallInbound
-hop	IdentityClockCore.cs:Add#2	a058bb0f6ce05c51	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	IdentityClockCore.cs:Add#2	a05f6e7b501262cc	ApiClient.cs:PumpPrefs	ref>ApiClient.cs:PumpPrefs
 hop	IdentityClockCore.cs:Add#2	a083fa8514ad57fe	KeybindRules.cs:Repaint	ref>KeybindRules.cs:Repaint
 hop	IdentityClockCore.cs:Add#2	a09ce28d2bad4f06	PcQuickShardRules.cs:DanceCallbacksOnEveryOrder	ref[case 0]>PcQuickShardRules.cs:DanceCallbacksOnEveryOrder
@@ -27620,6 +27622,7 @@ hop	NativeUI.cs:LbTitleSpan	39ee69a52fb41835	NativeUI.cs:RefreshFfaTab	ref>Nativ
 hop	NativeUI.cs:LevelForXp	8b4182a9096b1ba7	NativeUI.cs:BuildCompareBarChart	ref>NativeUI.cs:BuildCompareBarChart
 hop	NativeUI.cs:LevelWordTr	93780514d183d5ab	NativeUI.cs:PaintBloom	ref[UIFactory.SetTextRaw(#1)/I18n.TrF(#2)]>NativeUI.cs:PaintBloom
 hop	NativeUI.cs:LevelWordTr	af367098502ff527	NativeUI.cs:PaintScreenShake	ref[UIFactory.SetTextRaw(#1)/I18n.TrF(#2)]>NativeUI.cs:PaintScreenShake
+hop	NativeUI.cs:LfpModeLabel	ef77e4b7a925788f	CompetitiveUI.cs:DrawLfpPrompt	ref[GUI.Button(#1)]>CompetitiveUI.cs:DrawLfpPrompt
 hop	NativeUI.cs:LinkifyInfoBody	52058cd2b10f6db0	NativeUI.cs:RenderInfoBody	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:RenderInfoBody
 hop	NativeUI.cs:LinkifyInfoBody	62c13c6e9a693ab1	NativeUI.cs:RenderInfoBody	delegate[KeybindRules.InfoVisual.Lay(#6=>)/=>{}/UIFactory.SetTextRaw(#1)]>NativeUI.cs:RenderInfoBody
 hop	NativeUI.cs:LoadCardTiersForCurrentFilter	335a91701cc77747	NativeUI.cs:RefreshCardStats	ref>NativeUI.cs:RefreshCardStats
@@ -28307,7 +28310,7 @@ hop	NativeUI.cs:StartChatMuteFlow	6857195dccbb7066	NativeUI.cs:BuildAdminTab	del
 hop	NativeUI.cs:StartCosmeticPlacementAdjustment	265d564d1030c9f7	NativeUI.cs:BuildArtistTab	delegate[UIFactory.CreateButton(#6)/&]>NativeUI.cs:BuildArtistTab
 hop	NativeUI.cs:StartCosmeticUpload	699e452a3b965604	NativeUI.cs:BuildArtistTab	delegate[UIFactory.CreateButton(#6)/&]>NativeUI.cs:BuildArtistTab
 hop	NativeUI.cs:SubmitCustomBet	fbb1609ba77603de	CompetitiveUI.cs:DrawCustomBetPrompt	ref>CompetitiveUI.cs:DrawCustomBetPrompt
-hop	NativeUI.cs:SubmitLfpPing	9e37b736ca0a0d02	CompetitiveUI.cs:DrawLfpPrompt	ref>CompetitiveUI.cs:DrawLfpPrompt
+hop	NativeUI.cs:SubmitLfpPing	4278c88a2c91750f	CompetitiveUI.cs:DrawLfpPrompt	ref>CompetitiveUI.cs:DrawLfpPrompt
 hop	NativeUI.cs:SwitchTab	0acb8a3cd0b0ea93	NativeUI.cs:DevOpenTab#1	ref>NativeUI.cs:DevOpenTab#1
 hop	NativeUI.cs:SwitchTab	260c200872ffd7b7	NativeUI.cs:BuildTabBar	delegate[UIFactory.CreateButton(#6=>)]>NativeUI.cs:BuildTabBar
 hop	NativeUI.cs:SwitchTab	2eb2c70eca532b97	NativeUI.cs:Tick	ref>NativeUI.cs:Tick
@@ -43627,7 +43630,6 @@ hop	SeatEvidenceCore.cs:Add#1	2eefc0d172c72629	ApiClient.cs:FetchNewestCosmetics
 hop	SeatEvidenceCore.cs:Add#1	2f0c46035b9c78b9	FfaMode.cs:RebuildDeckViews	ref>FfaMode.cs:RebuildDeckViews
 hop	SeatEvidenceCore.cs:Add#1	2f713a9fdec47336	NativeUI.cs:FillAdminQuarantineRow	ref>NativeUI.cs:FillAdminQuarantineRow
 hop	SeatEvidenceCore.cs:Add#1	2f852739d5395a09	IdleShowcase.cs:GatherCandidates	ref>IdleShowcase.cs:GatherCandidates
-hop	SeatEvidenceCore.cs:Add#1	2fe0f9cce1224222	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#1	2fe8a3f51404b9b0	ApiClient.cs:JsonIntArrayByKey	ref>ApiClient.cs:JsonIntArrayByKey
 hop	SeatEvidenceCore.cs:Add#1	30a450fc509018e3	ApiClient.cs:ParseReleasePosts	ref>ApiClient.cs:ParseReleasePosts
 hop	SeatEvidenceCore.cs:Add#1	30af947de2eea865	IdentityClockEvidence.cs:BootLine	ref>IdentityClockEvidence.cs:BootLine
@@ -44316,6 +44318,7 @@ hop	SeatEvidenceCore.cs:Add#1	d548a0e42fe59450	FfaNumberingRules.cs:OthersOf	ref
 hop	SeatEvidenceCore.cs:Add#1	d60ab216122bcc82	NativeUI.cs:BuildMusicTab	ref>NativeUI.cs:BuildMusicTab
 hop	SeatEvidenceCore.cs:Add#1	d67c151914820ffa	PostSessionReport.cs:BuildCellsFfaGame	ref[case 0]>PostSessionReport.cs:BuildCellsFfaGame
 hop	SeatEvidenceCore.cs:Add#1	d6e43ce68dd54c9f	DanceEmotes.cs:Tick	ref>DanceEmotes.cs:Tick
+hop	SeatEvidenceCore.cs:Add#1	d73526f85c206e8f	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#1	d784cdc84d43a143	ApiClient.cs:PcStrArray	ref>ApiClient.cs:PcStrArray
 hop	SeatEvidenceCore.cs:Add#1	d7aa97729cdb631c	FfaReadmitRules.cs:GrantMissing	ref>FfaReadmitRules.cs:GrantMissing
 hop	SeatEvidenceCore.cs:Add#1	d7f04d7b2fc7083c	ApiClient.cs:FetchPlayerTeamHistory	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchPlayerTeamHistory
@@ -44491,6 +44494,7 @@ hop	SeatEvidenceCore.cs:Add#2	005563ced902a5ce	VanillaFixes.cs:StartWhenIdsLand	
 hop	SeatEvidenceCore.cs:Add#2	00b7c03080acb011	SeatEvidenceCore.cs:Block	ref>SeatEvidenceCore.cs:Block
 hop	SeatEvidenceCore.cs:Add#2	00bbbdfafbc75a99	TeamGameNumber.cs:Fetch	ref>TeamGameNumber.cs:Fetch
 hop	SeatEvidenceCore.cs:Add#2	00fa5a0a87f488d9	TeamHoldRules.cs:End	ref>TeamHoldRules.cs:End
+hop	SeatEvidenceCore.cs:Add#2	00fc8d535d83af32	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#2	015e9d0aa9c2bbfc	FfaCardSequence.cs:SetAt	ref>FfaCardSequence.cs:SetAt
 hop	SeatEvidenceCore.cs:Add#2	0174c9f1b3c5103f	SessionReportRules.cs:StatusTarget	ref>SessionReportRules.cs:StatusTarget
 hop	SeatEvidenceCore.cs:Add#2	01c1583552815aef	FfaNumberingRules.cs:Stall	ref>FfaNumberingRules.cs:Stall
@@ -44988,7 +44992,6 @@ hop	SeatEvidenceCore.cs:Add#2	790a4b3c796eb104	CardDrawEvidenceCore.cs:CensusTex
 hop	SeatEvidenceCore.cs:Add#2	7913d9fa1dd61b08	DamageNumberRules.cs:CapAnchors	ref>DamageNumberRules.cs:CapAnchors
 hop	SeatEvidenceCore.cs:Add#2	79264dcc8c25a749	ApiClient.cs:FetchOvtLeaderboard	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchOvtLeaderboard
 hop	SeatEvidenceCore.cs:Add#2	7944dd2af39b0ee8	FfaMode.cs:ApplyManifestPick	ref>FfaMode.cs:ApplyManifestPick
-hop	SeatEvidenceCore.cs:Add#2	79df95839ff9daf1	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#2	7a5567c5ea61ab0e	CombatEvidence.cs:Build	ref>CombatEvidence.cs:Build
 hop	SeatEvidenceCore.cs:Add#2	7a6f88548b34b228	PoisonSync.cs:ResetForView	ref>PoisonSync.cs:ResetForView
 hop	SeatEvidenceCore.cs:Add#2	7aa28b9cdc800b6a	CardDrawEvidence.cs:CatNames	ref>CardDrawEvidence.cs:CatNames
@@ -45593,6 +45596,7 @@ hop	SeatEvidenceCore.cs:Add#3	0d6baabe639ae318	FfaNumberingRules.cs:EdgeCurrent	
 hop	SeatEvidenceCore.cs:Add#3	0d6cbbf86eb48d24	IdentityClockEvidence.cs:EnterRpc	ref>IdentityClockEvidence.cs:EnterRpc
 hop	SeatEvidenceCore.cs:Add#3	0d90b9f04b303419	Plugin.cs:RestoreVanillaArtParts	ref>Plugin.cs:RestoreVanillaArtParts
 hop	SeatEvidenceCore.cs:Add#3	0ddf2fb51e31e1c9	PlayerColorCosmetic.cs:OnHostDestroyed	ref>PlayerColorCosmetic.cs:OnHostDestroyed
+hop	SeatEvidenceCore.cs:Add#3	0e181d1334d05343	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#3	0e281bf6b6dee487	NativeUI.cs:BuildMusicTab	ref>NativeUI.cs:BuildMusicTab
 hop	SeatEvidenceCore.cs:Add#3	0e3680cd9dd87b48	PlayerCardMotionDev.cs:DevFakeAtlas	ref>PlayerCardMotionDev.cs:DevFakeAtlas
 hop	SeatEvidenceCore.cs:Add#3	0ed5c0073e9cd68a	IdentityClockEvidence.cs:ArmFromFile	ref>IdentityClockEvidence.cs:ArmFromFile
@@ -46451,7 +46455,6 @@ hop	SeatEvidenceCore.cs:Add#3	d950049c27b4cec6	PortraitRenderDanceDev.cs:DanceMu
 hop	SeatEvidenceCore.cs:Add#3	d968124ccbfcb302	Plugin.cs:Prefix#12	ref>Plugin.cs:Prefix#12
 hop	SeatEvidenceCore.cs:Add#3	d9efcf97d6e71acf	SeatEvidence.cs:HitExit	ref>SeatEvidence.cs:HitExit
 hop	SeatEvidenceCore.cs:Add#3	da3ac409088f9f72	SeatEvidenceCore.cs:Offer	ref>SeatEvidenceCore.cs:Offer
-hop	SeatEvidenceCore.cs:Add#3	da4871e6c4d5d3ab	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#3	da6cf710bca006ae	CompetitiveUI.cs:RegisterCardHoverRegion#3	ref>CompetitiveUI.cs:RegisterCardHoverRegion#3
 hop	SeatEvidenceCore.cs:Add#3	da6ef57f06a7e62b	PlayerCardFaces.cs:Start	ref>PlayerCardFaces.cs:Start
 hop	SeatEvidenceCore.cs:Add#3	dacb773395942297	FfaReadmitEntryRules.cs:DigestSlotSet	ref>FfaReadmitEntryRules.cs:DigestSlotSet
@@ -46935,7 +46938,6 @@ hop	SeatEvidenceCore.cs:Add#4	587c63c7e506c926	PcQuickShardRules.cs:TombstonePat
 hop	SeatEvidenceCore.cs:Add#4	58b373eeffbd6aaa	RoomActors.cs:RecordRejected	ref>RoomActors.cs:RecordRejected
 hop	SeatEvidenceCore.cs:Add#4	5907a4372648eace	FfaNumberingRules.cs:Terminate	ref>FfaNumberingRules.cs:Terminate
 hop	SeatEvidenceCore.cs:Add#4	5915b2bec9a01d6f	FfaNumberingRules.cs:Edge	ref>FfaNumberingRules.cs:Edge
-hop	SeatEvidenceCore.cs:Add#4	593934641e3e3469	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#4	593d5fd95a0bc5c1	NativeUI.cs:BuildInfoTab	ref>NativeUI.cs:BuildInfoTab
 hop	SeatEvidenceCore.cs:Add#4	59626fd4d370e7f8	Plugin.cs:ScrubChildRpcDictionaries	ref>Plugin.cs:ScrubChildRpcDictionaries
 hop	SeatEvidenceCore.cs:Add#4	59644ba2a1cc0498	FfaNumberingRules.cs:EdgeCurrent	ref>FfaNumberingRules.cs:EdgeCurrent
@@ -47472,6 +47474,7 @@ hop	SeatEvidenceCore.cs:Add#4	d65efbcd3ca6ab01	PlayerCardsUI.cs:DevSeedMotionPri
 hop	SeatEvidenceCore.cs:Add#4	d670700a9a986e59	EmojiSprites.cs:Build	ref>EmojiSprites.cs:Build
 hop	SeatEvidenceCore.cs:Add#4	d67fd89104c8c572	NativeUI.cs:BuildCompareCardMetric	ref>NativeUI.cs:BuildCompareCardMetric
 hop	SeatEvidenceCore.cs:Add#4	d68f658e51371c1a	SeatEvidenceCore.cs:Envelope	ref>SeatEvidenceCore.cs:Envelope
+hop	SeatEvidenceCore.cs:Add#4	d6ab55755195a6e0	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#4	d6bba423a9513d21	PlayerCardsUI.cs:PrintIdsOf	ref>PlayerCardsUI.cs:PrintIdsOf
 hop	SeatEvidenceCore.cs:Add#4	d6e73416e758485b	SessionReportRules.cs:Standings	ref>SessionReportRules.cs:Standings
 hop	SeatEvidenceCore.cs:Add#4	d6fca109b761b028	CustomCosmetics.cs:BuildFromDisk	ref>CustomCosmetics.cs:BuildFromDisk
@@ -48117,7 +48120,6 @@ hop	SeatEvidenceCore.cs:Add#5	73154be162663a1e	MusicEngine.cs:OnAudioFilterRead	
 hop	SeatEvidenceCore.cs:Add#5	7390e445568e08f8	MusicEngine.cs:BuildAlbumBlockCycle	ref>MusicEngine.cs:BuildAlbumBlockCycle
 hop	SeatEvidenceCore.cs:Add#5	739675442eed265e	IdentityClockCore.cs:Patches	ref>IdentityClockCore.cs:Patches
 hop	SeatEvidenceCore.cs:Add#5	75188818260d9e65	PlayerCardMotion.cs:MaybeRead	ref>PlayerCardMotion.cs:MaybeRead
-hop	SeatEvidenceCore.cs:Add#5	75230f9dbced86ae	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#5	7559d3281cf1b431	GameStateWatcher.cs:BroadcastCardPick	ref>GameStateWatcher.cs:BroadcastCardPick
 hop	SeatEvidenceCore.cs:Add#5	75628ae08ec62a9a	GameStateWatcher.cs:SpectateFighterIds	ref>GameStateWatcher.cs:SpectateFighterIds
 hop	SeatEvidenceCore.cs:Add#5	756fb02dfd14b90e	ApiClient.cs:FetchMyBets	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchMyBets
@@ -48615,6 +48617,7 @@ hop	SeatEvidenceCore.cs:Add#5	e9392cb364870a16	PlayerCardMotionDev.cs:DevFakeRea
 hop	SeatEvidenceCore.cs:Add#5	e97336b9195ae01c	CardDrawEvidenceCore.cs:HandRefsOf	ref>CardDrawEvidenceCore.cs:HandRefsOf
 hop	SeatEvidenceCore.cs:Add#5	e9a8f88da0dbdc56	FfaMode.cs:SampleTimelines	ref>FfaMode.cs:SampleTimelines
 hop	SeatEvidenceCore.cs:Add#5	e9b9ff2273f417fa	NativeUI.cs:BuildCompareCardMetric	ref>NativeUI.cs:BuildCompareCardMetric
+hop	SeatEvidenceCore.cs:Add#5	e9e0760131dde8b7	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#5	ea0445247e3e112c	PlayerCardMotion.cs:Drive	ref>PlayerCardMotion.cs:Drive
 hop	SeatEvidenceCore.cs:Add#5	ea2b83dca800dc74	NativeUI.cs:SplitLabel	ref>NativeUI.cs:SplitLabel
 hop	SeatEvidenceCore.cs:Add#5	ea761ac92c4d25f2	ApiClient.cs:FetchArtistSales	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchArtistSales
@@ -49066,6 +49069,7 @@ hop	SeatEvidenceCore.cs:Add#6	56feed848b565592	NativeUI.cs:BuildInfoTab	ref>Nati
 hop	SeatEvidenceCore.cs:Add#6	57ab0a1cd9e22c79	ApiClient.cs:JsonStringArrayOfArraysByKey	ref>ApiClient.cs:JsonStringArrayOfArraysByKey
 hop	SeatEvidenceCore.cs:Add#6	58382ea7f8b2d67b	NativeUI.cs:HandleMuteCommand	ref>NativeUI.cs:HandleMuteCommand
 hop	SeatEvidenceCore.cs:Add#6	583e12ca202c45ca	FfaLateRules.cs:CountCase	ref>FfaLateRules.cs:CountCase
+hop	SeatEvidenceCore.cs:Add#6	58adebfcab0e80ea	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#6	58da2689067dd593	TeamGameNumber.cs:Over#2	ref>TeamGameNumber.cs:Over#2
 hop	SeatEvidenceCore.cs:Add#6	591be39c2b1b5fb8	PlayerCardsUI.cs:FailShard	dispatch[case "not_owned"]{not_owned}>PlayerCardsUI.cs:FailShard
 hop	SeatEvidenceCore.cs:Add#6	594f37fcdd271313	NativeUI.cs:GetOrCreateArtistBlockRow	ref>NativeUI.cs:GetOrCreateArtistBlockRow
@@ -49078,7 +49082,6 @@ hop	SeatEvidenceCore.cs:Add#6	5a96223fb2bf0f26	CardDrawEvidence.cs:SealGame	ref>
 hop	SeatEvidenceCore.cs:Add#6	5a9b83cd01b750ef	ApiClient.cs:OutboxPass	ref>ApiClient.cs:OutboxPass
 hop	SeatEvidenceCore.cs:Add#6	5ab147d7f1d730b7	FfaMode.cs:FfaPickPhase	ref>FfaMode.cs:FfaPickPhase
 hop	SeatEvidenceCore.cs:Add#6	5adfddd584fde1bd	NativeUI.cs:OpenFfaLobbyBetPicker	delegate[ShowPicker(#1=>)/=>{}]>NativeUI.cs:OpenFfaLobbyBetPicker
-hop	SeatEvidenceCore.cs:Add#6	5b0e0eacf183f255	NativeUI.cs:SubmitLfpPing	ref>NativeUI.cs:SubmitLfpPing
 hop	SeatEvidenceCore.cs:Add#6	5b17975bb8fb2d47	ApiClient.cs:ParseMusicRatingsMine	ref>ApiClient.cs:ParseMusicRatingsMine
 hop	SeatEvidenceCore.cs:Add#6	5b1b9c9b457adf16	PortraitRenderDance.cs:Summary#2	ref>PortraitRenderDance.cs:Summary#2
 hop	SeatEvidenceCore.cs:Add#6	5b316ec01b224b59	DamageNumberRules.cs:Prune	ref>DamageNumberRules.cs:Prune
@@ -64862,7 +64865,7 @@ member	CompetitiveUI.cs:DrawInputOverlay	955d45237f2bc8c8
 member	CompetitiveUI.cs:DrawLagNotices	51ee1e41a18459b4
 member	CompetitiveUI.cs:DrawLeaderboardSearch	d65cf0a197c6d3fd
 member	CompetitiveUI.cs:DrawLeaverBanner	377c2bf26b3454b6
-member	CompetitiveUI.cs:DrawLfpPrompt	22c6cb0f06702ad3
+member	CompetitiveUI.cs:DrawLfpPrompt	f18b4d97f2a16db0
 member	CompetitiveUI.cs:DrawLogViewerModal	47ef74b7052bffe5
 member	CompetitiveUI.cs:DrawMapColorToast	ebd6d83084573bfb
 member	CompetitiveUI.cs:DrawMatchFoundStuckOverlay	1b564b2fcf3999e0
@@ -67293,6 +67296,7 @@ member	NativeUI.cs:LangChatNoteText	87a7a9479e9ab918
 member	NativeUI.cs:LbTitleSpan	3f5596fbd19124d7
 member	NativeUI.cs:LevelForXp	01de7f8f9840b6b1
 member	NativeUI.cs:LevelWordTr	7fadb742b58e65bf
+member	NativeUI.cs:LfpModeLabel	bc80e27475c51f88
 member	NativeUI.cs:LinkifyInfoBody	a65ac188346d0fc9
 member	NativeUI.cs:LoadCardTiersForCurrentFilter	7f5fd4bc644ebe5b
 member	NativeUI.cs:LobbyBetAvailable	a1026bb36f6a2cd9
@@ -67328,7 +67332,7 @@ member	NativeUI.cs:OnChatMessage	0a2e2fb98c271b81
 member	NativeUI.cs:OnForfeitClicked	1e8ec27cf931cfa0
 member	NativeUI.cs:OnGUI#1	5ce8b21bf7ede124
 member	NativeUI.cs:OnGUI#2	8ed0c34010871079
-member	NativeUI.cs:OnLfpButton	09e6c0003a9957c4
+member	NativeUI.cs:OnLfpButton	0f2572b4453edcfa
 member	NativeUI.cs:OnlineSuffix	db09dceb305564fa
 member	NativeUI.cs:Open	194366716c236166
 member	NativeUI.cs:OpenAdminActionLogPicker	ca83af164d87d8c2
@@ -67428,7 +67432,7 @@ member	NativeUI.cs:RefreshMyBetsLedger	d273f12af012e0a4
 member	NativeUI.cs:RefreshMyStats	65b445fc79af974e
 member	NativeUI.cs:RefreshOneVTwoTab	6ae4b00fd6c76445
 member	NativeUI.cs:RefreshOvtRecent	1827c38f2c62f861
-member	NativeUI.cs:RefreshQueueUI	cb98df5beb2bffab
+member	NativeUI.cs:RefreshQueueUI	373ccff2ce16b2e6
 member	NativeUI.cs:RefreshRecentSeries	764d538aef197eec
 member	NativeUI.cs:RefreshRecentTournamentPlacements	471a7649bd45389f
 member	NativeUI.cs:RefreshRecentTournamentsPopup	f3e1f357085ae43b
@@ -67509,7 +67513,7 @@ member	NativeUI.cs:StartCosmeticPlacementAdjustment	fdf47f21dd6c0a14
 member	NativeUI.cs:StartCosmeticUpload	94292dab93b20af7
 member	NativeUI.cs:StatsTrackingInfo	4118637255a6ad2f
 member	NativeUI.cs:SubmitCustomBet	cc269034d943d440
-member	NativeUI.cs:SubmitLfpPing	58a07344a6a90e51
+member	NativeUI.cs:SubmitLfpPing	b09395a61d142470
 member	NativeUI.cs:SwitchTab	6534236572def919
 member	NativeUI.cs:SyncShopArtistFilterButtons	d5843dcdd3063d46
 member	NativeUI.cs:SynthesizeBlankBracket	531bc3b48674393b
@@ -69745,12 +69749,12 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	f2b16c849c09700e	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	75517cbac7d14c37	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	5412be93d9435cb0	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	e23b05213e46a588	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	5919	57402	cd58e08a6482e3d0	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	5920	57405	9653d8b6e0c7c996	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	5920	57405	9653d8b6e0c7c996	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	5920	57405	9653d8b6e0c7c996	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	5920	57405	9653d8b6e0c7c996	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	5920	57405	9653d8b6e0c7c996	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	5920	57405	9653d8b6e0c7c996	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:OnRoundStart	9	9	fc1f4abd24c0772a	attached	GameStateWatcher.cs:PollMatchState

@@ -603,7 +603,7 @@ _ORM_CLASSES = frozenset({"SteamSigninFacts", "SteamFamilyShare", "ConnMarker"})
 # retention pass, the read function and its statement, and the ORM classes.
 _ALLOWED = {
     ("main.py", "_alt_record"),
-    ("main.py", "delete_player_data"),
+    ("main.py", "_alt_delete_account"),
     ("main.py", "_alt_retention_batch"),
     ("main.py", "_alt_retention_left"),
     ("main.py", "alt_relations"),

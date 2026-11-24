@@ -170,6 +170,14 @@ GAMBLER_SIGNUP_MARKER = "scr-gambler-signup-v1"
 # ping to this role. Resolved by NAME at runtime — a missing role degrades to
 # non-pinging plain text (gambler pattern); override via env on rename.
 LFP_ROLE_NAME = os.getenv("LFP_ROLE", "Ranked Looking For Player")
+# LFP-CASUAL-1: a ping whose modes name "casual" mentions this role too,
+# resolved by name the same way. The default is the name Sid uses for the
+# guild's casual role; its exact spelling there is not verified, so the
+# startup check prints whether it resolved ([PING-CHECK] kind=casual) and a
+# wrong default is corrected through the env key, with no code change. The
+# compose file passes the key with this same default repeated: an empty
+# value would resolve no role at all.
+LFP_CASUAL_ROLE_NAME = os.getenv("LFP_CASUAL_ROLE", "LookingForPlayer")
 # Bug reports auto-post here when players file via the F5 menu. ID gets a
 # safe default so an unset env var doesn't crash the bot — 0 disables.
 BUG_REPORTS_CHANNEL_ID = int(os.getenv("BUG_REPORTS_CHANNEL", "1501643180049960970"))
@@ -13106,8 +13114,8 @@ QDIG_DIFF_WORDS = {"winner": "winner", "roster": "number of players", "rounds_wo
                    "absent": "absent"}
 QDIG_HEADER = "Held game reports: results a player's game sent that the server did not record as sent."
 QDIG_HEADER_MORE = "Held game reports (continued):"
-QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept only marks the report "
-                        "as approved for a later ordered replay; it records nothing now. "
+QDIG_WHAT_YOU_CAN_DO = ("What you can do: in the Admin tab, Rejected Reports. Accept records the game with "
+                        "its ratings, wins, XP and gold. "
                         "Discard marks it as dismissed.")
 def _qdig_md(value, limit: int) -> str:
     """THE one function every string that goes to Discord from a D1 row
@@ -15662,31 +15670,44 @@ async def _ack_lfp_pings(ping_ids, undeliverable=False):
 # lists in mention_roles the roles it mentioned. Before this nothing read
 # either, so a ping that notified nobody looked like any other post.
 #
-# Each post prints ONE line in a closed grammar (tests/test_lfp_ping_signal.py
-# holds it by full match), and once per process after ready the same line per
-# kind with id=startup (R5):
-#   [PING] kind=<lfp|gambler> id=<startup|ID|invalid>
+# Each post prints ONE line per kind it names, in a closed grammar
+# (tests/test_lfp_ping_signal.py holds it by full match): one line for a
+# Gambler post and for an LFP row of one kind, two for an LFP row that names
+# ranked and casual. Once per process after ready the same line per kind
+# with id=startup (R5):
+#   [PING] kind=<lfp|casual|gambler> id=<startup|ID|invalid>
 #          role=<found|duplicate|normalised|absent|ambiguous> mentioned=<0-5>
 #          deliverable=<yes|no|unknown> listed=<0-5> delivered=<yes|no|unsent>
 # ID is 1 to 64 of 0-9, a-f and the dash (an lfp_pings id, a series uuid); any
 # other id prints as the word invalid. mentioned is how many roles the post
-# names: 1 for found and normalised, 2 to PING_ROLES_MAX for duplicate (several
+# names for that kind: 1 for found and normalised, 2 to PING_ROLES_MAX for duplicate (several
 # roles carry the exact name), 0 for absent and ambiguous. listed is how many of
 # them the role mentions of Discord's answer hold, and delivered is yes only
 # when it holds every one. delivered=unsent, with listed=0, is the startup
 # line's alone: nothing was sent. A failure of the check itself prints a line
 # whose first word is [PING-CHECK], never a [PING] line outside the grammar.
 # The warning runs as its own task, so no admin I/O delays an ack or the next
-# post, and the first ping of each kind waits for its startup line, at most
-# PING_STARTUP_WAIT_S (the first review round, 21 Nov 2026).
+# post, and the first ping of each kind waits for its startup line; a post
+# that names two kinds waits once, for both, at most PING_STARTUP_WAIT_S in
+# all (the first review round, 21 Nov 2026; LFP-CASUAL-1 round 1).
+#
+# LFP-CASUAL-1: the LFP post is one message for up to two kinds. kind=lfp is
+# its ranked role (LFP_ROLE_NAME), printed when the row names a ranked mode;
+# kind=casual is the casual role (LFP_CASUAL_ROLE_NAME), printed when the row
+# names "casual". A row that names both prints both lines, each with the
+# row's id, each saying whether its own role was pinged. One message names
+# at most PING_ROLES_MAX roles PER KIND (so at most twice that for a row of
+# both kinds). At startup, after each kind's [PING] startup line, one
+# [PING-CHECK] line says in plain words what the check saw for the configured
+# role name, and names the env key that sets it.
 PING_WARN_EVERY_S = 24 * 60 * 60
-PING_ROLES_MAX = 5              # the most roles one ping mentions when several carry the exact name
-PING_STARTUP_WAIT_S = 10        # the most the first ping of a kind waits for its startup line, once per process
+PING_ROLES_MAX = 5              # the most roles one kind of a ping mentions when several carry the exact name
+PING_STARTUP_WAIT_S = 10        # the most the first ping of a kind waits for its startup lines, once per process
 PING_STARTUP_STEP_S = 0.5       # how often that wait looks
 _PING_STARTUP = object()        # the id of the startup line, never an api value
 _PING_ID_RE = re.compile(r"[0-9a-f-]{1,64}")
 _PING_WORDS = {
-    "kind": ("lfp", "gambler"),
+    "kind": ("lfp", "casual", "gambler"),
     "role": ("found", "duplicate", "normalised", "absent", "ambiguous"),
     "deliverable": ("yes", "no", "unknown"),
     "delivered": ("yes", "no", "unsent"),
@@ -15696,8 +15717,11 @@ _PING_MENTIONS = {"found": (1, 1), "normalised": (1, 1), "duplicate": (2, PING_R
                   "absent": (0, 0), "ambiguous": (0, 0)}
 _PING_KIND_SHOWN = {
     "lfp": "Ranked Looking For Player ping (the in-game LFP button)",
+    "casual": "casual Looking For Player ping (the in-game LFP button, Casual picked)",
     "gambler": "Gambler ping (a bet opened)",
 }
+# The env key that sets each kind's role name, named in its startup line.
+_PING_ROLE_ENV = {"lfp": "LFP_ROLE", "casual": "LFP_CASUAL_ROLE", "gambler": "GAMBLER_ROLE"}
 # Discord's own words for the permission (MENTION_EVERYONE in the api); a
 # zero-width space after each at sign, so the warning can never mention.
 _PING_PERMISSION = "Mention @\N{ZERO WIDTH SPACE}everyone, @\N{ZERO WIDTH SPACE}here, and All Roles"
@@ -15871,7 +15895,7 @@ def _ping_warning_text(kind, configured, roles, role_word, deliverable, delivere
             if count > len(roles):
                 lines.append(f"**Cause: {count} roles have the same name.** Each is named **{shown}**, and the "
                              f"post mentioned the {len(roles)} oldest of them (one ping mentions at most "
-                             f"{PING_ROLES_MAX}).")
+                             f"{PING_ROLES_MAX} per kind).")
             else:
                 lines.append(f"**Cause: {count} roles have the same name.** Each is named **{shown}**, and the "
                              "post mentioned every one of them.")
@@ -15975,7 +15999,7 @@ def _ping_warning_owed(role_word, deliverable, delivered) -> bool:
 
 async def _ping_after_send(kind, ping_id, configured, roles, role_word, deliverable, channel, message):
     """After Discord accepted a role ping: R3's reading of its answer, the
-    post's one [PING] line, and, when a warning is owed, its task started.
+    post's [PING] line for this kind, and, when a warning is owed, its task started.
     It awaits nothing, so no admin I/O stands between the post and its ack or
     before the next post; it stays a coroutine so that both sites call it as
     before. Never raises: the post is already counted as posted, and nothing
@@ -15987,6 +16011,47 @@ async def _ping_after_send(kind, ping_id, configured, roles, role_word, delivera
             _ping_warn_start(kind, configured, roles, role_word, deliverable, delivered, channel, message)
     except Exception as ex:
         _ping_log(f"[PING-CHECK] kind={kind} check after the post failed: {type(ex).__name__}")
+
+
+_PING_HINT_WORDS = ("look", "casual", "lfp")   # what a role name the NO line lists contains, normalised
+PING_HINTS_MAX = 5                             # the most role names the NO line lists
+
+
+def _ping_shared_role_line(ranked_roles, casual_roles):
+    """LFP-CASUAL-1 (review round 2): when the ranked and the casual role
+    names resolve to the same role (configured so, or one normalised alias),
+    a casual-only ping mentions that role, as a ranked ping does. Returns the
+    one startup [PING-CHECK] line that says so, naming both env keys, or None
+    when the two kinds share no role. The ping still posts either way."""
+    ranked_ids = {getattr(r, "id", None) for r in (ranked_roles or ())} - {None}
+    shared = [r for r in (casual_roles or ()) if getattr(r, "id", None) in ranked_ids]
+    if not shared:
+        return None
+    names = ", ".join(repr(str(getattr(r, "name", "")))[:60] for r in shared[:PING_ROLES_MAX])
+    return (f"[PING-CHECK] kind=casual startup: the casual and the ranked role names resolve to the same role "
+            f"({names}): a casual-only ping mentions that role, as a ranked ping does "
+            f"(env {_PING_ROLE_ENV['casual']} and env {_PING_ROLE_ENV['lfp']})")
+
+
+def _ping_resolved_line(kind, configured, role_word, mentioned, roles=()) -> str:
+    """R5 (LFP-CASUAL-1): the startup [PING-CHECK] line of a kind, in plain
+    words: what the startup check saw for its configured role name, and the
+    env key that sets the name. When no role was found to mention, it also
+    lists up to PING_HINTS_MAX of the guild's role names whose normalised form
+    contains look, casual or lfp (each through repr, cut at 60 characters,
+    oldest role first), or says that none does: a default that does not match
+    the guild can be corrected from the log by setting that key."""
+    key = _PING_ROLE_ENV[kind]
+    name = repr(str(configured))[:120]
+    if mentioned:
+        return (f"[PING-CHECK] kind={kind} startup: role resolved: yes ({role_word}, {mentioned} role(s) for the "
+                f"name {name}; env {key})")
+    named = [r for r in (roles or ()) if isinstance(getattr(r, "name", None), str)]
+    near = [r for r in sorted(named, key=lambda r: (getattr(r, "id", 0), r.name))
+            if any(word in _ping_role_norm(r.name) for word in _PING_HINT_WORDS)][:PING_HINTS_MAX]
+    seen = ", ".join(repr(r.name)[:60] for r in near) if near else "none"
+    return (f"[PING-CHECK] kind={kind} startup: role resolved: NO ({role_word}): the startup check found no role "
+            f"to mention for the name {name} (env {key}); role names containing look, casual or lfp: {seen}")
 
 
 async def _ping_startup_lines():
@@ -16001,7 +16066,9 @@ async def _ping_startup_lines():
     if _ping_startup_done:
         return
     _ping_startup_done = True
+    resolved = {}
     for kind, channel_id, configured in (("lfp", QUEUE_BEACON_CHANNEL_ID, LFP_ROLE_NAME),
+                                         ("casual", QUEUE_BEACON_CHANNEL_ID, LFP_CASUAL_ROLE_NAME),
                                          ("gambler", LIVE_BETS_CHANNEL_ID, GAMBLER_ROLE_NAME)):
         try:
             channel = None
@@ -16017,31 +16084,46 @@ async def _ping_startup_lines():
                                   f"unavailable: {type(ex).__name__}")
             guild = getattr(channel, "guild", None)
             ping_roles, role_word = _ping_role_resolve(guild.roles if guild is not None else (), configured)
+            resolved[kind] = ping_roles
             _ping_log(_ping_line(kind, _PING_STARTUP, role_word, len(ping_roles),
                                  _ping_deliverable(ping_roles, channel), 0, "unsent"))
+            _ping_log(_ping_resolved_line(kind, configured, role_word, len(ping_roles),
+                                          guild.roles if guild is not None else ()))
         except Exception as ex:
             _ping_log(f"[PING-CHECK] kind={kind} startup check failed: {type(ex).__name__}")
         finally:
             _ping_startup_settled.add(kind)
+    # After both LFP kinds' checks: one line when they resolve to one role.
+    try:
+        shared_line = _ping_shared_role_line(resolved.get("lfp"), resolved.get("casual"))
+        if shared_line:
+            _ping_log(shared_line)
+    except Exception as ex:
+        _ping_log(f"[PING-CHECK] kind=casual startup shared-role check failed: {type(ex).__name__}")
 
 
-async def _ping_startup_wait(kind) -> None:
+async def _ping_startup_wait(*kinds) -> None:
     """R5: the first ping of a kind in this process posts only after that
-    kind's startup line, or its [PING-CHECK] line, has printed, waiting at
-    most PING_STARTUP_WAIT_S by the bot's monotonic clock. When the bound
-    passes first, it prints "[PING-CHECK] kind=<kind> startup line not
-    printed within 10 s: the ping posts without it" and the ping posts all
-    the same: a ping is never held longer than the bound, and never dropped.
-    Once per kind per process: no later ping of that kind waits."""
-    if kind in _ping_startup_waited:
+    kind's startup line, or its [PING-CHECK] line, has printed. A post names
+    every kind it is for, and waits ONCE for all of them: one deadline,
+    PING_STARTUP_WAIT_S by the bot's monotonic clock, for the post however
+    many kinds it names (LFP-CASUAL-1 round 1). When the bound passes first,
+    it prints "[PING-CHECK] kind=<kind> startup line not printed within 10 s:
+    the ping posts without it" for each kind still unsettled and the ping
+    posts all the same: a ping is never held longer than the bound, and never
+    dropped. Once per kind per process: no later ping of that kind waits."""
+    kinds = [kind for kind in kinds if kind not in _ping_startup_waited]
+    if not kinds:
         return
-    _ping_startup_waited.add(kind)
+    _ping_startup_waited.update(kinds)
     deadline = time.monotonic() + PING_STARTUP_WAIT_S
-    while kind not in _ping_startup_settled:
+    while any(kind not in _ping_startup_settled for kind in kinds):
         left = deadline - time.monotonic()
         if left <= 0:
-            _ping_log(f"[PING-CHECK] kind={kind} startup line not printed within {PING_STARTUP_WAIT_S} s: "
-                      "the ping posts without it")
+            for kind in kinds:
+                if kind not in _ping_startup_settled:
+                    _ping_log(f"[PING-CHECK] kind={kind} startup line not printed within {PING_STARTUP_WAIT_S} s: "
+                              "the ping posts without it")
             return
         await asyncio.sleep(min(PING_STARTUP_STEP_S, left))
 
@@ -16052,7 +16134,9 @@ async def poll_lfp_pings():
     try:
         if not QUEUE_BEACON_CHANNEL_ID:
             return
-        data = await api_get("/internal/lfp-pings")
+        # LFP-CASUAL-1: this bot posts the casual kind, so it declares it; the
+        # api gives a row naming casual only to a poller that does.
+        data = await api_get("/internal/lfp-pings?kinds=casual")
         if not data or not data.get("pings"):
             return
         posted, dead = [], []
@@ -16085,36 +16169,69 @@ async def poll_lfp_pings():
                         # server's expires_at filter self-heals stale rows.
                         print(f"[LFP] channel {QUEUE_BEACON_CHANNEL_ID} unavailable: {ex}")
                         break
-            # LFP-PING-1 R5: the process's first LFP ping waits for the lfp
-            # startup line, at most PING_STARTUP_WAIT_S, then posts all the same.
-            await _ping_startup_wait("lfp")
-            # LFP-PING-1: the one resolution both role pings use (R1: each role
-            # of the exact name, at most PING_ROLES_MAX), and whether Discord
-            # would let the ping notify, read before the send (R2).
-            ping_roles, role_word = _ping_role_resolve(channel.guild.roles if channel.guild else (), LFP_ROLE_NAME)
-            deliverable = _ping_deliverable(ping_roles, channel)
-            mention = " ".join(r.mention for r in ping_roles) if ping_roles else f"@{LFP_ROLE_NAME}"
-            display_name = ping.get("display_name") or ping.get("steam_id") or "Player"
-            message = (ping.get("message") or "").strip()
-            expires_unix = int(ping.get("expires_unix") or 0)
             # Aug 7 item 11: mode picks + duration in the headline. Key names
             # match the server's serialization verbatim (#152).
             modes = (ping.get("modes") or "1v1").strip()
+            # LFP-CASUAL-1: "casual" names the casual role; every other mode
+            # word is a ranked mode and names the ranked role, as before. A row
+            # without "casual" takes exactly the path it took before.
+            mode_parts = [part for part in modes.split(",") if part]
+            casual = "casual" in mode_parts
+            ranked_parts = [part for part in mode_parts if part != "casual"]
+            ranked = bool(ranked_parts) or not casual
+            # LFP-PING-1 R5: the process's first ping of a kind waits for that
+            # kind's startup line; the kinds of this row are known first, so
+            # the row waits once, at most PING_STARTUP_WAIT_S in all, then posts
+            # all the same.
+            await _ping_startup_wait(*[kind for kind, wanted in (("lfp", ranked), ("casual", casual)) if wanted])
+            # LFP-PING-1: the one resolution both role pings use (R1: each role
+            # of the exact name, at most PING_ROLES_MAX), and whether Discord
+            # would let the ping notify, read before the send (R2), per kind.
+            guild_roles = channel.guild.roles if channel.guild else ()
+            kinds = []      # (kind, configured name, its roles, role word, deliverable)
+            for kind, wanted, configured in (("lfp", ranked, LFP_ROLE_NAME),
+                                             ("casual", casual, LFP_CASUAL_ROLE_NAME)):
+                if wanted:
+                    roles_k, word_k = _ping_role_resolve(guild_roles, configured)
+                    kinds.append((kind, configured, roles_k, word_k, _ping_deliverable(roles_k, channel)))
+            # ONE message for both kinds: each kind's roles, or its name as
+            # plain text when none resolved. ping_roles, every role this post
+            # mentions, is the allowed mentions' list; a role two kinds share is
+            # written and allowed once.
+            ping_roles, mention_parts = [], []
+            for _kind, configured, roles_k, _word, _dv in kinds:
+                fresh = [r for r in roles_k if all(r.id != have.id for have in ping_roles)]
+                ping_roles.extend(fresh)
+                if fresh:
+                    mention_parts.append(" ".join(r.mention for r in fresh))
+                elif not roles_k:
+                    mention_parts.append(f"@{configured}")
+            mention = " ".join(mention_parts)
+            display_name = ping.get("display_name") or ping.get("steam_id") or "Player"
+            message = (ping.get("message") or "").strip()
+            expires_unix = int(ping.get("expires_unix") or 0)
             exp_min = int(ping.get("expires_minutes") or 60)
             modes_label = "+".join(
                 part.upper() if part == "ffa" else part
-                for part in modes.split(",") if part)
+                for part in ranked_parts)
+            if ranked and casual:
+                what_label = f"ranked {modes_label} and casual"
+            elif casual:
+                what_label = "casual"
+            else:
+                what_label = f"ranked {modes_label}"
             dur_label = {15: "15min", 30: "30min", 60: "1h", 180: "3h"}.get(exp_min, f"{exp_min}min")
             content = (f"{mention} \N{LEFT-POINTING MAGNIFYING GLASS} "
                        f"**{_escape_md(str(display_name))}** "
-                       f"(<@{discord_id}>) LFP: ranked {modes_label} for {dur_label}!")
+                       f"(<@{discord_id}>) LFP: {what_label} for {dur_label}!")
             if message:
                 content += f"\n> {_lfp_render_message(message, channel.guild)}"
             content += f"\nExpires <t:{expires_unix}:R>"
             sent = None
             try:
                 # allowed_mentions is the real anti-injection gate: ONLY the
-                # LFP role pings (each role of its exact name, R1); the
+                # roles of the kinds this row names ping (ranked, casual or
+                # both; each role of its exact name, R1); the
                 # requester's <@id> renders clickable
                 # without pinging; injected mention text in the message is
                 # inert. suppress_embeds keeps any link-shaped text that
@@ -16138,9 +16255,10 @@ async def poll_lfp_pings():
                 print(f"[LFP] post failed for ping {ping_id}: {ex}")
             if sent is not None:
                 # R3 and R4 (LFP-PING-1), after the post is counted as posted:
-                # what Discord's answer says; nothing here moves the ack (R6).
-                await _ping_after_send("lfp", ping_id, LFP_ROLE_NAME, ping_roles, role_word, deliverable,
-                                       channel, sent)
+                # what Discord's answer says, one [PING] line per kind the row
+                # names (LFP-CASUAL-1); nothing here moves the ack (R6).
+                for kind, configured, roles_k, word_k, dv_k in kinds:
+                    await _ping_after_send(kind, ping_id, configured, roles_k, word_k, dv_k, channel, sent)
             await asyncio.sleep(0.2)
         if len(_lfp_seen_ids) > 2000:
             # Overflow prune must RETAIN this tick's ids: an unconditional

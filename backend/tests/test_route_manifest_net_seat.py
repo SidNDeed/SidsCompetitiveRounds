@@ -1255,6 +1255,27 @@ def test_the_helper_closure_stays_affordable():
     # +12 here and reached _aer_rows and _aer_fail. The four report routes
     # measure 218 and enter above the rank; the rank position moves
     # 212 -> 214. Inside 87, so the bound stays.
+    # The review counting program (review_calibrate.py, a program the server
+    # verb starts; no app module imports it) joins backend/api: 93 measured
+    # at GET /api/v1/i18n/pack/{locale} of 5986 indexed bindings over 438
+    # routes, against 86 at GET /api/v1/read-gate/probe of 5855 on main
+    # e36c1dcb, the rank position 219 on both. +7 on the median route by
+    # shared names, none executed by it: the route's closure names _refuse
+    # (read_gate's helper), which folds in the program's _refuse, and through
+    # it the names Refused and EXIT_USAGE, which fold in the program's own and
+    # review_rules', apt_lock's and build_manifest's Refused and review_rules'
+    # EXIT_USAGE. The sum was written before the measurement: 86 + 7 = 93.
+    # The bound moves to 98, ~5% over the measurement, for that reason and no
+    # other.
+    # The counting program's carry (RULING-CARRY-9): the program's fourteen
+    # module-level names the walk entered by shared names take its mark
+    # (calibrate_cli, calibrate_render, _calibrate_refuse, CalibrateRefused,
+    # CALIBRATE_EXIT_USAGE and the rest), so the seven names of the move to
+    # 98 above are gone, and no route's closure holds a code binding of the
+    # program (the holder in test_review_calibrate_build.py). 86 measured at
+    # GET /api/v1/read-gate/probe, position 219 of 438, the same route and
+    # value as on main e36c1dcb. The bound goes back to 87, main's bound, for
+    # that reason and no other; the move to 98 stays in the history.
     assert code_median <= 87, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
@@ -1864,6 +1885,79 @@ def test_the_helper_closure_stays_affordable():
     # route reads in both arms; no other code binding of that closure is new.
     # The bound moves to 600, the measured value, for that reason and no
     # other.
+    # account deletion lock lane (2026-11-20), claude/mdpl-1116 at its merge of
+    # the bot text lane f5de122a (33aa143d): 601 measured at GET
+    # /api/v1/health, of 5776 indexed bindings (598 at f5de122a, of 5737, the
+    # same walk over that tree): +3 by name, none leaves.
+    # main._ACCOUNT_DELETION_LOCK_BUILD, the lane's build marker, which the
+    # health route reads in both arms; and main's _DeletionRowHeld and
+    # _DeletionPastDeadline, the two signal classes of an account deletion's
+    # bound: _pc_trade_schema, which the connected arm of /health runs through
+    # _pc_trading_word, names them in the except clause that hands them back to
+    # that bound, and they arise only inside a deletion attempt. The bound
+    # moves to 601, the measured value, for that reason and no other. The
+    # median (86 against 87) and p90 (216 against 225) bounds stay, and so do
+    # the three bounds of the whole closure (240 against 245, 402 against 425,
+    # and 865 against 897 at the health route, +3 by the same three names).
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of the stack: the two bounds above were set on two trees
+    # (600 on the stack, 601 on the lane); the merge keeps the lane's 601,
+    # the larger, until the closing item measures the merged tree and
+    # records the value here.
+    # Its closing item (2026-11-20): 603 measured at GET /api/v1/health on
+    # the merged tree (600 on the stack's tip 77969323 and 601 on the lane's
+    # tip 4dfe6527, the same walk over each tree): +3 by name against the
+    # stack, main._ACCOUNT_DELETION_LOCK_BUILD, _DeletionRowHeld and
+    # _DeletionPastDeadline (the lane's three, read above), and +2 against
+    # the lane, main._QAPPLY_BUILD and main._BAN_SWEEP_BUILD (the stack's
+    # build markers the lane did not hold); no other code binding of that
+    # closure is new. The bound moves to 603, the measured value, for that
+    # reason and no other. The median (87 against 87) and p90 (230 against
+    # 239) bounds stay, and so do the three bounds of the whole closure (244
+    # against 245, 425 against 425, 867 against 897 at the health route).
+    # LFP-CASUAL-1 (2026-11-22), its build marker on top of a755b6a4: 601
+    # measured at GET /api/v1/health (600 at a755b6a4, the same walk over that
+    # tree): +1 by name, main._LFP_CASUAL_BUILD, which the health route reads
+    # in both arms; the two trees' reached sets are otherwise equal by name.
+    # The bound moves to 601, the measured value, for that reason and no
+    # other.
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of main e36c1dcb (the freeze, e6ffe45b): 604 measured at
+    # GET /api/v1/health on the merged tree, of 5896 indexed bindings (603 on
+    # the lane's tip 3f189be5 and 601 on main e36c1dcb, the same walk over
+    # each tree; 600 on the stack's tip 77969323 and on the merge base
+    # a213c771): +1 by name against the lane, main._LFP_CASUAL_BUILD (main's
+    # build marker, read above), and +3 against main,
+    # main._ACCOUNT_DELETION_LOCK_BUILD, _DeletionRowHeld and
+    # _DeletionPastDeadline (the lane's three, read above); no other code
+    # binding of that closure is new. The bound moves to 604, the measured
+    # value, for that reason and no other. The median (87 against 87) and p90
+    # (230 against 239) bounds stay, and so do the three bounds of the whole
+    # closure (244 against 245, 425 against 425, 868 against 897 at the
+    # health route).
+    # The review counting program (review_calibrate.py) on main e36c1dcb
+    # (2026-11-23): 602 measured at GET /api/v1/health (601 on main, the same
+    # walk over that tree): +1 by name, main._REVIEW_CALIBRATE_BUILD, the
+    # lane's build marker, which the health route reads in both arms; no code
+    # binding of the program is in any closure. The bound moves to 602, the
+    # measured value, for that reason and no other.
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of the counting tool's tip 07268bd8 (2026-11-23): 605
+    # measured at GET /api/v1/health on the merged tree, of 6031 indexed
+    # bindings (604 on the lane's tip f3224b27, the same walk over each
+    # tree): 604 + 1 by name, main._REVIEW_CALIBRATE_BUILD (the counting
+    # tool's build marker, read above), which the health route reads in both
+    # arms; no other code binding of that closure is new. The bound moves to
+    # 605, the measured value, for that reason and no other. The median (87
+    # against 87) and p90 (230 against 239) bounds stay, and so do the three
+    # bounds of the whole closure (250 against 261, 433 against 453, 882
+    # against 897 at the health route).
+    # The ban answers (BAN-FIRST-1) on the stack's tip b8b8301d (2026-11-24):
+    # 606 measured at GET /api/v1/health of 6034 indexed bindings (605 of 6033
+    # at b8b8301d): +1 by name, main._BAN_ANSWERS_BUILD, the build marker,
+    # which the health route reads in both arms; that closure is otherwise
+    # equal by name. The bound moves to 606, the measured value, for that
+    # reason and no other.
     # CHEAT-ALT-1 (2026-11-22), the sign-in records' health keys, on the base
     # edfbc7f5: 603 measured at GET /api/v1/health (600 at edfbc7f5, the
     # same walk over that tree): +3 by name, main._ALT_SIGNALS_BUILD, the
@@ -1874,7 +1968,7 @@ def test_the_helper_closure_stays_affordable():
     # test_alt_signals_pure.py holds. The bound moves to 603, the measured
     # value, for that reason and no other. The other five bounds hold (code
     # 86 / 228, whole 242 / 423 / 868 over 438 routes).
-    assert code_worst <= 603, f"worst code closure {code_worst} of {total}"
+    assert code_worst <= 606, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -1967,7 +2061,15 @@ def test_the_helper_closure_stays_affordable():
     # 403 and enter above the rank; the rank position moves 212 -> 214. No
     # route crossed into a hub. The bound moves to 245, ~5% over the
     # measurement, for that reason and no other.
-    assert all_median <= 245, f"median closure {all_median} of {total}"
+    # The review counting program (review_calibrate.py) on main e36c1dcb
+    # (2026-11-23): 248 measured at POST /api/v1/shop/purchase, position 219
+    # of 438 (242 there on main, the same route at the rank): +6 by name, the
+    # program's import lines datetime, hashlib, os, text, time and timezone,
+    # which the route's own names fold in by the walk's every-match rule;
+    # none executed by the route, and no code binding of the program is in
+    # any closure. The bound moves to 261, ~5% over the measurement, for that
+    # reason and no other.
+    assert all_median <= 261, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -2235,7 +2337,15 @@ def test_the_helper_closure_stays_affordable():
     # main's rank route GET /api/v1/queue/poll/{steam_id} measures 375 -> 387
     # by the same fold as the median. The bound moves to 425, ~5% over the
     # measurement, for that reason and no other.
-    assert all_p90 <= 425, f"p90 closure {all_p90} of {total}"
+    # The review counting program (review_calibrate.py) on main e36c1dcb
+    # (2026-11-23): 431 measured at POST /api/v1/pc/trades/cancel, position
+    # 394 of 438 (423 there on main, the same route at the rank): +8 by
+    # name, the program's import lines datetime, hashlib, math, stat, text,
+    # time, timezone and warnings, folded in as at the median; none executed
+    # by the route. The bound moves to 453, ~5% over the measurement, for
+    # that reason and no other. The worst (879 at GET /api/v1/health: the
+    # build marker and 13 import lines over main's 865) stays inside 897.
+    assert all_p90 <= 453, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the

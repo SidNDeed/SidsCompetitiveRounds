@@ -243,6 +243,7 @@ CREATE TABLE gold_transactions (
     player_id UUID,
     amount INTEGER NOT NULL,
     reason VARCHAR(64),
+    reference_id TEXT,  -- as 020_economy.sql creates it: the Admin list's verdict reads it (_QAPPLY_SQL_RECEIPT)
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE pc_packs (

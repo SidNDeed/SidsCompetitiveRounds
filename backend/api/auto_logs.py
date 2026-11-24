@@ -2249,12 +2249,13 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         text("SELECT id FROM players WHERE steam_id = :sid"), {"sid": req.steam_id},
     )).mappings().first()
     # CARRIED AS A VALUE, because the transaction that read it ends on the
-    # next line. The player's row is not re-read before the INSERT (#208 asks
-    # for a re-read of what a CONCURRENT request can change, and the cap is
-    # re-read there for exactly that reason): the only thing that removes a
-    # players row is the account's deletion, and then the INSERT's foreign
-    # key refuses the stale id and the upload takes the INSERT arm's 503 --
-    # the conservative direction, retried after the next match with no row.
+    # next line. The account's deletion removes no players row: it tombstones
+    # this one in place (delete_player_data rewrites steam_id and sets
+    # deleted_at), so the INSERT's foreign key would accept the carried id.
+    # T2 therefore reads the row again by this id under the identity lock its
+    # ban gate takes, and refuses a deleted player 404 with the stored blob
+    # discarded (MDPL-GATE-REREAD-1). An id with no players row carries None,
+    # which T2 has nothing to read again for; its INSERT writes NULL.
     player_id = str(player_row["id"]) if player_row else None
 
     # T1a ENDS HERE, BEFORE THE SCRUB AND THE GZIP (R7-M4). Everything this
@@ -2536,7 +2537,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
             # commits after T1's read does not let the upload stand. A refusal
             # discards the stored blob the way every refusal after the write
             # does: the transaction ended first, then the cleanup.
-            from main import _ban_lock_and_gate   # late import: main imports this module
+            from main import _ban_lock_and_gate, _reread_player_or_404   # late import: main imports this module
             try:
                 await _ban_lock_and_gate(db, [req.steam_id], request)
             except HTTPException:
@@ -2545,6 +2546,24 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
                 print(f"[AUTO-LOG] refused 409 for {report_id}: an active ban read "
                       f"in the writing transaction; {outcome}")
                 raise
+            # MDPL-GATE-REREAD-1: player_id was read in T1a, before the wait
+            # above. Read again by id under the identity lock the gate holds to
+            # the commit, a deletion that committed meanwhile is refused 404.
+            # The transaction ends first, so nothing of the upload is stored;
+            # the blob's removal after it is BEST EFFORT (_discard_for_refusal
+            # never raises; a blob it cannot remove keeps its orphan marker for
+            # the retention loop's sweep, and the line says so). The arm's own
+            # literal 404 is read by test_auto_log_client_contract.py's census
+            # of this route's codes; the client latches uploads off on a 404.
+            try:
+                if player_id is not None:
+                    await _reread_player_or_404(db, player_id)
+            except HTTPException:
+                await _end_transaction(db)
+                outcome = await _discard_for_refusal(own)
+                print(f"[AUTO-LOG] refused 404 for {report_id}: the player's row, read "
+                      f"again by id in the writing transaction, is deleted; {outcome}")
+                raise HTTPException(status_code=404, detail="Player not found")
             try:
                 count, oldest = await asyncio.wait_for(
                     _lock_and_count(db, req.steam_id), _span_budget(span_deadline))

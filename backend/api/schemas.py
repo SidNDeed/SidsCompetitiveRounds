@@ -1351,8 +1351,8 @@ class HealthResponse(BaseModel):
     # delete_player_data writes moderation_cases only in its last statement,
     # which skips a row another transaction holds, and the janitor finishes a
     # skipped row; a mail send keeps its order; the retention sweep waits for
-    # no row lock; the open item MDPL, two deletions against each other on
-    # mail rows that are not case rows, is not in it). It names build
+    # no row lock; MDPL, the deletion's lock order against other writers and
+    # its bounded new attempts, is not in it). It names build
     # identity only. A code
     # constant, equal on both roles by construction, so the train can read it
     # through the edge; the lane adds no route and no key to any answer, and
@@ -1386,6 +1386,16 @@ class HealthResponse(BaseModel):
     # by nothing else (#306). No default, as above. Absent on any build before
     # it.
     ban_sweep_build: int
+    # ban_answers_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_ANSWERS_BUILD; 1 = in this build GET /mod/check
+    # reads the ban of an id that has no players row too, and the account
+    # deletion refuses an account under an active ban). It names build
+    # identity only. A code constant, equal on both roles by construction, so
+    # the train can read it through the edge; this is the key that tells a
+    # stale box from a refreshed one (learnings 780, 794, 1186). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    ban_answers_build: int
     # bot_text_build: release-train verification plumbing, not a design
     # mechanism (main._BOT_TEXT_BUILD; 1 = in this build typed text in the
     # api's Discord posts and DMs and in the bot's messages passes one helper
@@ -1395,6 +1405,38 @@ class HealthResponse(BaseModel):
     # 794). Probed by the release train and read by nothing else (#306). No
     # default, as above. Absent on any build before it.
     bot_text_build: int
+    # account_deletion_lock_build: release-train verification plumbing, not
+    # a design mechanism (main._ACCOUNT_DELETION_LOCK_BUILD; 1 = in this
+    # build delete_player_data and the pending_dms writers take their locks
+    # in one order, and a deletion that PostgreSQL ends as a deadlock victim
+    # runs again within its deadline). It names build identity only. A code
+    # constant, equal on both roles by construction, so the train can read
+    # it through the edge; the lane adds no route and no key to any answer,
+    # and this is the key that tells a stale box from a refreshed one
+    # (learnings 780, 794). Probed by the release train and read by nothing
+    # else (#306). No default, as above. Absent on any build before it.
+    account_deletion_lock_build: int
+    # lfp_casual_build: release-train verification plumbing, not a design
+    # mechanism (main._LFP_CASUAL_BUILD; 1 = this build admits a casual-only
+    # looking-for-players request of a player with ranked off, keeps one
+    # cooldown over both kinds, and answers rows naming casual only to a poller
+    # that declares the casual kind). It names build identity only. A code
+    # constant, equal on both roles by construction, so the train can read it
+    # through the edge; this is the key that tells a stale box from a
+    # refreshed one (learnings 780, 794, 1186). Probed by the release train
+    # and read by nothing else (#306). No default, as above. Absent on any
+    # build before it.
+    lfp_casual_build: int
+    # review_calibrate_build: release-train verification plumbing, not a
+    # design mechanism (main._REVIEW_CALIBRATE_BUILD; 1 = this build carries
+    # the counting tool backend/api/review_calibrate.py, which the app does
+    # not import). It names build identity only. A code constant, equal on
+    # both roles by construction, so the train can read it through the edge;
+    # the tool has no route, so this is the key that tells a stale box from a
+    # refreshed one (learnings 780, 794, 1186). Probed by the release train
+    # and read by nothing else (#306). No default, as above. Absent on any
+    # build before it.
+    review_calibrate_build: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
     # wrote (build_manifest.py: the build context's digest and the identity of
     # every installed wheel and .deb), "absent" when the process was not

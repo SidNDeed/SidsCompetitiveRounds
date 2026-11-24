@@ -2,10 +2,17 @@
 three alternate-account signal tables (items 11 and 12), against a real
 PostgreSQL.
 
-  * The three DELETEs run right after the identity key, before the player
-    read, and both early answers (not_found, already_deleted) commit them: an
-    identity with no players row loses its rows too, its answer is unchanged
-    and no tombstone is written for it.
+  * The three DELETEs (main._alt_delete_account) run at three places, each
+    under the identity key, the deletion key and the ban read: in the branch
+    of a missing players row and in the branch of a row already deleted,
+    each before that branch's commit (an identity with no players row loses
+    its rows too, its answer is unchanged and no tombstone is written for
+    it); and for a live row directly after the pool snapshot's key, before
+    the first personal DELETE, so no row lock of the deletion comes before
+    that key. A retention batch holding one of the account's rows there ends
+    the attempt as a held row, and the bound's next attempt deletes them.
+  * An account under an active ban is refused (409) before any of the three
+    places: its rows stay.
   * Each DELETE runs in its own savepoint and tolerates exactly one failure,
     the table not existing (42P01). Any other failure fails the deletion and
     nothing of it is committed.
@@ -24,6 +31,7 @@ dropped at the end:
 
 Ids are synthetic (below the first individual-account SteamID64).
 """
+import ast
 import asyncio
 import hashlib
 import hmac
@@ -31,6 +39,7 @@ import itertools
 import os
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = os.path.normpath(os.path.join(HERE, "..", "api"))
@@ -39,11 +48,13 @@ for _p in (API, HERE):
         sys.path.insert(0, _p)
 
 import pytest  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
 import main  # noqa: E402
+import alt_signals as alt_signals_mod  # noqa: E402
 import cf_asm  # noqa: E402
 import ladder_pg_harness as harness  # noqa: E402
 import test_title_ladder_hooks_live as lh  # noqa: E402
@@ -290,6 +301,120 @@ def test_deletion_waits_for_the_holder_of_the_identity_key_and_then_takes_its_ro
     assert waited, "the deletion did not wait for the holder of the account's key"
     assert ans["status"] == "anonymized", ans
     assert rows == [0, 0, 0]
+
+
+def test_a_banned_accounts_deletion_is_refused_and_keeps_its_rows(case, secret):
+    """An active ban refuses the deletion (409, _ban_gate_or_raise) before any
+    of the three places: the account's rows of the three tables and its
+    players row stay as they were."""
+    sid, admin = _sid(), _sid()
+
+    async def body(sm):
+        await _player(sm, sid)
+        await _plant(sm, sid)
+        async with sm() as db:
+            await db.execute(text("INSERT INTO admin_users (steam_id) VALUES (:a)"), {"a": admin})
+            await db.execute(text("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, expires_at)"
+                                  " VALUES (:s, 'alt-delete', :a, NOW() + interval '1 hour')"),
+                             {"s": sid, "a": admin})
+            await db.commit()
+        with pytest.raises(HTTPException) as got:
+            await _delete(sm, sid)
+        async with sm() as db:
+            row = (await db.execute(text("SELECT deleted_at FROM players WHERE steam_id = :s"),
+                                    {"s": sid})).all()
+        return got.value, row, await _rows(sm, sid)
+
+    exc, row, rows = _with(case, body)
+    assert exc.status_code == 409, (exc.status_code, exc.detail)
+    assert len(row) == 1 and row[0][0] is None, row
+    assert rows == [1, 1, 1], rows
+
+
+def test_a_retention_batch_holding_a_row_makes_the_attempt_yield_and_the_deletion_finishes(
+        case, secret, monkeypatch, capsys):
+    """The live row's place. A retention batch of the markers table
+    (main._alt_retention_batch, its rows read FOR UPDATE SKIP LOCKED) holds
+    the account's marker row, uncommitted, when the deletion reaches it after
+    the pool snapshot's key. The DELETE's wait reaches the bound's cap, the
+    attempt ends as a held row (_DeletionRowHeld) and the bound runs it again
+    after a pause. The batch lets go 0.1 s after that first miss, inside the
+    pause (the stack's held-for-a-moment form, test_mdpl_proof_pg's
+    _held_for_a_moment), and rolls back; the next attempt deletes every row
+    of the account and answers."""
+    sid = _sid()
+    at = datetime.now(timezone.utc) + timedelta(days=alt_signals_mod.DUE_DAYS + 1)
+    real = main._alt_delete_one
+    misses = []
+
+    async def body(sm):
+        await _player(sm, sid)
+        await _plant(sm, sid)
+        release, holding = asyncio.Event(), asyncio.Event()
+        async with sm() as batch:
+            async def hold_then_let_go():
+                holding.set()
+                await release.wait()
+                await batch.rollback()
+            batch.commit = hold_then_let_go
+            run = asyncio.create_task(main._alt_retention_batch(batch, "markers", at=at))
+            await asyncio.wait_for(holding.wait(), 10)
+            async with sm() as probe:
+                try:
+                    await probe.execute(text("SELECT 1 FROM conn_markers WHERE steam_id = :s FOR UPDATE NOWAIT"),
+                                        {"s": sid})
+                    held = False
+                except Exception:
+                    held = True
+                await probe.rollback()
+
+            async def spy(db, stmt, steam_id):
+                try:
+                    await real(db, stmt, steam_id)
+                except main._DeletionRowHeld as ex:
+                    misses.append(ex.what)
+                    if len(misses) == 1:
+                        asyncio.get_running_loop().call_later(0.1, release.set)
+                    raise
+            monkeypatch.setattr(main, "_alt_delete_one", spy)
+            capsys.readouterr()
+            ans = await asyncio.wait_for(_delete(sm, sid), 30)
+            taken = await asyncio.wait_for(run, 10)
+        return held, taken, ans, await _rows(sm, sid), capsys.readouterr().out
+
+    held, taken, ans, rows, out = _with(case, body)
+    assert held, "the batch did not hold the account's marker row"
+    assert taken >= 1, taken
+    assert misses == [main._DELETION_WAIT_WHAT], misses
+    assert ("deletion attempt 1 met a held %s;" % main._DELETION_WAIT_WHAT) in out, out[-2000:]
+    assert ans["status"] == "anonymized", ans
+    assert rows == [0, 0, 0], rows
+
+
+def test_the_three_places_of_the_deletion_stand_in_its_text():
+    """The three calls of main._alt_delete_account in delete_player_data, read
+    from main.py's syntax tree: the first statement of the missing-row branch
+    and of the already-deleted branch, each followed by that branch's commit
+    and its answer; and the statement directly after the pool snapshot's key
+    at the function's top level. No other call of it stands in the function."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "delete_player_data")
+    call = "await _alt_delete_account(db, steam_id)"
+    lines = [ast.unparse(st) for st in fn.body]
+    key = "await db.execute(text(\"SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))\"))"
+    assert lines.count(key) == 1, "the pool snapshot's key"
+    assert lines[lines.index(key) + 1] == call, lines[lines.index(key) + 1]
+    branches = {}
+    for st in fn.body:
+        if isinstance(st, ast.If) and ast.unparse(st.test) in ("player is None", "player.deleted_at is not None"):
+            branches[ast.unparse(st.test)] = [ast.unparse(s).split("\n")[0] for s in st.body]
+    assert branches == {
+        "player is None": [call, "await db.commit()", "return {'status': 'not_found', 'steam_id': steam_id}"],
+        "player.deleted_at is not None": [call, "await db.commit()",
+                                          "return {'status': 'already_deleted', 'steam_id': steam_id}"],
+    }, branches
+    assert sum(1 for n in ast.walk(fn) if isinstance(n, ast.Await) and ast.unparse(n) == call) == 3
 
 
 @pytest.mark.parametrize("absent",[(t,) for t in TABLES] + [TABLES], ids=list(TABLES) + ["all three"])

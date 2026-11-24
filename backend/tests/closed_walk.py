@@ -128,6 +128,17 @@ class Grammar:
     such a module gains anywhere, a store to the class or its attributes
     included, is refused by shape.
 
+    The definition scope also holds the SIGNAL CLASS rows (MDPL class C,
+    the rulings of 17 Nov 09:13:52Z and 10:05:30Z, question
+    2): ("<signal class>", name), ("<signal class>", name, file, the class
+    statement's whole ast.dump, docstring included) and ("<signal class>",
+    name, file, "uses", rule N's census of the name in that file), admitting
+    BY NAME the account deletion's two signal classes, which the bet helpers
+    the walks reach construct, exactly as frozen: the class statement, every
+    use of the name in its module, and the class object itself
+    (Bindings.namedtuple_class, _signal_class). Any other class keeps the
+    scope's rule.
+
     Any refusal raises Unclassified((line, sentence)), the sentence naming
     the file, the absolute line and the shape or anchor. `admitted` maps
     each span (file, line, name) to the number of nodes checked (the
@@ -272,7 +283,7 @@ def anchored_refusals(d, meaningful, allowed, filename):
 # Round 9 (ruling REHEARSAL-R8-A1, G2 and G3): the POSITION rule. An anchor
 # (above) binds a node's shape chain but not WHICH of the equal chains it
 # stands at, nor where among its siblings: a commit at the place of the
-# rollback at main.py:21870 matched the committing refusal at :21764
+# rollback at main.py:21915 matched the committing refusal at :21809
 # (finding grammar_shapes_a1:2106), and a commit moved up its block kept
 # its chain. A constant's shape binds its type, not its value. When
 # `allowed` holds POSITIONED, every anchored node and every constant of a
@@ -468,6 +479,126 @@ def _admitted_scope(name, scope, g, line):
     if len(got) > 0:
         raise Unclassified((line, f"{name}: {got[0][1]}"))
     return tree
+
+
+# MDPL class C (the integrator's rulings of 17 Nov 09:13:52Z and 10:05:30Z,
+# question 2): the definition scope's SIGNAL CLASS rows. The members a class
+# statement's own machinery puts in a class's namespace are set aside by the
+# member check.
+_SIGNAL = "<signal class>"
+_SIGNAL_SET_ASIDE = frozenset({"__module__", "__doc__", "__weakref__",
+                               "__dict__", "__qualname__", "__firstlineno__",
+                               "__static_attributes__"})
+
+
+def signal_name_key(name):
+    """The definition-scope row ("<signal class>", name) that names `name`
+    a signal class."""
+    return (_SIGNAL, name)
+
+
+def signal_key(name, filename, made):
+    """The definition-scope row ("<signal class>", name, file, ast.dump of
+    the class statement, its docstring included) that signal class `name`'s
+    one binding `made` in `filename` must match; None when `made` is not a
+    class statement."""
+    if not isinstance(made, _ast.ClassDef):
+        return None
+    return (_SIGNAL, name, filename, _ast.dump(made))
+
+
+def signal_uses_key(name, filename, rows):
+    """The definition-scope row ("<signal class>", name, file, "uses",
+    rows) that rule N's census of signal class `name` in its module
+    (_n_census: every occurrence of the name, each attribute and string
+    spelling of it) must equal, whole."""
+    return (_SIGNAL, name, filename, "uses", rows)
+
+
+def _signal_class(b, name, obj, line):
+    """The signal class `obj` that plain name `name` denotes (the resolver's
+    module binding, Bindings.namedtuple_class), admitted by the frozen
+    definition scope's SIGNAL CLASS rows; refused unless all of these hold:
+    `obj` is the class its own module defines (that module's binding of
+    the name, its qualified name the plain one, no metaclass); that module
+    binds the name once, by a class statement whose row (signal_key: its
+    whole ast.dump, docstring included) the scope holds; rule N's census of
+    the name in that module equals its frozen uses row, whole
+    (signal_uses_key: a use added, removed or changed anywhere in the
+    module refuses); the class is a plain Exception subclass (mro (cls,
+    Exception, BaseException, object)); and its members are its frozen
+    statement's functions alone, each one's code at its definition's line
+    in that file (_signal_member)."""
+    g = b.grammar
+    home = _inspect.getmodule(obj)
+    f = _os.path.basename(getattr(home, "__file__", "?"))
+    if not _signal_identity(home, name, obj):
+        raise Unclassified((line, f"{name}: not the class its module defines"))
+    tree = _module_tree(home)
+    made = _one_top_binding(tree, name)
+    if signal_key(name, f, made) not in g.namedtuples:
+        raise Unclassified((line, f"{name}: its class statement in {f} is "
+                                  "not its frozen signal class"))
+    rows = _n_census(home, name)
+    if signal_uses_key(name, f, rows) not in g.namedtuples:
+        raise Unclassified((line, f"{name}: its uses in {f} are not its "
+                                  "frozen uses"))
+    want = (obj, Exception, BaseException, object)
+    if getattr(obj, "__mro__", None) != want:
+        raise Unclassified((line, f"{name}: not a plain Exception subclass"))
+    lines = {}
+    for s in made.body:
+        _signal_def_line(lines, s)
+    members = vars(obj)
+    for k in members:
+        if k in _SIGNAL_SET_ASIDE:
+            continue
+        v = members[k]
+        if not _signal_member(name, k, v, lines, f):
+            raise Unclassified((line, f"{name}: its member {k} is not its "
+                                      "frozen statement's"))
+    for k in lines:
+        if k not in members:
+            raise Unclassified((line, f"{name}: its member {k} is missing"))
+    return obj
+
+
+def _signal_identity(home, name, obj):
+    """Whether `obj` is a class, without a metaclass, that its own module
+    `home` binds to `name`, its qualified name the plain one."""
+    if not isinstance(obj, type):  # not reached by the route: namedtuple_class returns first
+        return False
+    if type(obj) is not type:
+        return False
+    if getattr(home, name, None) is not obj:
+        return False
+    if getattr(obj, "__qualname__", None) != name:
+        return False
+    return True
+
+
+def _signal_def_line(lines, s):
+    """Record statement `s`'s line under its name when it defines a
+    function (a signal class statement's members)."""
+    if isinstance(s, _ast.FunctionDef):
+        lines[s.name] = s.lineno
+
+
+def _signal_member(name, k, v, lines, filename):
+    """Whether member `k` (value `v`) of signal class `name` is the function
+    its frozen statement defines at lines[k] in `filename`."""
+    if k not in lines:
+        return False
+    code = getattr(v, "__code__", None)
+    at = lines[k]
+    if getattr(code, "co_firstlineno", None) != at:
+        return False
+    if _os.path.basename(getattr(code, "co_filename", "?")) != filename:
+        return False
+    want = f"{name}.{k}"
+    if getattr(v, "__qualname__", None) != want:
+        return False
+    return True
 
 
 def source_of(fn):
@@ -1318,7 +1449,15 @@ class Bindings:
         constructor-pure. Within the admitted scope the module binds the
         name exactly once, by a top-level `X = <maker>(...)`, and the
         maker's root name exactly once. None for a callee that is not a
-        class, and always None without a grammar."""
+        class, and always None without a grammar.
+
+        MDPL class C (the integrator's rulings of 17 Nov 09:13:52Z and
+        10:05:30Z, question 2): a name the scope's ("<signal class>", name)
+        row names is admitted by that row instead, when its module's class
+        statement, its uses (rule N's census, whole) and the class itself
+        are as frozen (_signal_class); any difference refuses. The walk's
+        call route and receiver provenance admit it as they admit a named
+        tuple (the route counts it under the named-tuple label)."""
         if not isinstance(func, _ast.Name):
             return None
         line = line or getattr(func, "lineno", 0)
@@ -1326,6 +1465,9 @@ class Bindings:
         g = self.grammar
         if g is None or not isinstance(obj, type):
             return None
+        row = signal_name_key(func.id)
+        if row in g.namedtuples:
+            return _signal_class(self, func.id, obj, line)
         tree = _admitted_scope(func.id, self.scope, g, line)
         made = _one_top_binding(tree, func.id)
         if not (isinstance(made, _ast.Assign)
@@ -1769,7 +1911,8 @@ class Bindings:
         tree = _module_tree(mod)
         if tree is None:
             raise Unclassified((line, f"{mod!r}: no source for rule K's census"))
-        census = self._store_census(tree)
+        path = _module_file(mod)
+        census = self._store_census(tree, path)
         if census["refused"]:
             ln, what = census["refused"][0]
             raise Unclassified((line, f"{what} at line {ln}, a store rule K's "
@@ -1986,17 +2129,20 @@ class Bindings:
         return None
 
 
-    def _store_census(self, tree):
+    def _store_census(self, tree, path=None):
         """Rule K's store census of a module: {"stores": {attribute name:
         [line]} (attribute stores and deletes, and setattr/delattr names read
         from constants), "refused": [(line, form)]} where a refusing form is a
         setattr/delattr whose name no constant gives, a call of __setattr__ or
         __delattr__, a store through __dict__ or vars(), or a store of
-        __class__ or __dict__."""
+        __class__ or __dict__. MDPL class K: a setattr/delattr that a row of
+        K_ADMITTED_STORES admits by hand in the module read from file `path`
+        stores the names that row reads from the code (_k_admitted)."""
         hit = _STORE_CENSUS.get(id(tree))
-        if hit is not None and hit[0] is tree:
-            return hit[1]
+        if hit is not None and hit[0] is tree and hit[1] == path:
+            return hit[2]
         stores, refused = {}, []
+        admitted = _k_admitted(tree, path)
         tops = {}
         for st in tree.body:
             for n in _ast.walk(st):
@@ -2030,6 +2176,8 @@ class Bindings:
                 names = (self._const_names(n.args[1], tops.get(id(n)))
                          if len(n.args) >= 2 else None)
                 if names is None:
+                    names = admitted.get(id(n))
+                if names is None:
                     refused.append((n.lineno, f"a {f.id} whose name no constant "
                                               "gives"))
                 else:
@@ -2039,7 +2187,7 @@ class Bindings:
                     for s in sorted(names):
                         stores.setdefault(s, []).append(n.lineno)
         census = {"stores": stores, "refused": sorted(refused)}
-        _STORE_CENSUS[id(tree)] = (tree, census)
+        _STORE_CENSUS[id(tree)] = (tree, path, census)
         return census
 
 
@@ -2085,6 +2233,310 @@ _BOUND_ROOTS = {}
 _BOUND_STACK = set()
 _NAME_INDEX = {}
 _STORE_CENSUS = {}
+
+# MDPL class K (ruling 17 Nov 2026 12:03:04Z, Q1): rule K's store census
+# admits BY HAND two forms whose name is a loop variable: the account
+# deletion's arming of its attempt's session and the arming's undo (MDPL r2
+# HIGH 1's fix, b962d8d0). A row is (the module's file, the module-level
+# function that holds the form, the place of the form: that function or a
+# function defined directly in its body, the form as ast.unparse spells it,
+# the dict whose keys are the names the form stores, the number of keys the
+# review read, the reason). No name is typed here: the census reads the keys
+# from the code at walk time (_k_dict_keys) and records each as a store of
+# that name, so rule K-m refuses a method read by any of them. MDPL class
+# K2 (ruling 17 Nov 2026 14:10:47Z, 1): a row reads its two names, the dict
+# and the loop variable, through the resolver, from the binding table of
+# Bindings over the function (its nested definitions, lambdas and
+# comprehensions counted with it), over the place and over the loop that
+# holds the form, in every binding form Bindings._collect knows
+# (Bindings.every_binding, reads, spelled_once and text). No spelling of a
+# walked name is read outside the resolver: the dict's name is the row's,
+# and the loop variable's is the entry of the function's table that holds
+# the loop's own target (_k_entry). A row admits its form only while all
+# of these hold; otherwise the form is refused as before ("a setattr whose
+# name no constant gives"):
+# - the form is the one call of the function whose text (Bindings.text,
+#   every name the function binds enumerated) is the row's, inside a
+#   `for <name>, <x> in <dict>.items():` loop that is a statement of the
+#   place's own body, and its name argument is that <name>;
+# - over the function, the dict's bindings are one store of a dict display
+#   to the plain name, its statement's one target, and item stores
+#   `<dict>[<key>] = ...`, nothing else; every read of the name is the
+#   receiver of such an item store or the iterable `<dict>.items()` of a
+#   for loop; a place nested in the function binds the dict in no form;
+# - over the loop, <name> is bound once, by the loop's own target, and the
+#   name argument is that binding; over the function and over the place,
+#   every binding of <name> is the first target of such a loop;
+# - every key is a constant str, and the keys number exactly the reviewed
+#   count (a fifth key or a missing one refuses).
+K_ADMITTED_STORES = (
+    # main.py:47015 at d16f9fc2
+    ("main.py", "_deletion_arm_every_statement", "_deletion_arm_every_statement",
+     "setattr(db, name, fn)", "installed", 4,
+     "the attempt's armed session methods, put on the attempt's own session"),
+    # main.py:47021 at d16f9fc2
+    ("main.py", "_deletion_arm_every_statement", "undo", "delattr(db, name)",
+     "installed", 4,
+     "the same methods taken back off the attempt's session, each one only "
+     "while the session still holds the function the arming put there"),
+)
+
+
+def _module_file(scope):
+    """The source file of module `scope`, or None (MDPL class K: a row of
+    K_ADMITTED_STORES names its module's file)."""
+    try:
+        src = _inspect.getsourcefile(scope)
+    except (OSError, TypeError):
+        src = None
+    return src
+
+
+# MDPL class K2: every kind the resolver's binding table holds
+# (Bindings._collect).
+_K_KINDS = ("param", "local", "def", "import", "global", "mutated")
+
+
+def _k_items_of(expr, b, dname):
+    """Whether `expr` is `<dname>.items()`, its receiver the plain name
+    `dname` as resolver `b` reads it (Bindings.reads; MDPL classes K and
+    K2)."""
+    return (isinstance(expr, _ast.Call) and isinstance(expr.func, _ast.Attribute)
+            and expr.func.attr == "items" and isinstance(expr.func.value, _ast.Name)
+            and b.reads(expr.func.value, dname) and not expr.args and not expr.keywords)
+
+
+def _k_const_key(k):
+    """The str of constant `k`, or None (MDPL class K)."""
+    got = None
+    if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+        got = k.value
+    return got
+
+
+def _k_bindings(b, name, kinds):
+    """Every binding of `name` that resolver `b` collects, as nodes, when
+    each is one of `kinds` (Bindings.every_binding, which then reads the
+    name as enumerated); None otherwise (MDPL class K2)."""
+    try:
+        got = b.every_binding(name, kinds)
+    except Unclassified:
+        got = None
+    return got
+
+
+def _k_once(b, node, name):
+    """Whether resolver `b` reads `node` as the plain name `name`, bound
+    once and as a local (Bindings.spelled_once); a refusal reads as False
+    (MDPL class K2)."""
+    try:
+        got = b.spelled_once(node, name, ("local",))
+    except Unclassified:
+        got = False
+    return got
+
+
+def _k_text(b, node):
+    """The source text of `node` as resolver `b` reads it (Bindings.text),
+    or None when `node` reads a name `b` has not enumerated (MDPL class
+    K2)."""
+    try:
+        got = b.text(node)
+    except Unclassified:
+        got = None
+    return got
+
+
+def _k_resolver(top):
+    """The resolver of function `top`, its nested definitions, lambdas and
+    comprehensions counted with it, every name it binds other than by a
+    mutation (Bindings.bound) enumerated in the kinds the resolver collects
+    (Bindings.every_binding), so that its `text` reads each call of `top`
+    that reads only those names and the module's (MDPL class K2)."""
+    b = Bindings(None, top)
+    for name in Bindings(None, top).bound():
+        _k_bindings(b, name, _K_KINDS)
+    return b
+
+
+def _k_one_target(st, node):
+    """Whether `st` is an assignment whose one target is `node` (MDPL class
+    K2)."""
+    return isinstance(st, _ast.Assign) and len(st.targets) == 1 and st.targets[0] is node
+
+
+def _k_entry(b, node):
+    """The name under which resolver `b` holds binding `node`, found by the
+    node itself (no spelling is read), or None (MDPL class K2)."""
+    got = None
+    for name, binds in b.sites.items():
+        for _kind, n in binds:
+            if n is node:
+                got = name
+    return got
+
+
+def _k_item_store(n):
+    """Whether statement `n` is an item store `<name>[<key>] = ...`, its one
+    target a Subscript of a plain name (MDPL class K2)."""
+    if not isinstance(n, _ast.Assign) or len(n.targets) != 1:
+        return False
+    t = n.targets[0]
+    return isinstance(t, _ast.Subscript) and isinstance(t.value, _ast.Name)
+
+
+def _k_read_admits(b, x, dname):
+    """Whether read `x` of the dict `dname`, a plain name resolver `b` reads,
+    is the receiver of an item store's one target or of a for loop's
+    iterable `<dname>.items()` (MDPL class K2)."""
+    par = b.parent.get(id(x))
+    st = b.parent.get(id(par))
+    if isinstance(par, _ast.Subscript):
+        return par.value is x and _k_one_target(st, par)
+    loop = b.parent.get(id(st))
+    return isinstance(loop, _ast.For) and loop.iter is st and _k_items_of(st, b, dname)
+
+
+def _k_dict_keys(top, b, dname, count):
+    """The keys of the dict `dname` that function `top` builds, read through
+    its resolver `b` (MDPL classes K and K2), or None. Every binding of the
+    name, in every form the resolver collects (_k_bindings), is the one
+    store of a dict display to the plain name, its statement's one target,
+    or an item store `<dname>[<key>] = ...` (_k_item_store); every read of
+    the name (Bindings.reads) is the receiver of such an item store or of a
+    for loop's iterable `<dname>.items()` (_k_read_admits); every key is a
+    constant str, and the keys number exactly `count`."""
+    made = _k_bindings(b, dname, ("local", "mutated"))
+    if made is None:
+        return None
+    binds, subs = [], []
+    for n in made:
+        par = b.parent.get(id(n))
+        if _k_one_target(par, n):
+            binds.append(par.value)
+        if _k_item_store(n):
+            subs.append(n.targets[0])
+    kept = binds + subs
+    if len(kept) != len(made):
+        return None
+    if len(binds) != 1 or not isinstance(binds[0], _ast.Dict):
+        return None
+    shown = binds[0]
+    keys = [_k_const_key(k) for k in shown.keys]
+    for t in subs:
+        keys.append(_k_const_key(t.slice))
+    uses = [x for x in _ast.walk(top) if isinstance(x, _ast.Name) and b.reads(x, dname)]
+    for x in uses:
+        if not _k_read_admits(b, x, dname):
+            return None
+    if None in keys:
+        return None
+    got = set(keys)
+    if len(got) == count:
+        return got
+    return None
+
+
+def _k_first_targets(b, name, dname):
+    """Whether every binding of `name` resolver `b` collects, in every form,
+    is the first target of a `for <name>, <x> in <dname>.items():` loop
+    (MDPL class K2)."""
+    got = _k_bindings(b, name, ("local",))
+    if got is None:
+        return False
+    for n in got:
+        tup = b.parent.get(id(n))
+        loop = b.parent.get(id(tup))
+        if not (isinstance(tup, _ast.Tuple) and len(tup.elts) == 2 and tup.elts[0] is n
+                and isinstance(loop, _ast.For) and loop.target is tup
+                and _k_items_of(loop.iter, b, dname)):
+            return False
+    return True
+
+
+def _k_loop_admits(loop, call, b, hb, dname):
+    """Whether statement `loop` is `for <name>, <x> in <dname>.items():`
+    holding `call` once with <name> as its name argument, read through the
+    resolver (MDPL classes K and K2): <name> is the entry of the function's
+    resolver `b` that holds the loop's own target (_k_entry); over the loop
+    alone, that name's one binding is the loop's target and the argument is
+    it (Bindings.spelled_once); over the function (`b`) and over the place
+    (`hb`), every binding of it, in every form, is the first target of such
+    a loop (_k_first_targets)."""
+    if not (isinstance(loop, _ast.For) and _k_items_of(loop.iter, b, dname)
+            and isinstance(loop.target, _ast.Tuple) and len(loop.target.elts) == 2):
+        return False
+    var = loop.target.elts[0]
+    name = call.args[1]
+    inside = [n for n in _ast.walk(loop) if n is call]
+    entry = _k_entry(b, var)
+    if len(inside) != 1 or entry is None:
+        return False
+    stmts = [loop]
+    lb = Bindings(None, None, stmts)
+    own = _k_bindings(lb, entry, ("local",))
+    if own is None or len(own) != 1 or own[0] is not var:
+        return False
+    if not _k_once(lb, name, entry):
+        return False
+    return _k_first_targets(b, entry, dname) and _k_first_targets(hb, entry, dname)
+
+
+def _k_admit_row(tree, row, base, out):
+    """Enter {id(call): the names it stores} in `out` when row `row` of
+    K_ADMITTED_STORES admits its form in module `tree`, read from a file
+    named `base` (MDPL classes K and K2). The function is read through its
+    resolver (_k_resolver): its one call of the form by that call's text
+    (Bindings.text), the dict (_k_dict_keys) and the loop (_k_loop_admits);
+    a place nested in it through its own resolver, which binds the dict in
+    no form."""
+    file = row[0]
+    top_name = row[1]
+    place_name = row[2]
+    form = row[3]
+    dname = row[4]
+    tops = [st for st in tree.body if isinstance(st, (_ast.FunctionDef,
+                                                      _ast.AsyncFunctionDef))
+            and st.name == top_name]
+    if len(tops) != 1 or base != file:
+        return None
+    top = tops[0]
+    places = [st for st in top.body if isinstance(st, (_ast.FunctionDef,
+                                                       _ast.AsyncFunctionDef))
+              and st.name == place_name]
+    if place_name == top_name:
+        places = [top]
+    b = _k_resolver(top)
+    every = [c for c in _ast.walk(top) if isinstance(c, _ast.Call)
+             and _k_text(b, c) == form]
+    keys = _k_dict_keys(top, b, dname, row[5])
+    if keys is None or len(places) != 1 or len(every) != 1:
+        return None
+    call = every[0]
+    place = places[0]
+    hb = b
+    if place is not top:
+        hb = Bindings(None, place)
+    if hb is not b and hb.count(dname):
+        return None
+    stmts = place.body
+    for loop in stmts:
+        ok = _k_loop_admits(loop, call, b, hb, dname)
+        if ok:
+            out[id(call)] = keys
+    return None
+
+
+def _k_admitted(tree, path):
+    """{id(call): the names it stores} for each row of K_ADMITTED_STORES that
+    admits its form in module `tree`, read from file `path` (MDPL class K)."""
+    out = {}
+    if path is None:
+        return out
+    base = _os.path.basename(path)
+    for row in K_ADMITTED_STORES:
+        _k_admit_row(tree, row, base, out)
+    return out
 
 
 def reset_bound():

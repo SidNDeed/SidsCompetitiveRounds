@@ -1735,10 +1735,23 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # Before it: 43/32/40/29.
     assert [r["func"] for r in census["declines"]].count("_qdig_janitor_pass") == 1, census["declines"]
     assert [r["func"] for r in census["waits"]].count("_qapply_gate") == 1, census["waits"]
+    # The account deletion lane (claude/mdpl-1116) adds two declines at two
+    # sites, both SKIP LOCKED, and no waiter: the deletion's two guards,
+    # _deletion_lock_party_row (a bet party's players row, FOR NO KEY UPDATE;
+    # reached from queue_cleanup_loop, team_queue_cleanup_loop and
+    # tournament_tick) and _deletion_lock_ffa_bet (an unsettled FFA bet row,
+    # FOR NO KEY UPDATE; reached from queue_cleanup_loop), through the bet
+    # helpers that call them. A guard issues its statements only when its
+    # caller passes no_wait=True, which the deletion alone does; the census
+    # counts what the function can reach. Before both lanes: 42/31/39/28.
+    # Both lanes on one tree (claude/mdpl-stack-1120): QAPPLY-1's one waiter
+    # and this lane's two declines, 43 + 2, 31 + 1, 40 + 2, 28 + 1.
+    # CHEAT-ALT-1 merged onto main f1460a11 (24 Nov 2026): its three declines
+    # at three sites on main's 45/32/42/29, 45 + 3, 32, 42 + 3, 29.
     assert [r["func"] for r in census["declines"]].count("_alt_retention_batch") == 3, census["declines"]
-    assert len(census["declines"]) == 46, census["declines"]
+    assert len(census["declines"]) == 48, census["declines"]
     assert len(census["waits"]) == 32, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 43, census["decline_sites"]
+    assert len(census["decline_sites"]) == 45, census["decline_sites"]
     assert len(census["wait_sites"]) == 29, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
@@ -2405,6 +2418,15 @@ def _sink_patch(monkeypatch):
     monkeypatch.setattr(main, "_check_steam_session", _no_session)
     monkeypatch.setattr(main, "_ovt_podium_ids", _no_podium)
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SINK_HMAC)
+    # The sink reads the podium through _ovt_podium_ids_for_award, which stays
+    # real: it calls the stand-in above and then answers from the cache's own
+    # `refresh_failed` and `ids`, which the stand-in never sets. So the cache
+    # is put in the state the stand-in describes -- a completed read that
+    # found nobody -- instead of whatever an earlier test in the process left
+    # there, and monkeypatch puts every key back afterwards.
+    for key, value in (("ids", []), ("ok", True), ("at", time.monotonic()),
+                       ("refresh_failed", False)):
+        monkeypatch.setitem(main._ovt_podium_cache, key, value)
 
 
 async def _submit(factory, report):

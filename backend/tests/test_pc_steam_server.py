@@ -826,6 +826,12 @@ def _release_train():
     spec = importlib.util.spec_from_file_location("release_train_under_test", train)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    if hasattr(mod, "closure_guard"):
+        mod.closure_guard = lambda st, stage, write=False, reach=(): None
+        mod.closure_judge_deploy = lambda st, sha, expect: None
+        for name in ("closure_judge_box", "closure_judge_bot", "closure_judge_tree", "closure_main_is_origin"):
+            if hasattr(mod, name):
+                setattr(mod, name, lambda *a, **kw: None)
     return mod, train.read_text(encoding="utf-8")
 
 
@@ -6964,7 +6970,10 @@ def test_r3_medium5_the_code_only_preflight_runs_exactly_phase_4s_forms(monkeypa
         pytest.fail("the code-only pre-flight was refused: %s" % str(e)[:300])
     named = {r.split(": ", 1)[1] for r in ran if r.startswith("form: ")}
     lists = set(rt.CODE_LIST) if any(r.startswith("phase 4: ") for r in ran) else set()
-    assert named | lists == _R3_CODE_ONLY_FORMS, sorted((named | lists) ^ _R3_CODE_ONLY_FORMS)
+    want =_R3_CODE_ONLY_FORMS | ({"cat-file-batch", "ls-tree-api", "closure-is-ancestor",
+                                   "closure-ls-remote-main", "closure-cat-file-commit",
+                                   "closure-first-parent"} & set(rt.GIT_FORMS))
+    assert named | lists == want, sorted((named | lists) ^ want)
 
 
 def test_r3_medium6_the_control_probe_at_the_bound_passes_and_one_unit_over_is_refused(monkeypatch, tmp_path):

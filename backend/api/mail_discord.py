@@ -684,6 +684,17 @@ RELAY_OFF_CANCEL_SQL = (
     "       claim_id = NULL, claim_until = NULL"
     " WHERE steam_id = :sid AND relay_code IS NOT NULL"
     "   AND delivered_at IS NULL AND cancelled_at IS NULL")
+# MDPL R4, one lock order on pending_dms (main._ERASE_RELAY_DMS_LOCK_SQL says
+# why): the OFF edge takes the rows it cancels in one statement, in id order,
+# before it writes any of them; FOR NO KEY UPDATE, the lock its UPDATE takes.
+# No row joins the set before the UPDATE: a send to this player holds FOR KEY
+# SHARE on their players row, which both callers lock FOR UPDATE first (the
+# OFF edge's gate, RELAY_OFF_GATE_BY_DISCORD_SQL / RELAY_OFF_GATE_BY_ID_SQL).
+RELAY_OFF_LOCK_SQL = (
+    "SELECT id FROM pending_dms"
+    " WHERE steam_id = :sid AND relay_code IS NOT NULL"
+    "   AND delivered_at IS NULL AND cancelled_at IS NULL"
+    " ORDER BY id FOR NO KEY UPDATE")
 
 # The OFF edge's row lock (v1.41.0 beta round 3, finding 19). A send holds
 # FOR KEY SHARE on each recipient's players row from its envelope fan-out
@@ -760,6 +771,7 @@ async def mail_relay_pref(
     if not req.enabled:
         # The preference alone only ever governed rows the fan-out had yet
         # to create. Anything already queued was still DMed.
+        await db.execute(text(RELAY_OFF_LOCK_SQL), {"sid": row[0]})
         withdrawn = (await db.execute(
             text(RELAY_OFF_CANCEL_SQL), {"sid": row[0]})).rowcount or 0
     await db.commit()

@@ -134,6 +134,20 @@ asm_engine = make_asm_engine()
 asm_session = async_sessionmaker(asm_engine, class_=AsyncSession, expire_on_commit=False)
 
 
+def make_snapshot_reader_engine(url, async_creator):
+    """An engine for a program that reads one snapshot: no pool (NullPool: a
+    connection is opened for a checkout and closed after it), transactions
+    REPEATABLE READ and read only, connections opened by the caller's
+    `async_creator`. Built for the review counting program
+    (review_calibrate.py), which runs beside the api, so that its engine too
+    comes from the create_async_engine above."""
+    from sqlalchemy.pool import NullPool
+    return create_async_engine(
+        url, poolclass=NullPool, isolation_level="REPEATABLE READ",
+        execution_options={"postgresql_readonly": True},
+        async_creator=async_creator)
+
+
 # ── The post-COMMIT seal (quarantine triage, RJ-TRIAGE C9) ─────────────────
 # The quarantine triage routes (main.py, _triage_read_txn) read in ONE
 # READ ONLY transaction and then build their response from values copied out

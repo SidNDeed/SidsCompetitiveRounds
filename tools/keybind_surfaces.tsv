@@ -300,7 +300,8 @@ bac173ecd4e58b18	N	rule:N1	<color=#888>{0}% pen</color>
 68d71224c58674c1	N	rule:N1	<color=#888>{0}</color>  <b>{1}</b> received <color=#C8A2FF>{2}</color>  <color=#888>(gift)</color>
 8b5f2ed9c71b4f4d	N	rule:N1	<color=#8899AA>1 - 2,000 gold</color>
 9a62a06843922847	N	rule:N1	<color=#8899AA>How long are you searching? (shown to players as an expiry)</color>
-40e65024e861fed5	N	rule:N1	<color=#8899AA>Pings the Ranked Looking For Player role (max 1 per hour). Optional message:</color>
+40e65024e861fed5	O	rule:O	<color=#8899AA>Pings the Ranked Looking For Player role (max 1 per hour). Optional message:</color>
+004f87fead63083e	N	rule:N1	<color=#8899AA>Pings the role of each mode you pick, ranked or casual (max 1 per hour). Optional message:</color>
 2a30c4721b799ef8	N	rule:N1	<color=#8899AA>Search</color>
 addcf9ab68055284	N	rule:N1	<color=#8899AA>Which modes? (pick any)</color>
 11d01c5ab646d712	O	rule:O	<color=#88AAFF><b>DUO</b></color>
@@ -452,12 +453,13 @@ bb4b5f529fff1174	N	rev:77f15041270da05c rules prose: its input words are actions
 8e92ea5917efa323	N	rule:N1	<color=#FFD94D>=  TITLES  =</color>
 22e12b0d3921df43	N	rule:N1	<color=#FFD94D>APPROVED - awaiting mod update</color>
 b9513bd50f6f2b2f	N	rule:N1	<color=#FFD94D>Custom bet</color> on <color=#FFFFFF>{0}</color>
+ae605ef8a37767ca	N	rule:N1	<color=#FFD94D>Looking For Player</color> - Discord ping
 02915b624b288814	N	rule:N1	<color=#FFD94D>Map skin:</color> <color=#FFFFFF>{0}</color>
 d413a2bca5b58733	N	rev:1645df89369cccb7 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	<color=#FFD94D>Match found! Click <b>Ready Up</b>.</color>
 5201388e750ee115	N	rule:N1	<color=#FFD94D>PLACEMENT PENDING REVIEW</color> <color=#888>(last approved placement stays active)</
 2466fa8171f0d173	N	rev:4b23dd94d6bebfb6 W and L are the win and loss counts of a record, not keys	<color=#FFD94D>Ranked (series): {0}W / {1}L</color>
 f89bf703606cf6e6	N	rev:301ff591e582da90 W and L are the win and loss counts of a record, not keys	<color=#FFD94D>Ranked (series):</color> {0}W / {1}L ({2})
-0112ccb662540866	N	rule:N1	<color=#FFD94D>Ranked Looking For Player</color> - Discord ping
+0112ccb662540866	O	rule:O	<color=#FFD94D>Ranked Looking For Player</color> - Discord ping
 0278a637c0b4224f	N	rule:N1	<color=#FFD94D>Ranked Series vs You</color>
 a777582de015d6aa	N	rule:N1	<color=#FFD94D>Ranked:</color> -
 c41e0c77ac7efea0	N	rev:af4c41c22bfe60c0 W and L are the win and loss counts of a record, not keys	<color=#FFD94D>Ranked:</color> {0}W/{1}L
@@ -2286,7 +2288,7 @@ c5b3b9f5cd30f77e	N	rule:N1	Predator
 4464d597199bdfb3	N	rule:N1	Preset {0}
 0704fc43b49bac17	N	rule:N1	Preset {0} — has items an unmodded player cannot see
 97a6e94ae4eed9bb	N	rule:N1	President Meow
-f759566b7428a79b	N	rev:7580b72803876541 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.
+f759566b7428a79b	O	rule:O	Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.
 425872a6007bf097	F	rev:faf33a04a3aee3c3 fixed:Esc Escape cancels and closes; not rebindable	Press Esc to leave
 30a77f9e3bf9ae01	F	rev:e1e05ef619fea083 fixed:Esc Escape opens the game menu, where the leave is taken; Escape is reserved and not rebindable	Press Esc to leave. The match then ends as a disconnect.
 86df78d70f5dd74c	P	rule:P	Press [{0}] when ready
@@ -2405,6 +2407,7 @@ d7108e6ab5e6f45e	N	rule:N1	Ranked History
 f0ddbdf03fc9e3cf	N	rule:N1	Ranked Uniqueness %
 758692850822b276	N	rule:N1	Ranked Win Rate
 9467ad59cd362c01	N	rule:N1	Ranked build types
+53e7f4639f41c7ce	N	rev:beb865a24bee16ea a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Ranked is off - only the Casual ping can be sent. Untick the ranked modes, or press Enable on the RANKED row first.
 c801ffbe17db6bee	N	rev:b08832ee97ba6939 rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Ranked only works if results can be trusted. The short version: every report is signed and identity-
 28c2d827acda4509	N	rule:N1	Ranked series
 75b494a0a2d8f1b4	N	rule:N1	Ranked turned ON so your tournament results record - and it stays ON after the match. Turn it off in

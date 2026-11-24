@@ -364,6 +364,29 @@ def test_mutant_a_route_without_its_gate_fails_the_census(cls):
     assert any(b.startswith(repr((method, path))) for b in bad), (cls, method, path, bad)
 
 
+def test_the_account_deletion_is_gated_and_a_deletion_without_its_gates_fails_the_census():
+    """BAN-FIRST-1: the account deletion is classed BAN and listed open
+    nowhere; with both its gates taken out (and nothing else) the census
+    names it, and with either one of them it does not."""
+    rows, funcs = _rows_and_funcs()
+    key = ("DELETE", "/api/v1/players/{steam_id}/data")
+    assert B.census(rows, funcs)[0][key] == (B.BAN, (B.BAN,)), B.census(rows, funcs)[0][key]
+    assert key not in B.OPEN_ROUTES and key not in B.BY_HAND
+    row = [r for r in rows if (r[0], r[1]) == key]
+    gates = [i for i, st in enumerate(funcs["main"]["delete_player_data"].body)
+             if ast.unparse(st) == "await _ban_gate_or_raise(db, steam_id, request)"]
+    assert len(gates) == 2, gates
+    for drop, want in ((gates[:1], False), (gates[1:], False), (gates, True)):
+        out = {m: dict(fs) for m, fs in funcs.items()}
+        fn = copy.deepcopy(out["main"]["delete_player_data"])
+        fn.body = [st for i, st in enumerate(fn.body) if i not in drop]
+        out["main"]["delete_player_data"] = fn
+        got, _ = B.census(row, out)
+        assert (got[key][0] == B.OPEN) is want, (drop, got)
+        bad = B.failures(row, out, open_routes={}, internal_only={}, by_hand={})
+        assert (f"{key}: refuses no banned account and is not in OPEN_ROUTES" in bad) is want, (drop, bad)
+
+
 def test_mutant_an_exit_without_banned_ok_fails_the_census():
     rows, funcs = _rows_and_funcs()
     out = {m: dict(fs) for m, fs in funcs.items()}
@@ -711,14 +734,18 @@ def test_negative_control_the_row_serialized_entry_is_load_bearing():
     # report routes' plain pre-checks (FIX-1B point 3), and FIX-2's three:
     # steam_auth's read before the Steam call, the receipt's read under the
     # window guards, the case act's actor read under the mail lock; and
-    # FIX-3's one: the auto-log upload's admission read, which takes no key
-    names = (("main", "team_series_report_dc"), ("main", "submit_ovt_match"),
-             ("main", "submit_team_match"), ("main", "steam_auth"),
-             ("main", "_report_window_receive"), ("main", "_moderation_case_act"),
-             ("auto_logs", "upload_auto_log"))
+    # FIX-3's one: the auto-log upload's admission read, which takes no key;
+    # and STACK-SEAM-1's one: the held-report list's read form, which writes nothing;
+    # and BAN-FIRST-1's two, of one route: the account deletion's read before its
+    # session check and its read under the identity key it takes itself
+    names = {("main", "team_series_report_dc"): 1, ("main", "submit_ovt_match"): 1,
+             ("main", "submit_team_match"): 1, ("main", "steam_auth"): 1,
+             ("main", "_report_window_receive"): 1, ("main", "_moderation_case_act"): 1,
+             ("auto_logs", "upload_auto_log"): 1, ("main", "_qapply_verdict"): 1,
+             ("main", "delete_player_data"): 2}
     assert sorted(bad) == sorted(
-        "%s.%s: 1 ban read(s) outside _ban_lock_and_gate, 0 listed" % n for n in names), bad
-    assert set(B.ROW_SERIALIZED) == set(names), sorted(B.ROW_SERIALIZED)
+        "%s.%s: %d ban read(s) outside _ban_lock_and_gate, 0 listed" % (*n, k) for n, k in names.items()), bad
+    assert {n: k for n, (k, _why) in B.ROW_SERIALIZED.items()} == names, sorted(B.ROW_SERIALIZED)
     bad = B.row_locks_before_the_gate(_api_modules(), ok={})
     assert [b.split(":")[0] for b in bad] == ["main.link_discord"], bad
 
@@ -988,6 +1015,16 @@ def test_negative_control_the_listed_writers_and_the_lockers_are_load_bearing():
         lockers.pop(k)
     bad = B.ban_writers_without_the_lock(rows, funcs, lockers=lockers)
     assert bad and all("/pc/" in b for b in bad), bad
+    # BAN-FIRST-1: the account deletion is a locker that is a handler itself
+    lockers = {k: v for k, v in B.IDENTITY_LOCKERS.items() if k != "delete_player_data"}
+    assert B.ban_writers_without_the_lock(rows, funcs, lockers=lockers) == [
+        "DELETE /api/v1/players/{steam_id}/data: a BAN-class writer that reads the ban under no identity lock"]
+    fn = copy.deepcopy(funcs["main"]["delete_player_data"])
+    fn.body = [st for st in fn.body if not B._IDENTITY_LOCK_SQL.search(ast.unparse(st))]
+    out = {m: dict(fs) for m, fs in funcs.items()}
+    out["main"]["delete_player_data"] = fn
+    assert B.ban_writers_without_the_lock(rows, out) == [
+        "delete_player_data: listed as an identity locker and takes no identity lock"]
 
 
 # ---- FIX-1B point 4: the second read in the LAST transaction ----------------
@@ -1186,3 +1223,61 @@ def test_mutant_a_live_table_left_out_of_the_void_fails_the_census():
     classes = dict(TABLE_CLASSES, chat_mutes=(B.LIVE, "planted: a mute the ban must end"))
     text, _seen = _void_text(src)
     assert B.void_coverage_failures(classes, text) == ["chat_mutes: a LIVE table the void never names"]
+
+
+# ---- RULING CENSUS-1 ORDER 3: the one statement-text reader ----------------
+
+def _o3_sources(old=None, new=None):
+    srcs = _api_modules()
+    if old is not None:
+        assert srcs["main"].count(old) == 1, old
+        srcs["main"] = srcs["main"].replace(old, new)
+    return srcs
+
+
+def _o3_funcs(srcs):
+    return {m: {n.name: n for n in ast.parse(s).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for m, s in srcs.items()}
+
+
+_O3_LOCKER = "_identity_lock_many: listed as an identity locker and takes no identity lock"
+
+
+def test_order3_mutant_the_constant_s_execute_out_of_the_identity_locker_fails():
+    """Mutant 1: _identity_lock_many without its one execute of
+    _IDENTITY_KEY_SQL takes no identity lock. The control: the tree as it
+    stands names no locker."""
+    srcs = _o3_sources()
+    assert _O3_LOCKER not in B.ban_writers_without_the_lock([], _o3_funcs(srcs), texts=B.StatementTexts(srcs))
+    m = _o3_sources('            await db.execute(text(_IDENTITY_KEY_SQL), {"sid": sid})\n',
+                    "            pass\n")
+    assert _O3_LOCKER in B.ban_writers_without_the_lock([], _o3_funcs(m), texts=B.StatementTexts(m))
+
+
+def test_order3_mutant_another_key_expression_is_not_the_identity_key():
+    """Mutant 2: _IDENTITY_KEY_ARG given another key expression; the key
+    _identity_lock_many takes is then neither the identity key nor prefixed.
+    The control: the tree as it stands has no such failure."""
+    assert B.identity_lock_failures(_o3_sources()) == []
+    m = _o3_sources('_IDENTITY_KEY_ARG = "hashtext(CAST(:sid AS text))"',
+                    "_IDENTITY_KEY_ARG = \"hashtext(CAST(:sid AS text) || ':x')\"")
+    bad = B.identity_lock_failures(m)
+    assert "main._identity_lock_many: an advisory key that is neither the identity key nor prefixed" in bad, bad
+
+
+_O3_KEY_SQL = '_IDENTITY_KEY_SQL = "SELECT pg_advisory_xact_lock(" + _IDENTITY_KEY_ARG + ")"\n'
+
+
+def test_order3_mutant_a_constant_bound_to_a_call_s_result_is_not_read():
+    """Mutant 3: _IDENTITY_KEY_SQL bound to a call's result (not text()) is not
+    read, so _identity_lock_many takes no lock the census can read. The
+    control is mutant 1's: the tree as it stands names no locker."""
+    m = _o3_sources(_O3_KEY_SQL, '_IDENTITY_KEY_SQL = str("SELECT pg_advisory_xact_lock(" + _IDENTITY_KEY_ARG + ")")\n')
+    assert _O3_LOCKER in B.ban_writers_without_the_lock([], _o3_funcs(m), texts=B.StatementTexts(m))
+
+
+def test_order3_mutant_a_constant_bound_twice_is_not_read():
+    """Mutant 4: a second binding of _IDENTITY_KEY_SQL makes the name unread,
+    so _identity_lock_many takes no lock the census can read."""
+    m = _o3_sources(_O3_KEY_SQL, _O3_KEY_SQL + '_IDENTITY_KEY_SQL = "SELECT 1"\n')
+    assert _O3_LOCKER in B.ban_writers_without_the_lock([], _o3_funcs(m), texts=B.StatementTexts(m))
