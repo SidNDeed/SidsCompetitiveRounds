@@ -8,6 +8,8 @@ A. GET /api/v1/mod/check/{id} answers what models.player_ban_active_sql says
         the six keys in their order and no display_name
      b  no row, no ban: the body byte for byte, written out below
      c  a row, an active ban: the seven keys, their order and the ban's values
+        (the order of the parsed body is held before any key is taken out of
+        it, here and in g)
      d  no row, a ban past its end: the body of b
      e  no row, a ban that was lifted: the body of b
      f  no row, an active ban whose reason is the empty string: banned
@@ -249,8 +251,8 @@ def test_c_a_players_row_and_an_active_ban_answers_as_before(monkeypatch):
         await env.conn.execute("UPDATE players SET ranked_enabled = TRUE WHERE id = $1", p.id)
         end = await _ban(env, p.sid, reason="ban-answers c")
         got = json.loads((await _check(env, p.sid)).content)
+        assert list(got) == KEYS_ROW, got
         left = got.pop("ban_seconds_left")
-        assert list(got) + ["ban_seconds_left"] == KEYS_ROW, got
         assert got == {"registered": True, "ranked": True, "display_name": "Ban Answers C", "banned": True,
                        "ban_reason": "ban-answers c", "ban_expires_at": main._ban_end_iso(end)}, got
         assert isinstance(left, int) and 1680 <= left <= 1800, left
@@ -305,6 +307,7 @@ def test_g_an_account_anonymised_under_its_ban_is_banned_under_its_raw_id(monkey
         row = await _row(env.conn, p)
         assert row["deleted_at"] is not None and row["steam_id"].startswith("deleted_"), row["steam_id"]
         got = json.loads((await _check(env, p.sid)).content)
+        assert list(got) == KEYS_NO_ROW, got
         left = got.pop("ban_seconds_left")
         assert got == {"registered": False, "ranked": False, "banned": True, "ban_reason": "ban-answers g",
                        "ban_expires_at": main._ban_end_iso(end)}, got
