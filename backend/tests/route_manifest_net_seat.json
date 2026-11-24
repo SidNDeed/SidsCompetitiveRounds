@@ -169,7 +169,7 @@
           ],
           "main",
           "admin_grant_achievement",
-          "9ed946e0864039153b3428aaa05bf5676a5acb70"
+          "ab27e03adf0ac50e3ccdcb785d1f18c377a38630"
         ],
         [
           "/api/v1/admin/i18n/grants",
@@ -547,7 +547,7 @@
           ],
           "main",
           "user_comment_on_bug_report",
-          "deb6bbbf27393ecfd058da099008616e4b6ecfc3"
+          "3640e14bf9f56e2fe33ecbaf7919ff0b31d6c16d"
         ],
         [
           "/api/v1/internal/bug-reports/events/ack",
@@ -637,7 +637,7 @@
           ],
           "main",
           "report_casual_dc",
-          "354fe366adca8bf188b052680972c24e947b23d5"
+          "0a5f43929873674993fae636483ae145215ef18d"
         ],
         [
           "/api/v1/matches/macro-evidence",
@@ -808,7 +808,7 @@
           ],
           "main",
           "generate_link_code",
-          "70bc679e26ef318e29f85d579f27da7aad907307"
+          "d17dd5f0050af6ebc546f719e67aa0f8ce4ef5a6"
         ],
         [
           "/api/v1/players/link-discord",
@@ -817,7 +817,7 @@
           ],
           "main",
           "link_discord",
-          "66cd0c7e7df6b4033da4f6966153430380d754d7"
+          "c098198b4d25500aa2605e03ce50ae348b01a5be"
         ],
         [
           "/api/v1/players/search",
@@ -961,7 +961,7 @@
           ],
           "main",
           "delete_player_data",
-          "360827d3f77fa3278ebc21f6568ab5505e9bc137"
+          "933e73cc9ef06170a33ea85b8f3f0e7b6585a9b6"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1309,7 +1309,7 @@
           ],
           "main",
           "unlock_achievement",
-          "35a82562bbdd3607e453119efa9d5ff14b12c596"
+          "df0536a0cc771639d45ad645abe0d57abe919d5d"
         ],
         [
           "/api/v1/achievements/{key}/earners",
@@ -1381,7 +1381,7 @@
           ],
           "main",
           "artist_gift",
-          "2d229f550ed0a77cb471ec31c75675c9c0807939"
+          "c13a42fc635d9e9d249896a7f592251dd546f90d"
         ],
         [
           "/api/v1/artist/my-submissions",
@@ -2002,7 +2002,7 @@
           ],
           "main",
           "booster_grant",
-          "13b4c1cb71410146cfe0dfa1fde611b50fd84ef0"
+          "2f788affe5a7c2c14e7132101d6c03634c6f5198"
         ],
         [
           "/api/v1/internal/channel-posts/ack",
@@ -2254,7 +2254,7 @@
           ],
           "main",
           "cancel_lobby_bet",
-          "4b1f5a259bcbfe279cbce571d7c066db58215c7b"
+          "b243aa69f1d3a45af021459fc5bf6a813aa1fa21"
         ],
         [
           "/api/v1/mod-version",
@@ -2281,7 +2281,7 @@
           ],
           "main",
           "toggle_ranked",
-          "ba89f516c9730b74ebc786b40b6869551f9e61d7"
+          "dbf70e1a7902d8b77f4d80a39ec337b9693093f4"
         ],
         [
           "/api/v1/music/rate",
@@ -3518,7 +3518,7 @@
           ],
           "tournaments",
           "signup",
-          "b417f362c1eee59a86fb794126f7397bb2cc9115"
+          "8398a1ae55ba98e69e272516ec25b9b404a82e66"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3668,7 +3668,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "e10d79c453a93ed49f6ebb26fda7f7577c138705"
+          "cb0c5dbba22a7d211df9a898bf1c893263ac665f"
         ],
         [
           "/api/v1/internal/logs/auto/prune",
