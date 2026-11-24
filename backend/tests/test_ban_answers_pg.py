@@ -40,7 +40,9 @@ B. DELETE /api/v1/players/{id}/data refuses an account under an active ban
    three functions of main.py, each of them takes the target's identity
    lock in the same transaction before it writes, and the table's class
    (models.PlayerBan) is named by main.py's import alone, so nothing writes
-   the table through it.
+   the table through it. A lock counts only when it is awaited as one of its
+   function's own top-level statements; test_ban_await_net.py holds the
+   await for every lock, gate and ban read the census counts by its call.
 
 CF_TEST_PG_DSN names the lane database (cf_pg.require_live_pg).
 """
@@ -623,6 +625,20 @@ def _call_lines(node, name):
                   and name == (n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", None)))
 
 
+def _top_level_awaited(fn, pred):
+    """The calls of fn that pred names and that take effect wherever fn runs:
+    the direct value of an Await that is the value of one of fn's own
+    top-level statements (an expression statement or an assignment). A call
+    that is not awaited runs nothing; one under a branch, a loop, a handler,
+    a with block or an inner function runs on some paths only."""
+    out = []
+    for st in fn.body:
+        v = st.value if isinstance(st, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
+        if isinstance(v, ast.Await) and isinstance(v.value, ast.Call) and pred(v.value):
+            out.append(v.value)
+    return out
+
+
 def _class_names(tree):
     """(line, kind) of everything that names PlayerBan: its class, an import,
     a name, an attribute, a keyword, a parameter, an assignment's target, or a
@@ -670,7 +686,9 @@ def test_every_writer_of_player_bans_takes_the_targets_identity_lock_before_it_w
     call of the length change, which writes the third and is called by
     nothing else; neither of the two commits or rolls back. The unban takes
     the target's lock (_mail_lock_identities) before its write and commits
-    once, after it."""
+    once, after it. Each lock is counted only as an awaited call that is one
+    of its function's own top-level statements (_top_level_awaited), and it
+    is the function's only call of that lock."""
     fns, writers, length_callers = {}, {}, []
     for mod, name, node in _api_functions():
         lines = _write_lines(node)
@@ -683,15 +701,23 @@ def test_every_writer_of_player_bans_takes_the_targets_identity_lock_before_it_w
                        ("main", "admin_unban"): 1}, writers
     assert length_callers == ["_apply_ban_core"], length_callers
     core, core_writes = fns["_apply_ban_core"]
-    locks = [n.lineno for n in ast.walk(core) if isinstance(n, ast.Call)
-             and ast.unparse(n) == "db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:sid))'),"
-                                   " {'sid': target_steam_id})"]
-    assert len(locks) == 1 and locks[0] < min(core_writes + _call_lines(core, "_ban_set_length_core")), locks
+    def core_lock(c):
+        return ast.unparse(c) == ("db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:sid))'),"
+                                  " {'sid': target_steam_id})")
+    anywhere = [(n.lineno, ast.unparse(n)) for n in ast.walk(core) if isinstance(n, ast.Call) and core_lock(n)]
+    locks = [c.lineno for c in _top_level_awaited(core, core_lock)]
+    assert len(locks) == 1 and [ln for ln, _ in anywhere] == locks, (locks, anywhere)
+    assert locks[0] < min(core_writes + _call_lines(core, "_ban_set_length_core")), locks
     for name in ("_apply_ban_core", "_ban_set_length_core"):
         assert not _call_lines(fns[name][0], "commit") + _call_lines(fns[name][0], "rollback"), name
     unban, (write,) = fns["admin_unban"]
-    (lock,) = [n for n in ast.walk(unban) if isinstance(n, ast.Call)
-               and ast.unparse(n.func) == "_mail_lock_identities"]
+
+    def unban_lock(c):
+        return ast.unparse(c.func) == "_mail_lock_identities"
+    anywhere = [(n.lineno, ast.unparse(n)) for n in ast.walk(unban) if isinstance(n, ast.Call) and unban_lock(n)]
+    top = _top_level_awaited(unban, unban_lock)
+    assert len(top) == 1 and [ln for ln, _ in anywhere] == [top[0].lineno], ([c.lineno for c in top], anywhere)
+    lock = top[0]
     assert "req.target_steam_id" in [ast.unparse(a) for a in lock.args], ast.unparse(lock)
     (commit,) = _call_lines(unban, "commit")
     assert lock.lineno < write < commit and not _call_lines(unban, "rollback"), (lock.lineno, write, commit)
