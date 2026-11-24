@@ -1386,6 +1386,16 @@ class HealthResponse(BaseModel):
     # by nothing else (#306). No default, as above. Absent on any build before
     # it.
     ban_sweep_build: int
+    # ban_answers_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_ANSWERS_BUILD; 1 = in this build GET /mod/check
+    # reads the ban of an id that has no players row too, and the account
+    # deletion refuses an account under an active ban). It names build
+    # identity only. A code constant, equal on both roles by construction, so
+    # the train can read it through the edge; this is the key that tells a
+    # stale box from a refreshed one (learnings 780, 794, 1186). Probed by the
+    # release train and read by nothing else (#306). No default, as above.
+    # Absent on any build before it.
+    ban_answers_build: int
     # bot_text_build: release-train verification plumbing, not a design
     # mechanism (main._BOT_TEXT_BUILD; 1 = in this build typed text in the
     # api's Discord posts and DMs and in the bot's messages passes one helper
