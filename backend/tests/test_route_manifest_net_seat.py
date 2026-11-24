@@ -1968,7 +1968,16 @@ def test_the_helper_closure_stays_affordable():
     # test_alt_signals_pure.py holds. The bound moves to 603, the measured
     # value, for that reason and no other. The other five bounds hold (code
     # 86 / 228, whole 242 / 423 / 868 over 438 routes).
-    assert code_worst <= 606, f"worst code closure {code_worst} of {total}"
+    # CHEAT-ALT-1 merged onto main f1460a11 (2026-11-24): 609 measured at
+    # GET /api/v1/health on the merged tree, of 6108 indexed bindings (606 of
+    # 6034 at f1460a11, the same walk over each tree): +3 by name, the lane's
+    # three above (main._ALT_SIGNALS_BUILD, alt_signals.key_word and the
+    # _INSTALLED state it reads); that closure is otherwise equal by name. The
+    # bound moves to 609, the measured value, for that reason and no other.
+    # The median (87 against 87) and p90 (230 against 239) bounds stay, and so
+    # do the three bounds of the whole closure (250 against 261, 433 against
+    # 453, 887 against 897 at the health route).
+    assert code_worst <= 609, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

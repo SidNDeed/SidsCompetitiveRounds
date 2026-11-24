@@ -1279,7 +1279,9 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
     import textwrap
     fns = _alt_functions()
     assert {"_alt_retention_batch", "_alt_retention_left"} <= set(fns), sorted(fns)
-    assert len(fns) == 16, (len(fns), sorted(fns))
+    # 17 since the lane's merge of main f1460a11 (2026-11-24): _alt_delete_account,
+    # the three DELETEs the deletion calls at its three places; 16 before it.
+    assert len(fns) == 17, (len(fns), sorted(fns))
     loggers = {n for n, v in vars(main).items() if isinstance(v, logging.Logger)}
     aliases, members = _stream_bindings(Path(main.__file__).read_text(encoding="utf-8"))
     assert "*" not in members, members

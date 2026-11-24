@@ -478,7 +478,10 @@ def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_
     kinds = [type(ast.parse(t).body[-1]) for _n, _l, t in texts]
     counts = (sum(k in (ast.FunctionDef, ast.AsyncFunctionDef) for k in kinds),
               sum(k is ast.ClassDef for k in kinds), sum(k in (ast.Assign, ast.AnnAssign) for k in kinds))
-    assert counts == (16, 2, 6), (counts, [(n, l) for n, l, _t in texts])
+    # 17 functions since the lane's merge of main f1460a11 (2026-11-24):
+    # _alt_delete_account, the three DELETEs the deletion calls at its three
+    # places; 16 before it.
+    assert counts == (17, 2, 6), (counts, [(n, l) for n, l, _t in texts])
     for _name, first, text_ in texts:
         found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
                   for w, t, c in _literals("main.py", text_)]

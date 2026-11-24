@@ -720,10 +720,10 @@ def test_a_banned_host_s_lobby_and_the_next_member_s_deletion_after_the_tombston
         at = _parks(env)
         spot = at(RELAY_PASS_MARK, "before")
         td = asyncio.create_task(_delete(env, p))
-        await _parked(spot, td)            # past the tombstone; P's lobby row held (main.py:47524-47527)
+        await _parked(spot, td)            # past the tombstone; P's lobby row held (main.py:48252-48255)
         tb = asyncio.create_task(env.call(_ban_route(mod, h)))
         state, w = await _settle(env, tb, by=spot.pid)
-        assert state == "waits", (state, w)   # the ban core's FOR NO KEY UPDATE on the lobby row (main.py:51691-51693)
+        assert state == "waits", (state, w)   # the ban core's FOR NO KEY UPDATE on the lobby row (main.py:52419-52421)
         await _past_deadlock_check(env)
         a, b = await _finish([td, tb], [spot])
         out = capsys.readouterr().out

@@ -1026,9 +1026,9 @@ def test_the_judged_pins_refuse_an_empty_value_an_empty_word_table_and_no_table(
 
 
 # The places whose every verdict holds no table, by name, each a true answer by the code. "read": the text is
-# exact and names no table (main:1383 and main:22984, advisory key statements over _DC_PAIR_LOCK_KEY_SQL).
-# "bounded": every text the statement can send is known and none names a table (main:18505, main:18513 and
-# main:88115, SET LOCAL lock_timeout statements whose one hole is a number of milliseconds); the word is about
+# exact and names no table (main:1384 and main:23704, advisory key statements over _DC_PAIR_LOCK_KEY_SQL).
+# "bounded": every text the statement can send is known and none names a table (main:19225, main:19233 and
+# main:88843, SET LOCAL lock_timeout statements whose one hole is a number of milliseconds); the word is about
 # the text, not a wait.
 NO_TABLE_PLACES = {"main._identity_lock_many:18505": "bounded", "main._identity_lock_many:18513": "bounded",
                    "main._publish_pair_sitting:1383": "read", "main._report_disconnect_once:22984": "read",
