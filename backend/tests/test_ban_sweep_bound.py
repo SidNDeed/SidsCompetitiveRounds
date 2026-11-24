@@ -128,8 +128,10 @@ def _census_line(rows):
 
 
 # ---- the census line --------------------------------------------------------------------------------
-# At the stack lane's merge of the counting tool (2026-11-23), measured: bounded 25 -> 26 by the fix's helper
-# main._identity_key_shared_bounded; remaining 8 -> 11 by the counting program's three places (J13 to J15).
+# At the stack lane's merge of the counting tool (2026-11-23), measured: bounded 25 -> 26 by the helper's SET LOCAL
+# lock_timeout statement, main._player_deletion_key_shared_bounded:88115 (named _identity_key_shared_bounded until
+# round mdplg-r2, which measured the line unchanged); "bounded": every text the statement can send is known, a word
+# about its text and nothing about a wait; remaining 8 -> 11 by the counting program's three places (J13 to J15).
 CENSUS_LINE = {"bounded": 26, "expanded": 122, "judged": 4, "read": 107, "remaining": 11}
 
 
@@ -1023,11 +1025,14 @@ def test_the_judged_pins_refuse_an_empty_value_an_empty_word_table_and_no_table(
         assert any(b.startswith(place + ": the values' digests") for b in bad), (key, bad)
 
 
-# The places whose every verdict holds no table, by name, each a true answer by the code: the text read is
-# exact and names no table, or the widest text over a complete reach names none (advisory lock statements).
+# The places whose every verdict holds no table, by name, each a true answer by the code. "read": the text is
+# exact and names no table (main:1383 and main:22984, advisory key statements over _DC_PAIR_LOCK_KEY_SQL).
+# "bounded": every text the statement can send is known and none names a table (main:18505, main:18513 and
+# main:88115, SET LOCAL lock_timeout statements whose one hole is a number of milliseconds); the word is about
+# the text, not a wait.
 NO_TABLE_PLACES = {"main._identity_lock_many:18505": "bounded", "main._identity_lock_many:18513": "bounded",
                    "main._publish_pair_sitting:1383": "read", "main._report_disconnect_once:22984": "read",
-                   "main._identity_key_shared_bounded:88115": "bounded"}
+                   "main._player_deletion_key_shared_bounded:88115": "bounded"}
 
 
 def test_the_places_whose_verdicts_hold_no_table_are_the_named(base):
