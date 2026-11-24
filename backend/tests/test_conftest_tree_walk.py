@@ -170,6 +170,12 @@ def test_one_pass_stays_affordable():
     unchanged, backend/api 6.5, backend/sql 5.6 across 418, up 1.2, tools
     3.2), no new binary directory; the ceiling moves from 64 to 72 MiB, about
     7.8 MiB of headroom.
+
+    The account deletion lock lane (claude/mdpl-1116) had moved the same
+    ceiling from 64 to 72 MiB on its own branch, measured at its round r2 over
+    main 732d96b1 (64.28 MiB across 1249 files as working files on a
+    core.autocrlf=true checkout, the lane's seven files 0.50 MiB of it). Its
+    merge of main 234ea0f8 keeps main's 72 MiB.
     """
     # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
     # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads

@@ -3060,7 +3060,7 @@ def test_f6_each_swept_handler_that_a_lock_reaches_ends_the_action(monkeypatch):
     route reaches turns this red. The service lookup's handler is reached
     by making its refresh fall due inside the unit (F7's interleaving)."""
     handlers = _f6_handlers()
-    assert len(handlers) == 38 and sum(1 for h in handlers if h[2] == "goes on") == 18, (
+    assert len(handlers) == 38 and sum(1 for h in handlers if h[2] == "goes on") == 17, (
         "the sweep moved: re-pin with its reason", [(f, i, a) for f, i, a, _ in handlers])
     key = 0x5F6A11
 
@@ -3211,6 +3211,63 @@ def test_seam_r1_credit_reads_every_named_accounts_ban_before_it_writes(monkeypa
             assert v["can_credit"] is True, ("R3 control: lifted, the list allows the credit", arm, v)
             ans = await credit(env, qid)
             assert ans.status == 200, ("R1 control: lifted, the credit pays", arm, ans)
+    run_env(monkeypatch, body)
+
+
+SEAM_DELETE_SECRET = "seam-d1-delete-key-for-tests"
+
+
+async def seam_delete_account(env, sid):
+    """The account deletion route's own function (delete_player_data) for
+    `sid`, signed with a test secret; the Steam session check is off."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(main, "MATCH_HMAC_SECRET", SEAM_DELETE_SECRET)
+        mp.delenv("STEAM_WEB_API_KEY", raising=False)
+        sig = hmac.new(SEAM_DELETE_SECRET.encode(), ("delete:%s" % sid).encode(), hashlib.sha256).hexdigest()
+        async with env.sm() as db:
+            await main.delete_player_data(sid, cf_asm.FakeRequest(), sig=sig, _slot=None, db=db)
+
+
+async def seam_players(env):
+    """Every players row, whole, as text."""
+    return await env.conn.fetchval(
+        "SELECT COALESCE(string_agg(CAST(p AS text), ',' ORDER BY p.id), '') FROM players p")
+
+
+def test_seam_d1_credit_refuses_a_report_that_names_an_account_deleted_before_the_request(monkeypatch):
+    """D1. A held report's Credit, made after the account deletion
+    (delete_player_data) tombstoned one listed player who is not the
+    reporter, is refused 409 with the "accounts" sentence: no players row
+    changes (every row compared whole), every table both actions can write
+    is unchanged and the row stays pending. The control: a report made the
+    same way on a lobby of its own, every account live, is credited: 200,
+    the row credited and a players row paid."""
+    async def body(env):
+        for arm in ("deleted", "live"):
+            lob, qid = await closed_held(env)
+            await later_for(env, lob)
+            rep = await env.conn.fetchval(
+                "SELECT payload->>'reported_by_steam_id' FROM match_report_quarantine WHERE id = $1",
+                uuid.UUID(qid))
+            who = next(s for s in lob.sids[1:3] if s != rep)
+            pid = lob.pids[lob.sids.index(who)]
+            if arm == "deleted":
+                await seam_delete_account(env, who)
+                gone = await env.conn.fetchrow("SELECT steam_id, deleted_at FROM players WHERE id = $1", pid)
+                assert gone["steam_id"] != who and gone["deleted_at"] is not None, (
+                    "D1 fixture: the deletion tombstoned the account", dict(gone))
+            players, before = await seam_players(env), await tables(env)
+            ans = await credit(env, qid)
+            if arm == "deleted":
+                assert (ans.status, ans.body) == (409, T[main._QAPPLY_CHECK_TEXT["accounts"]]), (
+                    "D1 credit refuses a report naming a deleted account", ans)
+                assert await seam_players(env) == players, "D1 no players row changed"
+                assert await tables(env) == before, "D1 nothing written"
+                assert await status_of(env, qid) == "pending", "D1 the row stays pending"
+            else:
+                assert ans.status == 200, ("D1 control: every account live, the credit pays", ans)
+                assert await status_of(env, qid) == "credited", "D1 control: the row is credited"
+                assert await seam_players(env) != players, "D1 control: a players row is paid"
     run_env(monkeypatch, body)
 
 

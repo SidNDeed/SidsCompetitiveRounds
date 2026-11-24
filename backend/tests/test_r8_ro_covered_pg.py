@@ -23,9 +23,9 @@ REHEARSAL-FOUR-R7-A1 M1, R7-A2).
    claim; each is a QUESTION in the hand-back). Each WRITERS position the
    drivers reach must equal WRITER_OUTCOME: refused (25006), the writer
    proof by the role, or, for the two statements the role cannot refuse,
-   the effect the harness measures: main.py:17959, a transaction-local
+   the effect the harness measures: main.py:17996, a transaction-local
    set_config of lock_timeout, ('continuity', the changed setting) by the
-   round-10 residue reading, and main.py:54910, pg_advisory_xact_lock,
+   round-10 residue reading, and main.py:55641, pg_advisory_xact_lock,
    ('lock', advisory) by the lock read.
 
 4. Transaction continuity (ruling REHEARSAL-R9-A1 (B)): every measured
@@ -272,6 +272,11 @@ DRIVERS = collections.OrderedDict([
     ("main._player_body_color", lambda db, s, mp: main._player_body_color(
         db, s.lob.pids[0])),
     ("main._service_player_uuids", lambda db, s, mp: main._service_player_uuids(db)),
+    # MDPL class C: the bet party row's no-wait lock on the walks' branch (the
+    # lock finds no row, then the plain read tells a held row from a missing
+    # one), for a player id no seed row holds
+    ("main._deletion_lock_party_row", lambda db, s, mp: main._deletion_lock_party_row(
+        db, _u("mdpl party with no row"), no_wait=True)),
     ("match_hold._hold_latch", lambda db, s, mp: match_hold._hold_latch(
         db, "team", s.team.sid, "rf8ro_room")),
     ("match_report_window.series_holds",
@@ -431,8 +436,8 @@ LOCK_TARGETS = frozenset(e[1:4] for e in ro_covered.COVERED + ro_covered.WRITERS
 class _Planting:
     """A control's session: at a production site named in
     self.info['plant'] ({(file, line): plant}) the statement the position
-    runs is the planted one, the way the round-8 report changed main.py:17991
-    and :17948 (main.py itself is never changed: the program a position runs
+    runs is the planted one, the way the round-8 report changed main.py:18028
+    and :17985 (main.py itself is never changed: the program a position runs
     is the harness's input). A plant is SQL text (run with no parameters in
     place of the production statement), or a planted PROGRAM: an async
     callable (ex, statement, params) whose statements run at the position,
@@ -466,8 +471,8 @@ def _entry(f, line):
     return next(e for e in ro_covered.COVERED if e[1] == f and e[2] == line)
 
 
-E_16828 = _entry("main.py", 17948)
-E_16871 = _entry("main.py", 17991)
+E_16828 = _entry("main.py", 17985)
+E_16871 = _entry("main.py", 18028)
 FOR_UPDATE = "SELECT clock_timestamp() FROM players LIMIT 1 FOR UPDATE"
 ADVISORY = ("SELECT clock_timestamp() FROM (SELECT pg_catalog.pg_advisory_xact_lock(808))"
             " AS planted")
@@ -494,7 +499,7 @@ LOCK_CONTROLS = (
 # session's continuity bracket. A planted program `_then_own(sql)` runs `sql`
 # and then the position's own production statement, so the program continues
 # exactly as written (the round-9 report's case: COMMIT AND CHAIN at
-# main.py:17948, the drivers then return normally).
+# main.py:17985, the drivers then return normally).
 
 def _then_own(sql):
     async def program(ex, statement, params):
@@ -526,9 +531,9 @@ PREPARED_GID = "rf10_ro_" + os.urandom(4).hex()
 # The round-10 report's exact text (codex-rehearsal-four-r10.out, F4).
 R11_HIDDEN = "SELECT set_config('rf10.hidden','yes',false)"
 R11_HIDDEN_PARTS = {"session set_config rf10.hidden", "placeholder rf10.hidden=yes"}
-E_16886 = _entry("main.py", 18006)
+E_16886 = _entry("main.py", 18043)
 LEASE_GRANT_TARGETS = [e for e in ro_covered.COVERED if e[4] == "_lease_admission_gate"
-                       and e[2] >= 17988]
+                       and e[2] >= 18025]
 
 # Each control: (name, driver, entry, plant, grants or None, want). want is
 # 'continuity' (the run stayed 'ok' and the bracket refused it, with
@@ -589,11 +594,11 @@ CONTINUITY_CONTROLS = (
      _then_own("DECLARE rf10_ro_c CURSOR WITH HOLD FOR SELECT 1"), None,
      ("continuity", {"holdable cursors 0->1"})),
     # a later position on a session an earlier position broke (under grant:
-    # 17991 ends the transaction 17971 locked; 18006 then runs, lock-clean
+    # 18028 ends the transaction 18008 locked; 18043 then runs, lock-clean
     # and with a zero delta, in the replacement transaction)
     ("chain_at_16871_then_16886_under_grant", "main._lease_admission_gate", E_16886,
      _then_own("COMMIT AND CHAIN"), ("UPDATE players",),
-     ("continuity", {"after txn ended at main.py:17991"})),
+     ("continuity", {"after txn ended at main.py:18028"})),
     # the negative control: the same bracket, nothing planted
     ("unplanted_16828_under_role", "main._lease_admission_gate empty", E_16828,
      None, None, ("ok", set())),
@@ -601,7 +606,7 @@ CONTINUITY_CONTROLS = (
     # (the 16.9 probes, RF11 logs r11-res-probe-55432-20261106T065356Z.log and
     # r11-res-probe2-55432-20261106T090205Z.log). The round-10 report's case
     # (ro_covered.py:515): a session-scope custom placeholder at
-    # main.py:17948, both drivers and the replacing route; then one control
+    # main.py:17985, both drivers and the replacing route; then one control
     # per route, each refused by that route alone (R11_EXACT): the text
     # reading (a session set_config of '', and setseed, which no reading of
     # the session moves), the placeholder reading (a transaction-local
@@ -1115,7 +1120,7 @@ def test_continuity_control(runs, name):
 @pytest.mark.parametrize("driver", ["role", "grant", "replaces_role", "replaces_grant"])
 def test_r10_n_ro_covered_488_commit_and_chain_at_16828_refused(runs, driver):
     """The round-9 report's case (ro_covered.py:488): `COMMIT AND CHAIN` at
-    main.py:17948 must not classify as a read; the lock and counter
+    main.py:17985 must not classify as a read; the lock and counter
     measurements must not read the replacement transaction. Executed at the
     control's route (a planted program at the position: COMMIT AND CHAIN,
     then the position's own statement; main.py unchanged), under the
@@ -1151,7 +1156,7 @@ def test_r10_driver_connections_discarded(runs):
 @pytest.mark.parametrize("driver", ["role", "grant", "replaces_role"])
 def test_r11_n_ro_covered_515_hidden_set_config_at_16828_refused(runs, driver):
     """The round-10 report's case (ro_covered.py:515): `SELECT
-    set_config('rf10.hidden','yes',false)` at main.py:17948 must refuse as
+    set_config('rf10.hidden','yes',false)` at main.py:17985 must refuse as
     session residue; pg_settings had no row for such a placeholder on 16.9
     (RF11 log r11-res-probe-55432-20261106T065356Z.log). Executed at the
     control's route (planted program then the position's own statement, and
@@ -1233,7 +1238,7 @@ def _r11_production_records(runs):
 # Ruling FOUR-R11-A6 (3a): every (name, class, scope) the program's own
 # captured texts set, measured on seat-3 (16.15) at ec9ecef6 (RF11 log
 # r11-res-p2-r8-ec9ecef6.log): one name, the SET LOCAL lock_timeout of
-# main._identity_lock_many (main.py 18459-18490 at this tip; NOTES-r11-res.md).
+# main._identity_lock_many (main.py 18506-18534 at this tip; NOTES-r11-res.md).
 R11_SETTING_NAMES = (("lock_timeout", "server", "local"),)
 # (3b): the placeholders those texts set at session scope: frozen at none.
 R11_SESSION_PLACEHOLDERS = ()
@@ -1435,10 +1440,11 @@ def test_census_complete_layer_frozen_whole():
     coarse forms of the moderator log's change (MODLOG_FROZEN, frozen by
     hand), plus the two coarse forms of QAPPLY-1 (QAPPLY_FROZEN) and the one
     coarse form of the ban sweep (BAN_SWEEP_FROZEN), both frozen by hand at
-    the stack, plus the complete layer, which also holds the moderator log
-    block's two complete forms and the ban sweep block's five; the snapshot
-    reader's builder adds one more form to the complete layer and one more of
-    round 10's kinds, both frozen by hand."""
+    the stack, plus the five coarse forms of MDPL's change (MDPL_FROZEN,
+    frozen by hand), plus the complete layer, which also holds the moderator
+    log block's two complete forms, the ban sweep block's five and MDPL's
+    twenty; the snapshot reader's builder adds one more form to the complete
+    layer and one more of round 10's kinds, both frozen by hand."""
     import ro_census
     import ro_census_frozen as fz
     import test_r7_ro_role_pg as r7
@@ -1456,6 +1462,7 @@ def test_census_complete_layer_frozen_whole():
     BOTH_LAYER_BLOCKS = [
         (fz.MODLOG_FROZEN, fz.MODLOG_COUNT, 5, 2),
         (fz.BAN_SWEEP_FROZEN, fz.BAN_SWEEP_COUNT, 1, 5),
+        (fz.MDPL_FROZEN, fz.MDPL_COUNT, 5, 20),
     ]
     for block, count, n_coarse, n_complete in BOTH_LAYER_BLOCKS:
         b_coarse = {k: v for k, v in block.items() if not k.endswith(ro_census.COMPLETE)}
@@ -1502,6 +1509,15 @@ def test_census_complete_layer_frozen_whole():
     assert sum(len(v) for v in fz.LOBBY_INVITES_FROZEN.values()) == fz.LOBBY_INVITES_COUNT == 4
     assert set(fz.LOBBY_INVITES_FROZEN) <= coarse
     assert {f[0] for v in fz.LOBBY_INVITES_FROZEN.values() for f in v} == {"kwarg"}
+    # MDPL's change (the deletion's bound, MDPL class C's signal-class route and relock
+    # controls): 25 hand-frozen forms, 5 coarse (main.py's three dsntext docstrings and two
+    # imports), 20 complete (main.py's three, closed_walk.py's fourteen, the a1 test file's three)
+    assert sum(len(v) for v in fz.MDPL_FROZEN.values()) == fz.MDPL_COUNT == 25
+    assert set(fz.MDPL_FROZEN) <= coarse | complete
+    assert sum(len(v) for k, v in fz.MDPL_FROZEN.items() if k in coarse) == fz.MDPL_COARSE_COUNT == 5
+    assert sum(len(v) for k, v in fz.MDPL_FROZEN.items() if k in complete) == fz.MDPL_COMPLETE_COUNT == 20
+    assert {f[0] for k, v in fz.MDPL_FROZEN.items() if k in coarse for f in v} == {"dsntext", "import"}
+    assert {f[0] for k, v in fz.MDPL_FROZEN.items() if k in complete for f in v} == {"alias", "dynamic"}
     # the B10 merge: one hand-frozen coarse import form (W30k)
     assert sum(len(v) for v in fz.B10_MERGE_FROZEN.values()) == fz.B10_MERGE_COUNT == 1
     assert set(fz.B10_MERGE_FROZEN) <= coarse

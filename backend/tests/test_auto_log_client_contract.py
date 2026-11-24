@@ -190,31 +190,67 @@ def test_the_success_body_carries_the_two_numbers_the_client_extracts():
     assert '"bug_number":-7' in rendered and '"log_bytes":12' in rendered
 
 
+# The codes AutoLogUpload handles without retrying: 404 latches uploads off for
+# the session; 429/409/413 log terminal; the rest log one warning.
+CLIENT_HANDLED = {400, 401, 404, 413, 422, 429, 503}
+# MDPL-GATE-REREAD-1: the route's one 404, the arm's own literal for a player
+# whose row, read again by id in the writing transaction, is deleted.
+DELETED_PLAYER_404 = 'raise HTTPException(status_code=404, detail="Player not found")'
+
+
+def _refusal_census(src, helper_src, module_src, prune_src):
+    """The census of the codes, over the route's, the capped reader's, the
+    module's and the prune route's source. Raises AssertionError at the first
+    check that fails (the mutant below reads which one)."""
+    codes = {int(c) for c in re.findall(r"status_code=(\d+)", src)}
+    # the per-day bucket's 429 is raised by a helper the route calls
+    helper_codes = {int(c) for c in re.findall(r"status_code=(\d+)", helper_src)}
+    assert codes | helper_codes <= CLIENT_HANDLED, codes | helper_codes
+    assert all(400 <= c < 600 for c in codes | helper_codes)
+    # The deleted player's refusal is read here, where the others are: the
+    # arm answers with its own literal 404, once (the helper's refusal it
+    # catches to discard the blob is not raised again).
+    assert src.count("status_code=404") == 1, ("404 literals in the route", src.count("status_code=404"))
+    module_codes = {int(c) for c in re.findall(r"status_code=(\d+)", module_src)}
+    # The internal prune route's own answers -- 403 (the key), 409 (a pass is
+    # already running) and 503 (its unlink pass past the ceiling) -- belong to
+    # it alone; the client never calls it, and no code the client can meet is
+    # admitted by this exception.
+    prune_codes = {int(c) for c in re.findall(r"status_code=(\d+)", prune_src)}
+    assert prune_codes == {403, 409, 503}, prune_codes
+    for code in (403, 409):
+        assert module_src.count("status_code=%d" % code) == prune_src.count("status_code=%d" % code), (
+            "status %d is raised outside the internal prune route" % code)
+    assert module_codes - {403, 409} <= CLIENT_HANDLED, module_codes
+
+
+def _census_sources():
+    return (inspect.getsource(auto_logs.upload_auto_log),
+            inspect.getsource(auto_logs._read_capped_body),
+            inspect.getsource(auto_logs),
+            inspect.getsource(auto_logs.run_auto_log_prune))
+
+
 def test_every_refusal_the_route_can_raise_is_one_the_client_handles_without_retrying():
     """The upload route's own codes, read from its source: every one is a 4xx
     or a 503, never a redirect and never a 2xx carrying an error. The client
     makes ONE attempt per qualifying room exit whatever comes back (404
     latches off for the session; 429/409/413 log terminal; the rest log one
     warning), so no code below can start a loop. A new code fails this case
-    and must be read against AutoLogUpload before it is admitted."""
-    src = inspect.getsource(auto_logs.upload_auto_log)
-    codes = {int(c) for c in re.findall(r"status_code=(\d+)", src)}
-    # the per-day bucket's 429 is raised by a helper the route calls
-    helper_codes = {int(c) for c in re.findall(
-        r"status_code=(\d+)", inspect.getsource(auto_logs._read_capped_body))}
-    assert codes | helper_codes <= {400, 401, 413, 422, 429, 503}, codes | helper_codes
-    assert all(400 <= c < 600 for c in codes | helper_codes)
-    module_codes = {int(c) for c in re.findall(r"status_code=(\d+)", inspect.getsource(auto_logs))}
-    # The internal prune route's own answers -- 403 (the key), 409 (a pass is
-    # already running) and 503 (its unlink pass past the ceiling) -- belong to
-    # it alone; the client never calls it, and no code the client can meet is
-    # admitted by this exception.
-    prune_codes = {int(c) for c in re.findall(
-        r"status_code=(\d+)", inspect.getsource(auto_logs.run_auto_log_prune))}
-    assert prune_codes == {403, 409, 503}, prune_codes
-    module_src = inspect.getsource(auto_logs)
-    for code in (403, 409):
-        assert module_src.count("status_code=%d" % code) == inspect.getsource(
-            auto_logs.run_auto_log_prune).count("status_code=%d" % code), (
-            "status %d is raised outside the internal prune route" % code)
-    assert module_codes - {403, 409} <= {400, 401, 413, 422, 429, 503}, module_codes
+    and must be read against AutoLogUpload before it is admitted. The 404 is
+    the route's since MDPL-GATE-REREAD-1 (a deleted player's upload, refused
+    after the re-read by id); its literal is counted, once."""
+    _refusal_census(*_census_sources())
+
+
+def test_the_census_is_red_when_the_deleted_players_404_is_no_literal():
+    """THE MUTANT: the literal taken out, the arm raising the helper's refusal
+    again as it did before. The route still answers 404, but the census can
+    no longer read it, and is red at the 404 count, its first failing line."""
+    src, helper_src, module_src, prune_src = _census_sources()
+    assert src.count(DELETED_PLAYER_404) == 1, src.count(DELETED_PLAYER_404)
+    assert module_src.count(DELETED_PLAYER_404) == 1, module_src.count(DELETED_PLAYER_404)
+    with pytest.raises(AssertionError) as red:
+        _refusal_census(src.replace(DELETED_PLAYER_404, "raise"), helper_src,
+                        module_src.replace(DELETED_PLAYER_404, "raise"), prune_src)
+    assert str(red.value).splitlines()[0] == "('404 literals in the route', 0)", str(red.value)

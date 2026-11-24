@@ -53,8 +53,15 @@ OPS = {
 # 4 -> 5 (Bindings._inert_string reads a comprehension's Compare tests to
 # see that a string spelling a function's name is only the left operand
 # of `in`/`not in`, compared and never looked up).
+# MDPL class K2 (the integrator's ruling of 17 Nov 2026 14:10:47Z, 1):
+# byname closed_walk 32 -> 33, _k_once's Bindings.spelled_once. Class K's
+# admission reads the setattr's name argument as the plain name of the
+# loop's own target; that name is the resolver's table entry holding the
+# target's node (_k_entry, found by the node and not by a spelling), bound
+# once over the loop alone as a local, so the spelling it accepts is the
+# one the node identity fixed.
 COUNTS = {
-    ("byname", "closed_walk.py"): 32,
+    ("byname", "closed_walk.py"): 33,
     ("byname", "resolution_sites.py"): 3,
     ("byname", "test_a1_identity_formation.py"): 39,
     ("byname", "test_match_hold_admission_gate_pg.py"): 23,

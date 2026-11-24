@@ -4184,9 +4184,13 @@ def test_s49_an_unbacked_started(monkeypatch):
     started without grant; (ii) a grant-backed starter whose row turned final
     writes started_at; (iii) no verdict, veto or closer reads started_at."""
     import inspect
+    # A route under a decorator is read through its __wrapped__ chain: the
+    # account deletion is delete_player_data under _deletion_bounded
+    # (functools.wraps), whose own code names nothing of the route's.
+    # _s49_count reads source through inspect.getsource, which unwraps too.
     closers = sorted({f for _n, f in inspect.getmembers(main, inspect.isfunction)
                       if f.__module__ == main.__name__
-                      and "_FFA_CLOSE_RECORD_SET" in f.__code__.co_names},
+                      and "_FFA_CLOSE_RECORD_SET" in inspect.unwrap(f).__code__.co_names},
                      key=lambda f: f.__name__)
     names = {f.__name__ for f in closers}
     assert {"queue_cleanup_loop", "delete_player_data", "ffa_queue_leave", "_asm_reform",

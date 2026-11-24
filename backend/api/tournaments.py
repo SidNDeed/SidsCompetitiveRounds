@@ -4621,6 +4621,10 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest,
     # being a READ COMMITTED point read.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
                      {"sid": req.steam_id})
+    # MDPL-GATE-REREAD-1 F2: the player was read above, before this key; read
+    # again by id under it, so a deletion that committed meanwhile answers 404.
+    import main as _main
+    await _main._reread_player_or_404(db, player.id)
     # Round-18 find 2: banned players cannot sign up — the bracket would
     # otherwise pair them into new series/rooms after the ban.
     if await _player_id_banned(db, player.id):

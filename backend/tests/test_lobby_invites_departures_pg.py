@@ -53,10 +53,25 @@ SECRET = "inv-departure-secret"
 _EVERY = re.compile(r"\A")
 
 # A path's lobby row lock: `FROM <lobby table> WHERE id = <bind> FOR [NO KEY]
-# UPDATE`, as the group helpers, the join cores, account deletion and the ban
-# send it (never a SKIP LOCKED re-read). The mutant rewrites it to a plain read.
+# UPDATE`, as the group helpers, the join cores and the ban send it (never a
+# SKIP LOCKED re-read). The mutant rewrites it to a plain read.
 _LOCK_RX = {m: re.compile(r"(FROM %s WHERE id = \S+) FOR (?:NO KEY )?UPDATE(?! SKIP)" % LOBBY_TABLE[m])
             for m in MODES}
+# The account deletion's form of it (MDPL r1 (a), _deletion_take_or_yield):
+# its step 4 takes the lobby row FOR NO KEY UPDATE SKIP LOCKED and reads it
+# plainly when that returns nothing. A row another session holds ends the
+# attempt (_DeletionRowHeld, printed as "deletion attempt N met a held
+# <lobby table> row"); the attempt rolls back with nothing written, and the
+# bound runs the deletion again after a pause while the time left covers an
+# attempt (_deletion_bounded). So the deletion waits on the lobby by its
+# attempts, never as a waiter in PostgreSQL. The mutant rewrites the take to
+# a plain read, which returns the held row as taken.
+_DELETE_LOCK_RX = {m: re.compile(r"(FROM %s WHERE id = \S+) FOR NO KEY UPDATE SKIP LOCKED" % LOBBY_TABLE[m])
+                   for m in MODES}
+# How long a deletion case holds the lobby row: long enough for several
+# attempts to meet it, short enough that the attempt after the release still
+# fits the deadline (the test checks that against main's constants).
+_DELETE_HOLD_S = 2.0
 _BAN_LOCK_RX = re.compile(r"(SELECT 1 FROM (?:ffa|team|ovt)_lobbies WHERE id = \S+) FOR NO KEY UPDATE")
 
 
@@ -146,35 +161,54 @@ def _first(log, pred, before=None):
     return None
 
 
-def _order(log, mode):
+def _order(log, mode, take_rx=None):
     """(lobby lock, the departed seat's queue-row delete, the sender_left void)
     as indexes in the statement log: the lock is the first lobby lock, the
     void the departure step's own statement, the delete the last delete of
-    the mode's queue rows before it."""
+    the mode's queue rows before it. With `take_rx` (the account deletion's
+    take, which every attempt sends) the lock is the last take before the
+    void: the committing attempt's."""
     void = _first(log, lambda s: "UPDATE lobby_invites" in s and "'sender_left'" in s)
-    lock = _first(log, lambda s: _LOCK_RX[mode].search(s) is not None)
+    if take_rx is None:
+        lock = _first(log, lambda s: _LOCK_RX[mode].search(s) is not None)
+    else:
+        takes = [i for i, s in enumerate(log[:void] if void is not None else log)
+                 if take_rx[mode].search(s) is not None]
+        lock = takes[-1] if takes else None
     dels = [i for i, s in enumerate(log[:void] if void is not None else log)
             if ("DELETE FROM %s" % QUEUE_TABLE[mode]) in s]
     return lock, (dels[-1] if dels else None), void
 
 
-async def _under_lock(env, mode, lid, who, iids, depart):
+async def _under_lock(env, mode, lid, who, iids, depart, held=None):
     """`depart()` run while a side session holds the lobby row FOR NO KEY
     UPDATE. What it observes: whether the departure waited on that session;
     whether it finished while the lock was held; `who`'s seat and the
     invites' states while held; and after the release, the departure's
-    answer, `who`'s seat and each invite's end. Every wait is bounded."""
+    answer, `who`'s seat and each invite's end. Every wait is bounded.
+
+    `held` is pytest's capsys, for the account deletion, which waits by its
+    attempts (_DELETE_LOCK_RX): the row is held for _DELETE_HOLD_S, and
+    `waited` is that the deletion printed that it met the held lobby row and
+    had not finished."""
     side = await env.side()
     await side.execute("BEGIN")
     await side.execute("SELECT 1 FROM %s WHERE id = $1 FOR NO KEY UPDATE" % LOBBY_TABLE[mode], lid)
+    if held is not None:
+        held.readouterr()
     task = asyncio.ensure_future(depart())
     obs = {}
     try:
-        done, _rest = await asyncio.wait({task}, timeout=1.0)
-        waiters = [] if done else await waiting_on(env, side.get_server_pid())
-        obs["waited"] = bool(waiters) and not task.done()
-        if not obs["waited"] and not task.done():
-            await asyncio.wait({task}, timeout=BOUND)
+        if held is not None:
+            await asyncio.wait({task}, timeout=_DELETE_HOLD_S)
+            met = "met a held %s row" % LOBBY_TABLE[mode]
+            obs["waited"] = met in held.readouterr().out and not task.done()
+        else:
+            done, _rest = await asyncio.wait({task}, timeout=1.0)
+            waiters = [] if done else await waiting_on(env, side.get_server_pid())
+            obs["waited"] = bool(waiters) and not task.done()
+            if not obs["waited"] and not task.done():
+                await asyncio.wait({task}, timeout=BOUND)
         obs["finished_while_held"] = task.done()
         obs["seated_while_held"] = who.id in await env.members(mode, lid)
         obs["while_held"] = [(await env.row(i))["state"] for i in iids]
@@ -258,7 +292,7 @@ def _depart(env, path, s):
 
 @pytest.mark.parametrize("path,mode", _PATHS, ids=["%s-%s" % p for p in _PATHS])
 def test_a_departure_waits_on_the_lobby_lock_then_voids_the_departed_senders_invites(
-        monkeypatch, path, mode):
+        monkeypatch, capsys, path, mode):
     """While another session holds the lobby row, the departure waits with
     the member seated and the invite pending (neither the queue-row delete
     nor the void has happened); after the release the member is gone and the
@@ -266,28 +300,40 @@ def test_a_departure_waits_on_the_lobby_lock_then_voids_the_departed_senders_inv
     lock, then the seat's delete, then the void. Mutants: the path's lobby
     lock rewritten to a plain read (the departure then finishes while the
     lock is held); _invite_end_departed ending nothing (the invite stays
-    pending)."""
+    pending). The account deletion waits by its attempts (_DELETE_LOCK_RX):
+    while the row is held each attempt meets it and writes nothing, and the
+    attempt after the release, within the deadline, answers 200 with the
+    seat removed and the invite void; its lock is its committing attempt's
+    take."""
+    delete = path == "delete"
+    if delete:
+        # The hold, the longest pause and one attempt fit the deadline.
+        assert (_DELETE_HOLD_S + max(main._DELETION_HELD_PAUSES_S) + main._DELETION_ATTEMPT_MIN_S
+                < main._DELETION_BUDGET_S)
+    held = capsys if delete else None
+    lock_rx = _DELETE_LOCK_RX if delete else _LOCK_RX
+
     async def body(env):
         if path == "ban":
             env.mp.setattr(main, "_pc_lease_drain", _drain_now)
         s = await _seat(env, path, mode)
         with env.rewriting(_EVERY, "") as log:
-            obs = await _under_lock(env, mode, s.lid, s.m, [s.iid], _depart(env, path, s))
+            obs = await _under_lock(env, mode, s.lid, s.m, [s.iid], _depart(env, path, s), held)
         assert obs["waited"] and not obs["finished_while_held"], ("the departure did not wait", obs)
         assert obs["seated_while_held"] and obs["while_held"] == ["pending"], obs
         assert obs["answer"].status == 200, obs["answer"]
         assert not obs["seated_after"] and obs["after"] == [VOID_LEFT], obs
         if s.j is not None:
             assert s.j.id in await env.members(mode, s.lid), "the pruning join did not seat its joiner"
-        lock, gone, void = _order(log, mode)
+        lock, gone, void = _order(log, mode, _DELETE_LOCK_RX if delete else None)
         assert None not in (lock, gone, void) and lock < gone < void, (
             "lobby lock, seat delete, void out of order", lock, gone, void)
 
         # mutant 1: the path's lobby lock rewritten to a plain read
         if (path, mode) not in _NO_LOCK_MUTANT:
             s = await _seat(env, path, mode)
-            with env.rewriting(_LOCK_RX[mode], r"\1") as hits:
-                obs = await _under_lock(env, mode, s.lid, s.m, [s.iid], _depart(env, path, s))
+            with env.rewriting(lock_rx[mode], r"\1") as hits:
+                obs = await _under_lock(env, mode, s.lid, s.m, [s.iid], _depart(env, path, s), held)
             assert hits
             assert not obs["waited"] and obs["finished_while_held"] and not obs["seated_while_held"], (
                 "without its lock statement the departure still waited", obs)
@@ -296,7 +342,7 @@ def test_a_departure_waits_on_the_lobby_lock_then_voids_the_departed_senders_inv
         with pytest.MonkeyPatch.context() as mp2:
             mp2.setattr(main, "_invite_end_departed", _end_nothing)
             s = await _seat(env, path, mode)
-            obs = await _under_lock(env, mode, s.lid, s.m, [s.iid], _depart(env, path, s))
+            obs = await _under_lock(env, mode, s.lid, s.m, [s.iid], _depart(env, path, s), held)
         assert obs["waited"] and not obs["seated_after"], obs
         assert obs["after"] == [PENDING], ("the void mutant still ended the invite", obs)
     case(monkeypatch, body)

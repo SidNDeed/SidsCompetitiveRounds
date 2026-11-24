@@ -1351,8 +1351,8 @@ class HealthResponse(BaseModel):
     # delete_player_data writes moderation_cases only in its last statement,
     # which skips a row another transaction holds, and the janitor finishes a
     # skipped row; a mail send keeps its order; the retention sweep waits for
-    # no row lock; the open item MDPL, two deletions against each other on
-    # mail rows that are not case rows, is not in it). It names build
+    # no row lock; MDPL, the deletion's lock order against other writers and
+    # its bounded new attempts, is not in it). It names build
     # identity only. A code
     # constant, equal on both roles by construction, so the train can read it
     # through the edge; the lane adds no route and no key to any answer, and
@@ -1395,6 +1395,17 @@ class HealthResponse(BaseModel):
     # 794). Probed by the release train and read by nothing else (#306). No
     # default, as above. Absent on any build before it.
     bot_text_build: int
+    # account_deletion_lock_build: release-train verification plumbing, not
+    # a design mechanism (main._ACCOUNT_DELETION_LOCK_BUILD; 1 = in this
+    # build delete_player_data and the pending_dms writers take their locks
+    # in one order, and a deletion that PostgreSQL ends as a deadlock victim
+    # runs again within its deadline). It names build identity only. A code
+    # constant, equal on both roles by construction, so the train can read
+    # it through the edge; the lane adds no route and no key to any answer,
+    # and this is the key that tells a stale box from a refreshed one
+    # (learnings 780, 794). Probed by the release train and read by nothing
+    # else (#306). No default, as above. Absent on any build before it.
+    account_deletion_lock_build: int
     # lfp_casual_build: release-train verification plumbing, not a design
     # mechanism (main._LFP_CASUAL_BUILD; 1 = this build admits a casual-only
     # looking-for-players request of a player with ranked off, keeps one

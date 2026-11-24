@@ -1,0 +1,3658 @@
+{
+ "about": "MDPL r2: the census as first frozen, before the reader's six widenings (mdpl_census.py's switches). test_mdpl_census computes the census with all six off and compares it with this file: the regression control of the widening. Judgements live in mdpl_census_frozen.json alone.",
+ "sites": {
+  "_apply_ban_core | UPDATE players SET pc_collection_public = false, pc_announce = false, pc | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "internal_moderation_case_act"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_apply_series_rating_pass | RatingHistory(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_apply_series_rating_pass | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_asm_hold_after_gone | INSERT INTO ffa_seat_readmissions (lobby_id, player_id, n, anchor_at, he | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_queue_leave"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ]
+  },
+  "_asm_insert_seat_rows | INSERT INTO ffa_assembly_seats (lobby_id, player_id, slot, locked_at, lo | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ]
+  },
+  "_asm_reform | INSERT INTO ffa_lobbies ( id, status, photon_room_id, region, player_cou | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_queue_leave",
+    "ffa_queue_poll"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ]
+  },
+  "_bind_one_lobby_bet | INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "team_lobby_start"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_bind_one_lobby_bet | INSERT INTO team_bets (player_id, team_series_id, bet_on_team, amount, o | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "team_lobby_start"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_check_steam_session | UPDATE players SET steam_auth_seen_at = COALESCE(steam_auth_seen_at, NOW | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "block_player",
+    "cancel_lobby_bet",
+    "chat_moderate_bridge_unmute",
+    "chat_moderate_delete",
+    "chat_moderate_list_mutes",
+    "chat_moderate_mute",
+    "chat_moderate_mute_by_message",
+    "chat_moderate_unmute",
+    "ffa_lobby_assembly",
+    "ffa_lobby_connect",
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "ffa_lobby_kick",
+    "ffa_lobby_readmit",
+    "ffa_lobby_release",
+    "ffa_lobby_settings",
+    "ffa_lobby_start",
+    "ffa_queue_join",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "ffa_readmit_offer",
+    "invite_accept",
+    "invite_send",
+    "lfp_ping",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "ovt_lobby_kick",
+    "ovt_lobby_leave",
+    "ovt_lobby_prefs",
+    "ovt_lobby_resolve",
+    "ovt_lobby_settings",
+    "ovt_lobby_start",
+    "ovt_lobby_state",
+    "ovt_queue_join",
+    "ovt_queue_leave",
+    "ovt_queue_poll",
+    "place_bet",
+    "place_discord_bet",
+    "place_discord_ffa_bet",
+    "place_discord_lobby_bet",
+    "place_discord_team_bet",
+    "place_ffa_bet",
+    "place_lobby_bet",
+    "place_team_bet",
+    "presence_ping",
+    "purchase_item",
+    "queue_decline",
+    "queue_join",
+    "queue_leave",
+    "queues_escape",
+    "report_casual_dc",
+    "report_disconnect",
+    "set_active_color",
+    "set_active_cursor_color",
+    "set_active_player_color",
+    "set_active_player_effect",
+    "set_active_title",
+    "set_active_trail",
+    "set_appear_offline",
+    "set_hide_gold",
+    "set_pref_same_cards",
+    "set_show_discord",
+    "submit_ffa_match",
+    "submit_macro_evidence",
+    "submit_match",
+    "submit_ovt_match",
+    "submit_team_match",
+    "team_lobby_create",
+    "team_lobby_join",
+    "team_lobby_kick",
+    "team_lobby_leave",
+    "team_lobby_prefs",
+    "team_lobby_resolve",
+    "team_lobby_settings",
+    "team_lobby_start",
+    "team_lobby_state",
+    "team_queue_join",
+    "team_queue_leave",
+    "team_queue_manual_pick_toggle",
+    "team_queue_poll",
+    "team_queue_preferred_team",
+    "team_queue_ready",
+    "toggle_color",
+    "toggle_nametag_style",
+    "toggle_ranked",
+    "unblock_player",
+    "unlock_achievement"
+   ],
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "lobby_invites",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_enrollment_identity_gate | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_complete_team_series_with_ratings | GlickoRating2v2(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_complete_team_series_with_ratings | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_complete_team_series_with_ratings | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_complete_team_series_with_ratings | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "held": [
+    "ffa_queue",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, team_gold_ear | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "held": [
+    "ffa_queue",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_complete_team_series_with_ratings | UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_resolve_team_series",
+    "team_series_report_dc"
+   ],
+   "held": [
+    "ffa_queue",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_credit_bet_fighter_tax | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_report_dc",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_credit_bet_fighter_tax | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :tax WHERE id | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_report_dc",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_ffa_lobby_create_core | INSERT INTO ffa_lobbies (id, status, player_count, member_ids, host_play | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_lobby_create",
+    "invite_send"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_lobby_enroll_caller | INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "invite_accept",
+    "invite_send"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_queue_poll_inner | INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_coun | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_queue_poll"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_report_gate | INSERT INTO ffa_report_journal (lobby_id, game, reporter_id, cls, receiv | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_report_gate | INSERT INTO ffa_report_windows (lobby_id, game, opened_at, settle_after) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_ffa_report_window_settled | INSERT INTO ffa_report_windows (lobby_id, game, opened_at, settle_after, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_grant_achievement_inline | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_grant_achievement_inline | PlayerAchievement(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_grant_achievement_inline | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id  | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_entries",
+    "i18n_portal_sessions",
+    "i18n_proposals",
+    "match_seat_holds",
+    "ovt_queue",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_grant_title_item | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_grant_achievement",
+    "admin_resolve_team_series",
+    "i18n_review",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_lease_acquire | INSERT INTO queue_leases (player_id, mode, group_id, generation, acquire | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "invite_accept",
+    "invite_send",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "ovt_lobby_start",
+    "ovt_queue_poll",
+    "ovt_series_continuation",
+    "queue_poll",
+    "queue_ready",
+    "team_lobby_create",
+    "team_lobby_join",
+    "team_lobby_start",
+    "team_queue_poll",
+    "team_series_continuation"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_lease_admission_gate | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "ffa_lobby_create",
+    "ffa_lobby_join",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "invite_accept",
+    "invite_send",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "ovt_lobby_start",
+    "ovt_queue_poll",
+    "ovt_series_continuation",
+    "queue_poll",
+    "queue_ready",
+    "team_lobby_create",
+    "team_lobby_join",
+    "team_lobby_start",
+    "team_queue_poll",
+    "team_series_continuation"
+   ],
+   "held": [
+    "?",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_seat_readmissions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_inbox_rev",
+    "mail_recipients",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "player_blocks",
+    "players",
+    "queue_blocks",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_enrollment_identity_gate | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_lobby_create_core | INSERT INTO {?d:lobbies} (id, status, player_count, member_ids, host_pla | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "invite_send",
+    "ovt_lobby_create",
+    "team_lobby_create"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_lobby_enroll_caller | INSERT INTO {?d:queue} (player_id, steam_id, display_name, rating, ratin | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "invite_accept",
+    "invite_send",
+    "ovt_lobby_create",
+    "ovt_lobby_join",
+    "team_lobby_create",
+    "team_lobby_join"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_mail_censor_or_raise | INSERT INTO mail_censor_hits (sender_id) VALUES (:sid) | 0": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_send"
+   ],
+   "held": [
+    "mail_messages",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_finish_send | INSERT INTO mail_inbox_rev (recipient_id, rev) SELECT r.recipient_id, 1  | 0": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_send"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_messages",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_lock_identities | SELECT id, steam_id, deleted_at FROM players WHERE id = :pid FOR NO KEY  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_ban",
+    "admin_mail_broadcast",
+    "admin_mail_bulk_grant",
+    "admin_mail_bulk_grant_revoke",
+    "admin_moderation_case_act",
+    "admin_unban",
+    "internal_moderation_case_act",
+    "invite_send",
+    "mail_block_add",
+    "mail_block_remove",
+    "mail_reply",
+    "mail_report",
+    "mail_send"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_mail_open_case | INSERT INTO moderation_cases (kind, subject_player_id, reporter_id, mess | 0": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_report",
+    "mail_send"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_messages",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_open_case | INSERT INTO moderation_cases (kind, subject_player_id, reporter_id, mess | 1": {
+   "class": "KEY",
+   "entries": [
+    "mail_reply",
+    "mail_report",
+    "mail_send"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_messages",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_write_message | INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to,  | 0": {
+   "class": "KEY",
+   "entries": [
+    "invite_send",
+    "mail_reply",
+    "mail_send"
+   ],
+   "held": [
+    "mail_messages",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mail_write_message | INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) S | 0": {
+   "class": "KEY",
+   "entries": [
+    "invite_send",
+    "mail_reply",
+    "mail_send"
+   ],
+   "held": [
+    "mail_messages",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_mark_mod_seen | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_join",
+    "series_preflight",
+    "submit_bug_report",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked",
+    "unlock_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_maybe_grant_level_rewards | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_maybe_grant_level_rewards | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_claim_daily | INSERT INTO pc_daily_claims (player_id, claimed_on) VALUES (CAST(:pid AS | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_daily",
+    "pc_daily_claim"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_claim_daily | INSERT INTO pc_packs (player_id, source, reference_id, status) VALUES (C | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_daily",
+    "pc_daily_claim"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_claim_daily | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_daily",
+    "pc_daily_claim"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_clear_portrait_unit | SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players WHERE  | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_pc_portrait_clear"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)"
+   ],
+   "keys": [
+    "admin_pc_portrait_clear | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_clear_portrait_unit | UPDATE players SET {?} WHERE id = CAST(:pid AS uuid) RETURNING pc_game_p | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_pc_portrait_clear"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)"
+   ],
+   "keys": [
+    "admin_pc_portrait_clear | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_grant_earned_packs | INSERT INTO pc_packs (player_id, source, mode, kind, reference_id, statu | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "_pc_reconcile_earned_packs",
+    "admin_accept_quarantine",
+    "admin_resolve_team_series",
+    "submit_ffa_match",
+    "submit_match",
+    "submit_ovt_match",
+    "submit_team_match",
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_mint | INSERT INTO pc_cards (subject_player_id, edition_id, variant) VALUES (CA | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_mint | INSERT INTO pc_events (kind, player_id, subject_player_id, print_id, dup | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_mint | INSERT INTO pc_prints (card_id, owner_player_id, snapshot_id, rarity, fo | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_motion_janitor | UPDATE players p SET active_dance_id = NULL WHERE p.id = CAST(:pid AS uu | 0": {
+   "class": "READ",
+   "entries": [
+    "_pc_snapshot_janitor_step"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_delivery_leases",
+    "pc_portrait_nonces",
+    "pc_portraits"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_open_for | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_open_for | INSERT INTO pc_packs (player_id, source, nonce, status, pay, price) VALU | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_open_for | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_open_for | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + CAST(:amt AS i | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_open_for | UPDATE players SET pc_shards = pc_shards - CAST(:amt AS integer) WHERE i | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "internal_pc_open_pack",
+    "pc_open_pack"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_claim | WITH due AS ( SELECT p.id FROM players p WHERE p.deleted_at IS NULL AND  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_pc_steam_batch",
+    "_pc_steam_prime"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_steam_write | SELECT p.pc_game_portrait_hash AS game_hash, p.pc_steam_portrait_hash AS | 0": {
+   "class": "KEY",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_fail = 0, pc_steam_avatar_ref = CAS | 0": {
+   "class": "KEY",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_fail = CAST(:fail AS smallint), pc_ | 0": {
+   "class": "KEY",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_hash = CAST(:h AS text), pc_steam_a | 0": {
+   "class": "KEY",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_steam_write | UPDATE players SET pc_steam_portrait_hash = NULL, pc_steam_avatar_ref =  | 0": {
+   "class": "KEY",
+   "entries": [
+    "_pc_steam_process"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits"
+   ],
+   "keys": [
+    "_pc_steam_write | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_pc_trade_lock_players | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_pc_trade_reverse",
+    "pc_trade_accept",
+    "pc_trade_cancel",
+    "pc_trade_decline",
+    "pc_trade_propose"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_trade_propose_tx | INSERT INTO pc_trade_spent_nonces (proposer, propose_nonce, trade_id) VA | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_propose"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_pc_trade_propose_tx | INSERT INTO pc_trades (id, pair_lo, pair_hi, proposer, a_prints, b_print | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_trade_propose"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_publish_pair_sitting | INSERT INTO series_dc_grants (holder_id, counterparty_id, series_id) VAL | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_poll",
+    "queue_ready",
+    "series_preflight",
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_qapply_credit | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [
+    "ffa_lobbies"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_credit | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + CAST(:g AS i | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_qapply_credit | UPDATE players SET total_xp = COALESCE(total_xp, 0) + CAST(:xp AS intege | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_credit_quarantine"
+   ],
+   "held": [
+    "ffa_lobbies",
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
+    "submit_ffa_match",
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
+    "submit_ffa_match",
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_quarantine_report | INSERT INTO match_report_quarantine (mode, reason, http_status, group_id | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_credit_quarantine",
+    "submit_ffa_match",
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_queue_join_upsert | INSERT INTO ranked_queue (player_id, steam_id, display_name, rating, rat | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_join"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_rdm_attempt | INSERT INTO ffa_readmit_attempts (lobby_id, player_id, n, attempt_no, ki | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "ffa_queue_leave",
+    "ffa_readmit_offer"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ]
+  },
+  "_reconcile_team_series_bets | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_reconcile_team_series_bets | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_reconcile_team_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_team_series",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_record_seat_attestation | INSERT INTO series_progress (surface, subject_id, player_id, observed_po | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "update_ffa_live_points",
+    "update_live_points",
+    "update_team_live_points"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_region_pings_store_task | INSERT INTO player_region_pings (player_id, pings, measured_at, received | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_region_pings_store_task"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_report_disconnect_once | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "report_disconnect"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_report_disconnect_once | UPDATE players SET ranked_dc_count = COALESCE(ranked_dc_count, 0) + 1 WH | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "report_disconnect"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_return_stake_exactly | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_series",
+    "admin_reverse_team_series",
+    "cancel_lobby_bet",
+    "ffa_lobby_assembly",
+    "ffa_lobby_connect",
+    "ffa_lobby_readmit",
+    "ffa_lobby_release",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "get_active_series",
+    "internal_moderation_case_act",
+    "ovt_lobby_leave",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "team_lobby_leave",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_return_stake_exactly | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS i | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "admin_resolve_team_series",
+    "admin_reverse_series",
+    "admin_reverse_team_series",
+    "cancel_lobby_bet",
+    "ffa_lobby_assembly",
+    "ffa_lobby_connect",
+    "ffa_lobby_readmit",
+    "ffa_lobby_release",
+    "ffa_lobby_start",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "get_active_series",
+    "internal_moderation_case_act",
+    "ovt_lobby_leave",
+    "queue_cleanup_loop",
+    "submit_ffa_match",
+    "team_lobby_leave",
+    "team_lobby_start",
+    "team_queue_cleanup_loop",
+    "team_queue_leave",
+    "team_queue_poll",
+    "team_series_state"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "match_seat_holds",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0",
+    "cancel_lobby_bet | SELECT pg_advisory_xact_lock(hashtext(:sid)) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_reverse_match_gold_xp | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_reverse_match_gold_xp | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_reverse_match_gold_xp | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_reverse_match_gold_xp | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 1": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series",
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_ffa_bets_for_game | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match"
+   ],
+   "held": [
+    "?",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "moderation_cases"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "_settle_ffa_bets_for_game | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_settle_ffa_bets_for_game | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "admin_ban",
+    "admin_moderation_case_act",
+    "ffa_queue_leave",
+    "ffa_queue_poll",
+    "internal_moderation_case_act",
+    "queue_cleanup_loop",
+    "submit_ffa_match"
+   ],
+   "held": [
+    "?",
+    "chat_mutes",
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "i18n_portal_sessions",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "moderation_cases",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "steam_sessions",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "_settle_ovt_report | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | INSERT INTO glicko_ratings_1v2 (player_id, completed_series, solo_games, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | INSERT INTO ovt_match_cards (match_id, player_id, card_name, pick_order) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id, sol | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_ovt_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_ovt_match"
+   ],
+   "held": [
+    "ovt_series",
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_series_bets | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_series_bets | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | GlickoRating2v2(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | GoldTransaction(...) | 3": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | TeamMatch(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | TeamMatchCard(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | TeamMatchTelemetry(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :p WHERE id  | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, team_gold | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, team_gold | 1": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_settle_team_report | UPDATE players SET total_xp = COALESCE(total_xp,0) + :delta, team_xp_ear | 0": {
+   "class": "READ",
+   "entries": [
+    "submit_team_match"
+   ],
+   "held": [
+    "players",
+    "team_bets",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "_sync_podium_holders | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_sync_podium_holders"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "_sync_podium_holders | UPDATE players p SET active_title_id = NULL FROM shop_items si WHERE si. | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "_sync_podium_holders"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_ffa_g3_seat | INSERT INTO ffa_g3_seats (player_id, added_at, expires_at) VALUES (:pid, | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_ffa_g3_seat"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | PlayerAchievement(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_grant_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_grant_achievement"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_mail_broadcast | INSERT INTO mail_inbox_rev (recipient_id, rev) SELECT r.recipient_id, 1  | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_mail_broadcast"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_messages"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "admin_mail_broadcast | INSERT INTO mail_messages (id, sender_id, kind, thread_id, in_reply_to,  | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_mail_broadcast"
+   ],
+   "held": [
+    "mail_messages"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "admin_mail_broadcast | INSERT INTO mail_recipients (message_id, recipient_id, kind, delivery) S | 0": {
+   "class": "KEY",
+   "entries": [
+    "admin_mail_broadcast"
+   ],
+   "held": [
+    "mail_messages"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "admin_rebuild_team_glicko | INSERT INTO glicko_ratings_2v2 (player_id, rating, rating_deviation, vol | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_rebuild_team_glicko"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_rebuild_team_glicko | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_rebuild_team_glicko"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_record_exclude | INSERT INTO record_exclusions (board, match_id, player_id, reason, creat | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_record_exclude"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_series | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_series | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_series"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_series | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "admin_reverse_series"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_reverse_team_series | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "admin_reverse_team_series | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "held": [
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_reverse_team_series | UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - : | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "held": [
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "admin_reverse_team_series | UPDATE players SET team_gold_earned = GREATEST(0, COALESCE(team_gold_ear | 0": {
+   "class": "READ",
+   "entries": [
+    "admin_reverse_team_series"
+   ],
+   "held": [
+    "players",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "artist_gift | INSERT INTO player_items (player_id, item_id, purchase_price, royalty_pa | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "artist_gift"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "block_player | INSERT INTO player_blocks (blocker_id, blocked_id) VALUES (:b, :bl) ON C | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "block_player"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "booster_grant | BoosterGrant(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "booster_grant"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "booster_grant | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "booster_grant"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "booster_grant | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "KEY",
+   "entries": [
+    "booster_grant"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "ffa_queue_join | INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ffa_queue_join"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "generate_link_code | LinkCode(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "generate_link_code"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "get_or_create_player | GlickoRating(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_join",
+    "report_casual_dc",
+    "series_preflight",
+    "submit_match",
+    "submit_team_match",
+    "team_queue_join",
+    "toggle_ranked"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "internal_pc_lease | INSERT INTO pc_delivery_leases (subject_id, print_id, event_ids, portrai | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "internal_pc_lease"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "invite_send | INSERT INTO lobby_invites (mode, lobby_id, sender_player_id, invitee_pla | 0": {
+   "class": "KEY",
+   "entries": [
+    "invite_send"
+   ],
+   "held": [
+    "mail_messages"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "mail_block_add | INSERT INTO mail_blocks (blocker_id, blocked_id) VALUES (:me, :t) ON CON | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_block_add"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "mail_delete | INSERT INTO mail_inbox_rev (recipient_id, rev) SELECT r.recipient_id, 1  | 0": {
+   "class": "READ",
+   "entries": [
+    "mail_delete"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "pending_dms"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ]
+  },
+  "mail_settings_put | SELECT steam_id FROM players WHERE id = :me FOR UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_settings_put"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "mail_settings_put | UPDATE players SET mail_discord_relay = :r WHERE id = :me | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_settings_put"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "mail_settings_put | UPDATE players SET mail_from = :v WHERE id = :me | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "mail_settings_put"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "music_rate | INSERT INTO music_ratings (player_id, sku, track_idx, pending_stars, pen | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "music_rate"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ovt_lobby_start | INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_rank | 0": {
+   "class": "KEY",
+   "entries": [
+    "ovt_lobby_start"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "ovt_queue_join | INSERT INTO ovt_queue (player_id, steam_id, display_name, rating, rating | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ovt_queue_join"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ovt_queue_poll | INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_rank | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ovt_queue_poll"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "ovt_series_continuation | INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_rank | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "ovt_series_continuation"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_dance_select | INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS u | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_dance_select"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_dance_select | SELECT p.active_dance_id FROM players p WHERE p.id = CAST(:pid AS uuid)  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_dance_select"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_dance_select | UPDATE players SET active_dance_id = CAST(:item AS bigint) WHERE id = CA | 0": {
+   "class": "KEY",
+   "entries": [
+    "pc_dance_select"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "pc_dance_select | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_discard_batch | INSERT INTO pc_shard_batches (player_id, batch_key, print_ids, prints, s | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_discard_batch"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_discard_batch | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_discard_batch"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_discard_batch | UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer) WHERE | 0": {
+   "class": "KEY",
+   "entries": [
+    "pc_discard_batch"
+   ],
+   "held": [
+    "pc_delivery_leases"
+   ],
+   "keys": [
+    "_pc_verified_actor | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_discard_print | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_discard_print"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_discard_print | UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer) WHERE | 0": {
+   "class": "KEY",
+   "entries": [
+    "pc_discard_print"
+   ],
+   "held": [
+    "pc_delivery_leases"
+   ],
+   "keys": [
+    "_pc_verified_actor | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_motion_upload | INSERT INTO pc_motions (player_id, motion_hash, source_sha256, bytes, by | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_motion_upload | INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS u | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_motion_upload | SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor, EXTRACT(E | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_motion_upload | SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor, EXTRACT(E | 1": {
+   "class": "KEY",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "held": [
+    "pc_motions",
+    "players"
+   ],
+   "keys": [
+    "pc_motion_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_motion_upload | UPDATE players SET pc_motion_at = now(), pc_motion_day_count = CASE WHEN | 0": {
+   "class": "KEY",
+   "entries": [
+    "pc_motion_upload"
+   ],
+   "held": [
+    "pc_motions",
+    "players"
+   ],
+   "keys": [
+    "pc_motion_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_portrait_upload | INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS u | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_portrait_upload"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_portrait_upload | SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor, EXTRACT(E | 0": {
+   "class": "KEY",
+   "entries": [
+    "pc_portrait_upload"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)"
+   ],
+   "keys": [
+    "pc_portrait_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_portrait_upload | UPDATE players SET pc_game_portrait_hash = CAST(:h AS text), pc_game_por | 0": {
+   "class": "KEY",
+   "entries": [
+    "pc_portrait_upload"
+   ],
+   "held": [
+    "key:770902, hashtext(:p)",
+    "pc_portraits",
+    "players"
+   ],
+   "keys": [
+    "pc_portrait_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "pc_set_setting | SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_set_setting"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "pc_set_setting | UPDATE players SET pc_collection_public = (CAST(:value AS integer) = 1), | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "pc_set_setting"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_bet | Bet(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_bet",
+    "place_discord_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_bet",
+    "place_discord_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_bet",
+    "place_discord_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_ffa_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_ffa_bet",
+    "place_ffa_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_ffa_bet | INSERT INTO ffa_bets (lobby_id, game_number, player_id, bet_on_player_id | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_ffa_bet",
+    "place_ffa_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_ffa_bet | UPDATE players SET gold_spent = COALESCE(gold_spent,0) + :amt WHERE id = | 0": {
+   "class": "KEY",
+   "entries": [
+    "place_discord_ffa_bet",
+    "place_ffa_bet"
+   ],
+   "held": [
+    "ffa_lobbies"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "place_lobby_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_lobby_bet",
+    "place_lobby_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_lobby_bet | INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_lobby_bet",
+    "place_lobby_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_lobby_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "KEY",
+   "entries": [
+    "place_discord_lobby_bet",
+    "place_lobby_bet"
+   ],
+   "held": [
+    "ffa_lobbies",
+    "team_lobbies"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "place_team_bet | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_team_bet",
+    "place_team_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_team_bet | INSERT INTO team_bets (player_id, team_series_id, bet_on_team, amount, o | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "place_discord_team_bet",
+    "place_team_bet"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "place_team_bet | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "KEY",
+   "entries": [
+    "place_discord_team_bet",
+    "place_team_bet"
+   ],
+   "held": [
+    "team_series"
+   ],
+   "keys": [
+    "_ban_lock_and_gate | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  },
+  "presence_ping | WITH ok AS ( SELECT EXISTS ( SELECT 1 FROM steam_sessions ss WHERE ss.to | 0": {
+   "class": "READ",
+   "entries": [
+    "presence_ping"
+   ],
+   "held": [
+    "queue_leases",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "purchase_item | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "purchase_item | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "purchase_item | PlayerItem(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "purchase_item | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "purchase_item"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "purchase_item | UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + :amt WHERE id  | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "purchase_item"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_cleanup_loop | GoldTransaction(...) | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients"
+   ],
+   "keys": [],
+   "phases": [
+    "B"
+   ]
+  },
+  "queue_cleanup_loop | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "held": [
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "queue_cleanup_loop | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = | 0": {
+   "class": "READ",
+   "entries": [
+    "queue_cleanup_loop"
+   ],
+   "held": [
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "lobby_bets",
+    "lobby_invites",
+    "mail_censor_hits",
+    "mail_inbox_rev",
+    "mail_messages",
+    "mail_recipients",
+    "mail_send_receipts",
+    "ovt_lobbies",
+    "ovt_queue",
+    "ovt_series",
+    "players",
+    "queue_leases",
+    "ranked_queue",
+    "team_bets",
+    "team_lobbies",
+    "team_queue",
+    "team_series"
+   ],
+   "keys": [],
+   "phases": [
+    "A",
+    "B"
+   ]
+  },
+  "queue_decline | INSERT INTO queue_blocks (blocker_id, blocked_id, expires_at) VALUES (:b | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_decline"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_poll | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_poll"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "queue_ready | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "queue_ready"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "report_casual_dc | INSERT INTO casual_dc_events (room_id, leaver_id, reporter_id, game_room | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "report_casual_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "report_casual_dc | UPDATE players SET casual_dc_count = COALESCE(casual_dc_count, 0) + 1 WH | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "report_casual_dc"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "series_preflight | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "series_preflight"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_active_color | ORM player.active_color_ids = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_active_color"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_allow_spectators | UPDATE players SET allow_spectators = :v WHERE steam_id = :sid | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_allow_spectators"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_appear_offline | ORM player.appear_offline = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_appear_offline"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_discord_username | UPDATE players SET discord_display_name = :d WHERE discord_id = :did | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_discord_username"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_discord_username | UPDATE players SET discord_username = :u WHERE discord_id = :did | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_discord_username"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_hide_gold | ORM player.hide_gold = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_hide_gold"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_player_card_tier | INSERT INTO player_card_tiers (player_id, card_name, filter, tier) VALUE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_player_card_tier"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_pref_same_cards | ORM player.pref_same_cards = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_pref_same_cards"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "set_show_discord | ORM player.show_discord = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "set_show_discord"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "steam_auth | UPDATE players SET steam_auth_seen_at = COALESCE(steam_auth_seen_at, NOW | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "steam_auth"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_bug_report | BugReport(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_bug_report"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | GoldTransaction(...) | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_card_offers (match_id, player_id, round_number, card_nam | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_match_cards (match_id, player_id, card_name, card_rarity | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, po | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count, win | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | INSERT INTO glicko_ratings_ffa (player_id, rating, rating_deviation, vol | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_ffa_match | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_ffa_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, ffa_gold_ | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_ffa_match | UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp, ffa_xp_earned  | 0": {
+   "class": "READ",
+   "entries": [
+    "_ffa_readmit_janitor",
+    "admin_accept_quarantine",
+    "submit_ffa_match"
+   ],
+   "held": [
+    "ffa_assembly_seats",
+    "ffa_bets",
+    "ffa_lobbies",
+    "ffa_queue",
+    "ffa_report_journal",
+    "ffa_report_windows",
+    "ffa_seat_readmissions",
+    "players",
+    "queue_leases"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | CardOffer(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 2": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | GoldTransaction(...) | 3": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | Match(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | MatchCard(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | MatchCard(...) | 1": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | RankedSeries(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 1": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 2": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 3": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET record_bounce_kill = GREATEST(COALESCE(record_bounce_ | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET record_max_health = GREATEST(COALESCE(record_max_heal | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "submit_match | UPDATE players SET record_max_single_hit = GREATEST(COALESCE(record_max_ | 0": {
+   "class": "UPGRADE",
+   "entries": [
+    "submit_match"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [],
+   "phases": [
+    "A"
+   ]
+  },
+  "team_lobby_start | INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, was | 0": {
+   "class": "KEY",
+   "entries": [
+    "team_lobby_start"
+   ],
+   "held": [
+    "mail_inbox_rev",
+    "mail_recipients"
+   ],
+   "keys": [
+    "_identity_lock_many | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
+   ],
+   "phases": [
+    "B"
+   ]
+  },
+  "team_queue_poll | INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, was | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_queue_poll"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "team_series_continuation | INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, was | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_series_continuation"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "team_series_report_dc | INSERT INTO team_matches (series_id, t1a_id, t1b_id, t2a_id, t2b_id, t1_ | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "team_series_report_dc"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "toggle_color | ORM player.active_color_id = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "toggle_color"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "toggle_color | ORM player.active_color_ids = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "toggle_color"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "toggle_nametag_style | ORM player.nametag_style_ids = | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "toggle_nametag_style"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "unlock_achievement | GoldTransaction(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "unlock_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "unlock_achievement | PlayerAchievement(...) | 0": {
+   "class": "CLEAR",
+   "entries": [
+    "unlock_achievement"
+   ],
+   "held": [],
+   "keys": [],
+   "phases": []
+  },
+  "unlock_achievement | UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :amt WHERE id | 0": {
+   "class": "KEY",
+   "entries": [
+    "unlock_achievement"
+   ],
+   "held": [
+    "players"
+   ],
+   "keys": [
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
+   ],
+   "phases": [
+    "A"
+   ]
+  }
+ },
+ "step1": {
+  "A": [
+   "admin_actions / NO KEY UPDATE",
+   "chat_messages / NO KEY UPDATE",
+   "chat_mutes / NO KEY UPDATE",
+   "ffa_assembly_seats / NO KEY UPDATE",
+   "ffa_bets / NO KEY UPDATE",
+   "ffa_lobbies / NO KEY UPDATE",
+   "ffa_queue / NO KEY UPDATE",
+   "ffa_queue / UPDATE",
+   "ffa_readmit_attempts / UPDATE",
+   "ffa_report_journal / NO KEY UPDATE",
+   "ffa_report_journal / UPDATE",
+   "ffa_report_windows / NO KEY UPDATE",
+   "ffa_seat_readmissions / UPDATE",
+   "i18n_entries / NO KEY UPDATE",
+   "i18n_portal_sessions / UPDATE",
+   "i18n_proposals / NO KEY UPDATE",
+   "i18n_review_events / NO KEY UPDATE",
+   "key:770902, hashtext(:p) / KEY",
+   "language_grants / NO KEY UPDATE",
+   "lobby_bets / NO KEY UPDATE",
+   "lobby_invites / NO KEY UPDATE",
+   "mail_blocks / UPDATE",
+   "mail_bulk_grants / NO KEY UPDATE",
+   "mail_bulk_grants / UPDATE",
+   "mail_censor_hits / UPDATE",
+   "mail_inbox_rev / NO KEY UPDATE",
+   "mail_inbox_rev / UPDATE",
+   "mail_messages / UPDATE",
+   "mail_recipients / NO KEY UPDATE",
+   "mail_recipients / UPDATE",
+   "mail_send_receipts / UPDATE",
+   "match_hold_attempts / UPDATE",
+   "match_hold_open_attempts / UPDATE",
+   "match_report_journal / NO KEY UPDATE",
+   "match_report_journal / UPDATE",
+   "match_report_windows / NO KEY UPDATE",
+   "match_seat_holds / NO KEY UPDATE",
+   "match_seat_holds / UPDATE",
+   "match_seat_presence / NO KEY UPDATE",
+   "match_seat_presence / UPDATE",
+   "moderation_cases / NO KEY UPDATE",
+   "music_ratings / UPDATE",
+   "ovt_lobbies / NO KEY UPDATE",
+   "ovt_queue / NO KEY UPDATE",
+   "ovt_queue / UPDATE",
+   "ovt_series / NO KEY UPDATE",
+   "pc_delivery_leases / UPDATE",
+   "pc_motions / UPDATE",
+   "pc_portrait_nonces / UPDATE",
+   "pc_portraits / NO KEY UPDATE",
+   "pending_dms / UPDATE",
+   "player_blocks / UPDATE",
+   "players / UPDATE OWN ROW",
+   "queue_blocks / UPDATE",
+   "queue_leases / UPDATE",
+   "ranked_queue / UPDATE",
+   "steam_sessions / UPDATE",
+   "team_bets / NO KEY UPDATE",
+   "team_lobbies / NO KEY UPDATE",
+   "team_queue / NO KEY UPDATE",
+   "team_queue / UPDATE",
+   "team_series / NO KEY UPDATE"
+  ],
+  "B": [
+   "mail_inbox_rev / NO KEY UPDATE",
+   "mail_inbox_rev / UPDATE",
+   "mail_messages / UPDATE",
+   "mail_recipients / NO KEY UPDATE",
+   "mail_recipients / UPDATE",
+   "moderation_cases / NO KEY UPDATE",
+   "pending_dms / UPDATE"
+  ]
+ },
+ "unread": [
+  "_ban_void_apply | text(_cancel)",
+  "_discord_fix_probe | text(_DISCORD_FIX_PROBE)",
+  "_report_rows | text(sql)"
+ ]
+}

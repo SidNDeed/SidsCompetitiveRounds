@@ -16,7 +16,7 @@ sweep of every production statement that sets a setting, and, on the
 cluster CF_TEST_PG_DSN names (never skipped), the pg_settings answer itself,
 the GREEN control (a transaction-local set_config inside an ended
 transaction leaves nothing) and its session-scope counterpart. The driver
-controls (the report's case at main.py:17948 and one control per route) are
+controls (the report's case at main.py:17985 and one control per route) are
 in test_r8_ro_covered_pg.py.
 """
 
@@ -188,9 +188,28 @@ def test_r11_res_sweep_production_settings_statements():
     # and Credit's transaction, before the admin check's read and the held
     # row's lock; neither route commits before the statements it bounds. The
     # count moves from 23 to 24 for this one and no other reason.
+    # From 23, +1 (claude/mdpl-1116): the account deletion's arming
+    # statement, main._DELETION_ARM_SQL, run before every statement of a
+    # deletion attempt: two set_config calls with is_local the literal true
+    # and the literal names lock_timeout and statement_timeout, both already
+    # measured.
+    # Both lanes on one tree (claude/mdpl-stack-1120): 23 + 1 + 1 = 25.
+    # Judged, +2 (MDPL-GATE-REREAD-1, round mdplg-r1 F1; renamed in round
+    # mdplg-r2): the bounded shared deletion key wait,
+    # main._player_deletion_key_shared_bounded: SET LOCAL lock_timeout
+    # to the bound in milliseconds directly before its one key statement, and
+    # SET LOCAL lock_timeout = DEFAULT directly after it, the two forms
+    # main._identity_lock_many holds for its barrier. The value is an int()
+    # of the module constant PLAYER_DELETION_KEY_TIMEOUT_MS, at least 1,
+    # interpolated, never a request input; lock_timeout is a literal name,
+    # already measured. The count moves from 25 to 27 for these two and no
+    # other reason.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 24, got
+    assert len(got) == 27, got
+    assert [sql for _w, sql in got if "'statement_timeout', :st," in sql] == [
+        "SELECT set_config('lock_timeout', :lt, true), "
+        "set_config('statement_timeout', :st, true)"], got
     assert [sql for _w, sql in got if "synchronous_commit" in sql] == [
         "SELECT set_config('lock_timeout', '2s', true), "
         "set_config('statement_timeout', '10s', true), "

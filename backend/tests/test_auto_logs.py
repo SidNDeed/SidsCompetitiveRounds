@@ -98,6 +98,9 @@ R1 = UUID("11111111-1111-4111-8111-111111111111")
 R2 = UUID("22222222-2222-4222-8222-222222222222")
 COUNT_KEY = "SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM bug_reports"
 PLAYER_KEY = "SELECT id FROM players WHERE steam_id = :sid"
+# T2's read of the player's row again by id (MDPL-GATE-REREAD-1,
+# main._PLAYER_REREAD_SQL); the user-comment route makes the same read.
+REREAD_KEY = "SELECT deleted_at FROM players WHERE id"
 INSERT_KEY = "INSERT INTO bug_reports"
 SESSION_KEY = "FROM steam_sessions"
 LOCK_KEY = "pg_advisory_xact_lock"
@@ -210,6 +213,11 @@ class Scripted:
         # otherwise -- the same reasoning: the cases that own the lock's
         # refusal pass PRUNE_LOCK_KEY themselves.
         self.script.setdefault(PRUNE_LOCK_KEY, [[{"got": True}]])
+        # The player's row read again by id after the identity lock
+        # (MDPL-GATE-REREAD-1) answers LIVE unless a case scripts it: a row
+        # with deleted_at NULL. The deleted and missing answers are the
+        # subject of test_mdpl_gate_reread_pg.py, on PostgreSQL.
+        self.script.setdefault(REREAD_KEY, [[{"deleted_at": None}]])
         self.fail_on = fail_on
         self.log = []
         # EVERY STATEMENT AND EVERY END OF A TRANSACTION, IN ORDER. `log` is
@@ -9836,11 +9844,12 @@ def test_every_automatic_cleanup_waits_on_a_worker_thread():
                         and isinstance(node.func, ast.Name)
                         and node.func.id == "_discard_for_refusal"):
                     refusals[fn.name] = refusals.get(fn.name, 0) + 1
-    assert refusals == {"upload_auto_log": 6}, (
-        "the handler's refusal arms that clean up moved: %r -- the six are "
+    assert refusals == {"upload_auto_log": 7}, (
+        "the handler's refusal arms that clean up moved: %r -- the seven are "
         "the deadline, the cancellation, the ban read under the identity "
-        "lock in the writing transaction (bans part 2a, F4), the re-check, "
-        "the cap at the re-check and the failed INSERT" % (refusals,))
+        "lock in the writing transaction (bans part 2a, F4), the player's "
+        "row read again by id under that lock (MDPL-GATE-REREAD-1), the "
+        "re-check, the cap at the re-check and the failed INSERT" % (refusals,))
 
     site = "        gone = await _release_marked_blob_off_loop(own)\n"
     assert src.count(site) == 1, src.count(site)

@@ -1885,19 +1885,74 @@ def test_the_helper_closure_stays_affordable():
     # route reads in both arms; no other code binding of that closure is new.
     # The bound moves to 600, the measured value, for that reason and no
     # other.
+    # account deletion lock lane (2026-11-20), claude/mdpl-1116 at its merge of
+    # the bot text lane f5de122a (33aa143d): 601 measured at GET
+    # /api/v1/health, of 5776 indexed bindings (598 at f5de122a, of 5737, the
+    # same walk over that tree): +3 by name, none leaves.
+    # main._ACCOUNT_DELETION_LOCK_BUILD, the lane's build marker, which the
+    # health route reads in both arms; and main's _DeletionRowHeld and
+    # _DeletionPastDeadline, the two signal classes of an account deletion's
+    # bound: _pc_trade_schema, which the connected arm of /health runs through
+    # _pc_trading_word, names them in the except clause that hands them back to
+    # that bound, and they arise only inside a deletion attempt. The bound
+    # moves to 601, the measured value, for that reason and no other. The
+    # median (86 against 87) and p90 (216 against 225) bounds stay, and so do
+    # the three bounds of the whole closure (240 against 245, 402 against 425,
+    # and 865 against 897 at the health route, +3 by the same three names).
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of the stack: the two bounds above were set on two trees
+    # (600 on the stack, 601 on the lane); the merge keeps the lane's 601,
+    # the larger, until the closing item measures the merged tree and
+    # records the value here.
+    # Its closing item (2026-11-20): 603 measured at GET /api/v1/health on
+    # the merged tree (600 on the stack's tip 77969323 and 601 on the lane's
+    # tip 4dfe6527, the same walk over each tree): +3 by name against the
+    # stack, main._ACCOUNT_DELETION_LOCK_BUILD, _DeletionRowHeld and
+    # _DeletionPastDeadline (the lane's three, read above), and +2 against
+    # the lane, main._QAPPLY_BUILD and main._BAN_SWEEP_BUILD (the stack's
+    # build markers the lane did not hold); no other code binding of that
+    # closure is new. The bound moves to 603, the measured value, for that
+    # reason and no other. The median (87 against 87) and p90 (230 against
+    # 239) bounds stay, and so do the three bounds of the whole closure (244
+    # against 245, 425 against 425, 867 against 897 at the health route).
     # LFP-CASUAL-1 (2026-11-22), its build marker on top of a755b6a4: 601
     # measured at GET /api/v1/health (600 at a755b6a4, the same walk over that
     # tree): +1 by name, main._LFP_CASUAL_BUILD, which the health route reads
     # in both arms; the two trees' reached sets are otherwise equal by name.
     # The bound moves to 601, the measured value, for that reason and no
     # other.
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of main e36c1dcb (the freeze, e6ffe45b): 604 measured at
+    # GET /api/v1/health on the merged tree, of 5896 indexed bindings (603 on
+    # the lane's tip 3f189be5 and 601 on main e36c1dcb, the same walk over
+    # each tree; 600 on the stack's tip 77969323 and on the merge base
+    # a213c771): +1 by name against the lane, main._LFP_CASUAL_BUILD (main's
+    # build marker, read above), and +3 against main,
+    # main._ACCOUNT_DELETION_LOCK_BUILD, _DeletionRowHeld and
+    # _DeletionPastDeadline (the lane's three, read above); no other code
+    # binding of that closure is new. The bound moves to 604, the measured
+    # value, for that reason and no other. The median (87 against 87) and p90
+    # (230 against 239) bounds stay, and so do the three bounds of the whole
+    # closure (244 against 245, 425 against 425, 868 against 897 at the
+    # health route).
     # The review counting program (review_calibrate.py) on main e36c1dcb
     # (2026-11-23): 602 measured at GET /api/v1/health (601 on main, the same
     # walk over that tree): +1 by name, main._REVIEW_CALIBRATE_BUILD, the
     # lane's build marker, which the health route reads in both arms; no code
     # binding of the program is in any closure. The bound moves to 602, the
     # measured value, for that reason and no other.
-    assert code_worst <= 602, f"worst code closure {code_worst} of {total}"
+    # The account deletion lock lane on the stack (claude/mdpl-stack-1120),
+    # at its merge of the counting tool's tip 07268bd8 (2026-11-23): 605
+    # measured at GET /api/v1/health on the merged tree, of 6031 indexed
+    # bindings (604 on the lane's tip f3224b27, the same walk over each
+    # tree): 604 + 1 by name, main._REVIEW_CALIBRATE_BUILD (the counting
+    # tool's build marker, read above), which the health route reads in both
+    # arms; no other code binding of that closure is new. The bound moves to
+    # 605, the measured value, for that reason and no other. The median (87
+    # against 87) and p90 (230 against 239) bounds stay, and so do the three
+    # bounds of the whole closure (250 against 261, 433 against 453, 882
+    # against 897 at the health route).
+    assert code_worst <= 605, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
