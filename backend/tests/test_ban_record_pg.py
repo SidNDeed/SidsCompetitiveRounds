@@ -1,0 +1,1131 @@
+"""BAN-RECORD-1 on PostgreSQL: what a ban remembers (the account's name and
+the moderators' details), what the admin list answers about it, the details
+route, and the account deletion's clearing (ORDER-BAN-RECORD-1.md R2 to R5,
+its bar V2 to V6; CONTRACT-BAN-1124.md points 1 and 2 with its ADD1).
+
+Through main.app (its middlewares included, the database dependency bound to
+the case schema of inv_pg), with real admin signatures (ADMIN_HMAC_SECRET set
+for the case), unless a test names a handler and a session of its own.
+
+R2  A new ban keeps the live players row's name after the display-name rule;
+    a repeat and a length change write none of the three columns; an id with
+    no live row keeps none; the name is read after the identity lock (a
+    deletion-shaped anonymising that held the lock leaves no name to keep).
+V2  The 1.41.0 client's parse of the list (its split on "id":" and its six
+    reads), over a reason, details and a kept name holding quotes, the text
+    "id":" and line breaks, gives the values of the same answer without the
+    ten new keys, row for row, and one entry per ban.
+V3  The list: a live name; the kept name after the deletion-shaped
+    anonymising (account "deleted", or "none" without MATCH_HMAC_SECRET); no
+    name (account "none"); a live name changed after the ban (the live one
+    wins); search by the kept name, a details word, %, _ and a backslash;
+    the total with and without a search; paging; the unpaged default's set
+    and order; 0 bans; banned_by_name and details_by_name.
+V4  The details route: save, change, clear, a name alone, both absent, too
+    long, an unknown target, an ended ban, a lifted ban, a wrong signature,
+    no change; the text rules; the ban of an account deleted before any name
+    was kept (ADD1); two writers on one ban, and a writer against an unban,
+    interleaved on two connections: one final text, one record per change,
+    no record for a refused call.
+V5  No answer to the banned account holds either text: the readers of the
+    three columns stand in the two admin-signed routes and the writers alone
+    (over the source), and every route of the ban census's lists that a
+    banned account calls, with /mod/check, the deletion's refusal, a gated
+    route's refusal, the sign-in and the bot's feed, answers without them.
+V6  The deletion after an ended ban: the three columns NULL and the
+    ban_details records without their texts, in the deletion's own
+    transaction (a failure after the statement leaves everything set); the
+    moderator log's own scrub, measured alone, leaves the texts with only the
+    whole-token ids replaced.
+
+CF_TEST_PG_DSN names the lane database (cf_pg.require_live_pg).
+"""
+
+import ast
+import asyncio
+import contextlib
+import hashlib
+import hmac
+import json
+import os
+import re
+import sys
+import uuid
+
+import httpx
+import pytest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+API = os.path.normpath(os.path.join(HERE, "..", "api"))
+for _p in (API, HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from inv_pg import FLOOR, STEAM_BASE, case, waiting_on  # noqa: E402
+
+import main  # noqa: E402
+import modlog  # noqa: E402
+import ban_sweep_census as BSC  # noqa: E402
+from test_ban_answers_pg import TOKEN, _account, _armed, _delete, _session  # noqa: E402
+from test_ban_expiry_live import _parse_banned_users_1410  # noqa: E402
+from test_mail_case_scrub_pg import BOUND  # noqa: E402
+from test_mdpl_gate_reread_pg import _tombstone  # noqa: E402
+
+ADMIN_SECRET = "ban-record-admin-secret"
+INTERNAL_KEY = "ban-record-internal-key"
+KEY_SQL = "SELECT pg_advisory_xact_lock(hashtext($1))"   # the identity key, exclusive
+OLD_KEYS = ["id", "steam_id", "display_name", "reason", "banned_by_steam_id", "banned_at",
+            "expires_at", "seconds_left"]
+NEW_KEYS = ["account", "name_kept", "banned_by_name", "details", "details_at", "details_by_name",
+            "region", "region_at", "regions", "links"]
+Z = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
+
+
+# -- the world --------------------------------------------------------------------------------------
+
+@contextlib.asynccontextmanager
+async def _client(env):
+    """A client of main.app whose database sessions are the case's."""
+    async def override():
+        async with env.sm() as db:
+            yield db
+    main.app.dependency_overrides[main.get_db] = override
+    try:
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app, raise_app_exceptions=False),
+                base_url="http://ban-record", headers={"X-Mod-Version": FLOOR}) as c:
+            yield c
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def _open(env, secret=True):
+    """Real admin signatures for the case; the deletion ledger's secret set
+    (or unset); the internal key for the bot's feed."""
+    env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
+    env.mp.setattr(main, "MATCH_HMAC_SECRET", "ban-record-ledger-secret" if secret else "")
+    env.mp.setenv("API_SECRET_KEY", INTERNAL_KEY)
+
+
+def _sig(admin, action, target=""):
+    return hmac.new(ADMIN_SECRET.encode(), main._admin_canonical(admin, action, target).encode(),
+                    hashlib.sha256).hexdigest()
+
+
+async def _admin(env, name="Rec Admin"):
+    p = await env.player(name)
+    await env.conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", p.sid)
+    return p.sid
+
+
+def _no_row_sid(env):
+    env.serial += 1
+    return str(STEAM_BASE + env.serial)
+
+
+async def _ban(c, admin, target, **fields):
+    body = {"admin_steam_id": admin, "target_steam_id": target, "reason": "ban-record",
+            "hmac_signature": _sig(admin, "ban", target)}
+    body.update(fields)
+    r = await c.post("/api/v1/admin/ban", json=body)
+    assert r.status_code == 200, (r.status_code, r.text)
+    return r.json()
+
+
+async def _details(c, admin, target, *, sig=None, **fields):
+    body = {"admin_steam_id": admin, "target_steam_id": target,
+            "hmac_signature": sig if sig is not None else _sig(admin, "ban_details", target)}
+    body.update(fields)
+    return await _post_ascii(c, "/api/v1/admin/ban/details", body)
+
+
+async def _post_ascii(c, path, body):
+    """A POST whose JSON is ASCII (json.dumps escapes every character beyond
+    ASCII): a lone surrogate travels as its \\ud800 escape, which httpx's
+    json= cannot encode."""
+    return await c.post(path, content=json.dumps(body).encode("ascii"),
+                        headers={"Content-Type": "application/json"})
+
+
+async def _list(c, admin, **params):
+    q = {"admin_steam_id": admin, "hmac_signature": _sig(admin, "list_bans", "")}
+    q.update(params)
+    r = await c.get("/api/v1/admin/banned-users", params=q)
+    assert r.status_code == 200, (r.status_code, r.text)
+    return r
+
+
+async def _row(env, sid):
+    """The account's newest ban row, every column."""
+    return dict(await env.conn.fetchrow(
+        "SELECT * FROM player_bans WHERE steam_id = $1 ORDER BY banned_at DESC LIMIT 1", sid))
+
+
+async def _records(env, ban_id=None):
+    """The ban_details records (of one ban, or all), oldest first, details decoded."""
+    rows = await env.conn.fetch(
+        "SELECT admin_steam_id, target_steam_id, affected_steam_ids, reason, CAST(details AS text) AS d"
+        "  FROM admin_actions WHERE action = 'ban_details'"
+        "   AND ($1::text IS NULL OR details->>'ban_id' = $1::text) ORDER BY created_at, id",
+        None if ban_id is None else str(ban_id))
+    return [dict(r, d=json.loads(r["d"])) for r in rows]
+
+
+async def _end(env, ban_id, *, lifted=False):
+    """The ban ended (its end a minute ago) or lifted, its start moved back so
+    the row stays inside the table's checks."""
+    if lifted:
+        await env.conn.execute("UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = banned_by_steam_id"
+                               " WHERE id = $1", ban_id)
+    else:
+        await env.conn.execute("UPDATE player_bans SET banned_at = NOW() - INTERVAL '2 hours',"
+                               "       expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1", ban_id)
+
+
+def _entries(r):
+    return r.json()["bans"]
+
+
+def _by_sid(r):
+    return {e["steam_id"]: e for e in _entries(r)}
+
+
+# -- R2: the name a new ban keeps -------------------------------------------------------------------
+
+def test_r2_a_new_ban_keeps_the_live_name_and_a_repeat_or_a_length_change_writes_none(monkeypatch):
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        live = await env.player(" Kept\tName\nTwo ")
+        self_named = await env.player("x")
+        await env.conn.execute("UPDATE players SET display_name = steam_id WHERE id = $1", self_named.id)
+        raw = _no_row_sid(env)
+        async with _client(env) as c:
+            await _ban(c, admin, live.sid)
+            await _ban(c, admin, self_named.sid)
+            await _ban(c, admin, raw)
+            first = await _row(env, live.sid)
+            await env.conn.execute("UPDATE players SET display_name = 'Renamed Later' WHERE id = $1", live.id)
+            again = await _ban(c, admin, live.sid)
+            longer = await _ban(c, admin, live.sid, duration_minutes=90)
+        after = await _row(env, live.sid)
+        n = await env.conn.fetchval("SELECT count(*) FROM player_bans WHERE steam_id = $1", live.sid)
+        return (first, again, longer, after, n, await _row(env, self_named.sid), await _row(env, raw))
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    first, again, longer, after, n, self_named, raw = out["v"]
+    # one line, the tab out, trimmed
+    assert (first["display_name_at_ban"], first["details"], first["details_at"]) == ("KeptName Two", None, None)
+    assert again["status"] == "already_banned" and longer["status"] == "length_changed", (again, longer)
+    assert n == 1 and after["id"] == first["id"], (n, after["id"], first["id"])
+    assert (after["display_name_at_ban"], after["details"], after["details_at"]) == ("KeptName Two", None, None)
+    assert after["expires_at"] != first["expires_at"], "the length change did not run"
+    # the display-name rule: an account named by its own id keeps no name; no row keeps none
+    assert self_named["display_name_at_ban"] is None and raw["display_name_at_ban"] is None
+
+
+def test_r2_the_name_is_read_after_the_identity_lock(monkeypatch):
+    """The ban core waits on the target's identity lock while a deletion-shaped
+    anonymising holds it; the anonymising commits; the core then finds no
+    live row and keeps no name. Read before the lock, it would keep the
+    name of the account whose deletion committed before the ban did."""
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        p = await env.player("Before The Lock")
+        side = await env.side()
+        side_pid = await side.fetchval("SELECT pg_backend_pid()")
+        await side.execute("BEGIN")
+        await side.execute(KEY_SQL, p.sid)
+
+        async def core():
+            async with env.sm() as db:
+                await main._apply_ban_core(db, admin_steam_id=admin, target_steam_id=p.sid, reason="lock order")
+                await db.commit()
+        task = asyncio.ensure_future(core())
+        waiters = await waiting_on(env, side_pid)
+        await _tombstone(side, p)
+        await side.execute("COMMIT")
+        await asyncio.wait_for(task, BOUND)
+        return waiters, await _row(env, p.sid)
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    waiters, row = out["v"]
+    assert waiters, "the ban core did not wait on the identity lock"
+    assert row["display_name_at_ban"] is None, row["display_name_at_ban"]
+
+
+# -- V3: the list ---------------------------------------------------------------------------------
+
+def test_v3_the_list_answers_names_texts_accounts_and_searches(monkeypatch):
+    async def body(env):
+        _open(env)
+        out = {}
+        admin_a = await _admin(env, "Rec Admin A")
+        admin_b = await _admin(env, "Rec Admin B")
+        live = await env.player("Live One")
+        gone = await env.player("Gone Two")
+        ren = await env.player("Old Three")
+        raw = _no_row_sid(env)
+        async with _client(env) as c:
+            for sid in (live.sid, gone.sid, raw, ren.sid):
+                await _ban(c, admin_a, sid)
+            r = await _details(c, admin_b, live.sid, details="rate 100% sure")
+            assert r.status_code == 200, r.text
+            r = await _details(c, admin_a, raw, details="under_score here")
+            assert r.status_code == 200, r.text
+            r = await _details(c, admin_a, ren.sid, details="back\\slash here")
+            assert r.status_code == 200, r.text
+            await env.conn.execute("UPDATE players SET display_name = 'New Three' WHERE id = $1", ren.id)
+            side = await env.side()
+            await side.execute("BEGIN")
+            await side.execute(KEY_SQL, gone.sid)
+            await _tombstone(side, gone)
+            await side.execute("COMMIT")
+            out["all"] = (await _list(c, admin_a)).json()
+            for q in ("Gone Two", "Old Three", "New Three", "sure", "100%", "%", "_", "\\", raw[-6:], "zz-nothing"):
+                out["q:" + q] = (await _list(c, admin_a, search=q)).json()
+            out["page"] = (await _list(c, admin_a, limit=2, offset=1)).json()
+            out["order"] = [str(r["id"]) for r in await env.conn.fetch(
+                "SELECT id FROM player_bans pb WHERE " + main.player_ban_active_sql("pb")
+                + " ORDER BY pb.banned_at DESC, pb.id DESC")]
+            env.mp.setattr(main, "MATCH_HMAC_SECRET", "")
+            out["no_secret"] = (await _list(c, admin_a)).json()
+        out["sids"] = {"live": live.sid, "gone": gone.sid, "ren": ren.sid, "raw": raw}
+        return out
+    got = {}
+
+    async def run(env):
+        got.update(await body(env))
+    case(monkeypatch, run, prefix="banrec")
+    s = got["sids"]
+    full = got["all"]
+    assert list(full) == ["bans", "total", "limit", "offset"] and full["total"] == 4, full
+    for e in full["bans"]:
+        assert list(e) == OLD_KEYS + NEW_KEYS, list(e)
+        assert (e["region"], e["region_at"], e["regions"], e["links"]) == ("", None, None, None), e
+        assert e["banned_by_name"] == "Rec Admin A", e
+    by = {e["steam_id"]: e for e in full["bans"]}
+    pick = ("display_name", "account", "name_kept", "details", "details_by_name")
+    assert {k: by[s["live"]][k] for k in pick} == {
+        "display_name": "Live One", "account": "live", "name_kept": False,
+        "details": "rate 100% sure", "details_by_name": "Rec Admin B"}, by[s["live"]]
+    assert {k: by[s["gone"]][k] for k in pick} == {
+        "display_name": "Gone Two", "account": "deleted", "name_kept": True,
+        "details": "", "details_by_name": ""}, by[s["gone"]]
+    assert {k: by[s["raw"]][k] for k in pick} == {
+        "display_name": None, "account": "none", "name_kept": False,
+        "details": "under_score here", "details_by_name": "Rec Admin A"}, by[s["raw"]]
+    assert {k: by[s["ren"]][k] for k in pick} == {
+        "display_name": "New Three", "account": "live", "name_kept": False,
+        "details": "back\\slash here", "details_by_name": "Rec Admin A"}, by[s["ren"]]
+    assert Z.match(by[s["live"]]["details_at"]) and by[s["gone"]]["details_at"] is None, by
+    # the unpaged default: every active ban, in the list's order
+    assert [e["id"] for e in full["bans"]] == got["order"], (full["bans"], got["order"])
+
+    def hits(q):
+        a = got["q:" + q]
+        assert a["total"] == len(a["bans"]), a
+        return sorted(e["steam_id"] for e in a["bans"])
+    assert hits("Gone Two") == [s["gone"]]            # the kept name
+    assert hits("Old Three") == [s["ren"]]            # the kept name of a renamed account
+    assert hits("New Three") == [s["ren"]]            # the live name
+    assert hits("sure") == hits("100%") == hits("%") == [s["live"]]
+    assert hits("_") == [s["raw"]]
+    assert hits("\\") == [s["ren"]]
+    assert hits(s["raw"][-6:]) == [s["raw"]]
+    assert hits("zz-nothing") == []
+    page = got["page"]
+    assert (page["total"], page["limit"], page["offset"]) == (4, 2, 1), page
+    assert [e["id"] for e in page["bans"]] == [e["id"] for e in full["bans"]][1:3], page
+    # without the secret there is no hash: no account is "deleted"
+    assert {e["steam_id"]: e["account"] for e in got["no_secret"]["bans"]} == {
+        s["live"]: "live", s["gone"]: "none", s["raw"]: "none", s["ren"]: "live"}
+
+
+def test_v3_no_bans_answers_an_empty_list_with_a_zero_total(monkeypatch):
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        async with _client(env) as c:
+            return (await _list(c, admin)).content, (await _list(c, admin, search="x", limit=5)).json()
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    plain, searched = out["v"]
+    assert plain == b'{"bans":[],"total":0,"limit":null,"offset":0}', plain
+    assert searched == {"bans": [], "total": 0, "limit": 5, "offset": 0}, searched
+
+
+def test_v3_the_list_reads_at_most_two_statements_and_no_statement_carries_the_secret(monkeypatch):
+    """RULING-BAN-RECORD-Q1-Q3 Q2, added to the bar: the statements of a list
+    call after its admin check are counted (every statement the case's engine
+    runs, from the moment _require_admin returns): two at most (the list's
+    one statement, then one read of the deletion ledger for the page's ids
+    with no live row); one when every id of the page is live; one when the
+    ledger's secret is unset. No statement text and no bind value of the
+    whole call carries the ledger's secret (MATCH_HMAC_SECRET) or the admin
+    signatures' secret."""
+    from sqlalchemy import event
+    ledger = "ban-record-ledger-secret"
+    out = {}
+
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        live = await env.player("Q2 Live Account")
+        raw = _no_row_sid(env)
+        engine = env.sm.kw.get("bind")
+        assert engine is not None, env.sm.kw
+        seen, after = [], [False]
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            seen.append((after[0], statement, repr(parameters)))
+        real = main._require_admin
+
+        async def marked(*a, **k):
+            got = await real(*a, **k)
+            after[0] = True
+            return got
+        env.mp.setattr(main, "_require_admin", marked)
+        async with _client(env) as c:
+            await _ban(c, admin, live.sid)
+            await _ban(c, admin, raw)
+            event.listen(engine.sync_engine, "before_cursor_execute", listen)
+            try:
+                for label, secret, params in (("a no-row id on the page", True, {}),
+                                              ("every id of the page live", True, {"search": "Q2 Live"}),
+                                              ("the secret unset", False, {})):
+                    _open(env, secret=secret)
+                    seen.clear()
+                    after[0] = False
+                    r = (await _list(c, admin, **params)).json()
+                    out[label] = {"accounts": sorted(e["account"] for e in r["bans"]),
+                                  "after": [s for a, s, _p in seen if a], "all": list(seen)}
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", listen)
+    case(monkeypatch, body, prefix="banrec")
+    for label, got in out.items():
+        print("[Q2] %s: %d statements after the admin check: %s" % (
+            label, len(got["after"]), [re.sub(r"\s+", " ", s)[:70] for s in got["after"]]))
+    two = out["a no-row id on the page"]
+    assert two["accounts"] == ["live", "none"] and len(two["after"]) == 2, two["after"]
+    assert "player_bans" in two["after"][0] and "deleted_steam_ids" in two["after"][1], two["after"]
+    one = out["every id of the page live"]
+    assert one["accounts"] == ["live"] and len(one["after"]) == 1 and "player_bans" in one["after"][0], one
+    unset = out["the secret unset"]
+    assert unset["accounts"] == ["live", "none"] and len(unset["after"]) == 1, unset["after"]
+    for label, got in out.items():
+        for _a, statement, params in got["all"]:
+            for secret in (ledger, ADMIN_SECRET):
+                assert secret not in statement and secret not in params, (label, statement[:80])
+
+
+# -- V2: the 1.41.0 parse ---------------------------------------------------------------------------
+
+def test_v2_the_old_parse_reads_the_six_values_over_texts_shaped_like_its_keys(monkeypatch):
+    nasty = 'say "hi" then "id":"x0" and\na break, "reason":"no"'
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        ps = [await env.player("Parse %d" % i) for i in range(3)]
+        raw = _no_row_sid(env)
+        async with _client(env) as c:
+            for p in ps:
+                await _ban(c, admin, p.sid, reason=nasty)
+            await _ban(c, admin, raw, reason=nasty)
+            for sid in (ps[0].sid, ps[1].sid, raw):
+                r = await _details(c, admin, sid, details=nasty + '\r\n"steam_id":"1"')
+                assert r.status_code == 200, r.text
+            # a kept name holding the same, written past the name rules on purpose (the wire is under test)
+            await env.conn.execute("UPDATE player_bans SET display_name_at_ban = $1 WHERE steam_id = $2",
+                                   'Kept "id":"k1"\nline "display_name":"z"', raw)
+            return (await _list(c, admin)).text
+    out = {}
+
+    async def run(env):
+        out["wire"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    wire = out["wire"]
+    answer = json.loads(wire)
+    assert len(answer["bans"]) == 4 and '"id":"x0"' not in wire, wire
+    stripped = dict(answer, bans=[{k: v for k, v in e.items() if k in OLD_KEYS[:6]} for e in answer["bans"]])
+    plain = json.dumps(stripped, separators=(",", ":"), ensure_ascii=False)
+    new, old = _parse_banned_users_1410(wire), _parse_banned_users_1410(plain)
+    assert len(new) == len(answer["bans"]) and new == old, (new, old)
+    assert [p["id"] for p in new] == [e["id"] for e in answer["bans"]]
+    assert [p["steam_id"] for p in new] == [e["steam_id"] for e in answer["bans"]]
+    kept = [e for e in answer["bans"] if e["name_kept"]]
+    assert len(kept) == 1 and kept[0]["display_name"].startswith('Kept "id":"k1"'), kept
+
+
+# -- V4: the details route --------------------------------------------------------------------------
+
+def test_v4_save_change_clear_a_name_alone_and_no_change(monkeypatch):
+    async def body(env):
+        _open(env)
+        out = {}
+        admin = await _admin(env, "Details Admin")
+        p = await env.player("Details Live")
+        raw = _no_row_sid(env)
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid)
+            await _ban(c, admin, raw)
+            ban_id = (await _row(env, p.sid))["id"]
+            steps = [("save", dict(details="first text")),
+                     ("change", dict(details="second text")),
+                     ("same", dict(details="  second text \n")),
+                     ("clear", dict(details="")),
+                     ("name", dict(name="Typed Name")),
+                     ("both", dict(details="third", name="")),
+                     ("null", dict(details=None, name="Another"))]
+            for label, fields in steps:
+                r = await _details(c, admin, p.sid, **fields)
+                out[label] = (r.status_code, r.json(), await _row(env, p.sid), len(await _records(env, ban_id)))
+            r = await _details(c, admin, raw, name="Raw Typed")
+            out["raw"] = (r.status_code, r.json())
+            out["records"] = await _records(env, ban_id)
+            out["list"] = _by_sid(await _list(c, admin))
+        out["ids"] = (admin, p.sid, raw, str(ban_id))
+        return out
+    got = {}
+
+    async def run(env):
+        got.update(await body(env))
+    case(monkeypatch, run, prefix="banrec")
+    admin, sid, raw, ban_id = got["ids"]
+    st, ans, row, n = got["save"]
+    assert st == 200 and list(ans) == ["status", "steam_id", "details", "details_at", "display_name"], ans
+    assert (ans["status"], ans["steam_id"], ans["details"], ans["display_name"]) == (
+        "details_saved", sid, "first text", "Details Live"), ans
+    assert Z.match(ans["details_at"]) and row["details"] == "first text" and n == 1, (ans, row)
+    st, ans, row2, n = got["change"]
+    assert (st, ans["details"], row2["details"], n) == (200, "second text", "second text", 2)
+    assert row2["details_at"] >= row["details_at"]
+    st, ans, row3, n = got["same"]                     # trimmed to the same text: nothing written
+    assert (st, ans["details"], n, row3["details_at"]) == (200, "second text", 2, row2["details_at"]), ans
+    st, ans, row4, n = got["clear"]
+    assert (st, ans["details"], ans["details_at"], row4["details"], row4["details_at"], n) == (
+        200, "", None, None, None, 3), ans
+    st, ans, row5, n = got["name"]                     # a live account: the list shows the live name
+    assert (st, ans["display_name"], row5["display_name_at_ban"], row5["details"], n) == (
+        200, "Details Live", "Typed Name", None, 4), ans
+    st, ans, row6, n = got["both"]
+    assert (st, ans["details"], row6["details"], row6["display_name_at_ban"], n) == (
+        200, "third", "third", None, 5), ans
+    st, ans, row7, n = got["null"]                     # null details: the details stay
+    assert (st, row7["details"], row7["display_name_at_ban"], n) == (200, "third", "Another", 6), ans
+    st, ans = got["raw"]
+    assert (st, ans["display_name"], ans["details"]) == (200, "Raw Typed", ""), ans
+    recs = got["records"]
+    assert [r["d"].get("details_change") for r in recs] == ["added", "changed", "cleared", None, "added", None]
+    assert [r["d"].get("name_change") for r in recs] == [None, None, None, "changed", "cleared", "added"]
+    assert recs[0]["d"] == {"ban_id": ban_id, "details_change": "added", "old_details": None,
+                            "new_details": "first text"}, recs[0]
+    assert recs[3]["d"] == {"ban_id": ban_id, "name_change": "changed", "old_name": "Details Live",
+                            "new_name": "Typed Name"}, recs[3]
+    for r in recs:
+        assert (r["admin_steam_id"], r["target_steam_id"], r["affected_steam_ids"], r["reason"]) == (
+            admin, sid, [sid], None), r
+        said = modlog.sentence("ban_details", r["d"])
+        for k in ("old_details", "new_details", "old_name", "new_name"):
+            assert not r["d"].get(k) or r["d"][k] not in said, (said, r["d"])
+    assert [modlog.sentence("ban_details", r["d"]) for r in recs[:5]] == [
+        "Ban details added.", "Ban details changed.", "Ban details cleared.", "Ban kept name changed.",
+        "Ban details added and kept name cleared."]
+    assert modlog.label("ban_details") == "Ban details changed"
+    listed = got["list"]
+    assert (listed[sid]["details"], listed[sid]["display_name"], listed[sid]["name_kept"]) == (
+        "third", "Details Live", False)
+    assert (listed[raw]["display_name"], listed[raw]["name_kept"], listed[raw]["account"]) == (
+        "Raw Typed", True, "none")
+
+
+def test_v4_refused_calls_write_nothing(monkeypatch):
+    async def body(env):
+        _open(env)
+        out = {}
+        admin = await _admin(env)
+        stranger = (await env.player("Not An Admin")).sid
+        p = await env.player("Refused Live")
+        ended = await env.player("Ended")
+        lifted = await env.player("Lifted")
+        nobody = _no_row_sid(env)
+        async with _client(env) as c:
+            for x in (p, ended, lifted):
+                await _ban(c, admin, x.sid)
+            await _end(env, (await _row(env, ended.sid))["id"])
+            await _end(env, (await _row(env, lifted.sid))["id"], lifted=True)
+            r = await _details(c, admin, p.sid, details="x" * 2000)
+            out["at_limit"] = (r.status_code, len(r.json().get("details", "")))
+            before = (await _row(env, p.sid), len(await _records(env)))
+            calls = {
+                "both_absent": (admin, p.sid, {}, None),
+                "both_null": (admin, p.sid, {"details": None, "name": None}, None),
+                "too_long": (admin, p.sid, {"details": "y" * 2001}, None),
+                "too_long_after_rules": (admin, p.sid, {"details": "\x01" + "z" * 2001}, None),
+                "name_too_long": (admin, p.sid, {"name": "n" * 65}, None),
+                "unknown": (admin, nobody, {"details": "t"}, None),
+                "ended": (admin, ended.sid, {"details": "t"}, None),
+                "lifted": (admin, lifted.sid, {"details": "t"}, None),
+                "wrong_sig": (admin, p.sid, {"details": "t"}, "0" * 64),
+                "other_action_sig": (admin, p.sid, {"details": "t"}, _sig(admin, "ban", p.sid)),
+                "not_admin": (stranger, p.sid, {"details": "t"}, None),
+                "not_a_string": (admin, p.sid, {"details": 5}, None),
+            }
+            for label, (who, target, fields, sig) in calls.items():
+                r = await _details(c, who, target, sig=sig, **fields)
+                out[label] = (r.status_code, r.json().get("detail"))
+            out["after"] = (await _row(env, p.sid), len(await _records(env)))
+        out["before"] = before
+        return out
+    got = {}
+
+    async def run(env):
+        got.update(await body(env))
+    case(monkeypatch, run, prefix="banrec")
+    assert got["at_limit"] == (200, 2000), got["at_limit"]
+    want = {"both_absent": (422, "details_or_name_required"), "both_null": (422, "details_or_name_required"),
+            "too_long": (422, "details_too_long"), "too_long_after_rules": (422, "details_too_long"),
+            "name_too_long": (422, "name_too_long"), "unknown": (404, "no_active_ban"),
+            "ended": (404, "no_active_ban"), "lifted": (404, "no_active_ban"),
+            "wrong_sig": (403, "Bad admin signature"), "other_action_sig": (403, "Bad admin signature"),
+            "not_admin": (403, "Not an admin")}
+    for label, w in want.items():
+        assert got[label] == w, (label, got[label])
+    assert got["not_a_string"][0] == 422, got["not_a_string"]
+    before_row, before_n = got["before"]
+    after_row, after_n = got["after"]
+    assert after_row == before_row and after_n == before_n, (before_row, after_row, before_n, after_n)
+
+
+def test_v4_the_text_rules(monkeypatch):
+    async def body(env):
+        _open(env)
+        out = {}
+        admin = await _admin(env)
+        p = await env.player("Rules Live")
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid)
+            cases = [("crlf", {"details": "  one\r\ntwo\rthree\u2028four\u2029five\x85six  "}),
+                     ("controls", {"details": "a\tb\x00c\x1bd\x7fe\x9ff\u200bg"}),
+                     ("blank", {"details": " \r\n\t "}),
+                     ("surrogate", {"details": "s\ud800t"}),
+                     ("name_lines", {"name": " Line\r\nOne\tTwo\u2028Three "}),
+                     ("name_own_id", {"name": p.sid}),
+                     ("name_account_id", {"name": "76561197960265729"}),
+                     ("name_64", {"name": "m" * 64}),
+                     ("name_surrogate", {"name": "Ab\udc00c"})]
+            for label, fields in cases:
+                r = await _details(c, admin, p.sid, **fields)
+                row = await _row(env, p.sid)
+                out[label] = (r.status_code, row["details"], row["display_name_at_ban"])
+        return out
+    got = {}
+
+    async def run(env):
+        got.update(await body(env))
+    case(monkeypatch, run, prefix="banrec")
+    # the kept name is the live row's from the ban (R2) until a name is sent
+    assert got["crlf"] == (200, "one\ntwo\nthree\nfour\nfive\nsix", "Rules Live"), got["crlf"]
+    assert got["controls"] == (200, "abcdef\u200bg", "Rules Live"), got["controls"]
+    assert got["blank"] == (200, None, "Rules Live"), got["blank"]
+    # a lone surrogate has no UTF-8 form: taken out (by the request model, before its
+    # bound, and by the rules), never stored and never a 500 (recnew2 answered 500:
+    # the model's bound refused it and the 422 body could not carry it)
+    assert got["surrogate"] == (200, "st", "Rules Live"), got["surrogate"]
+    assert (got["name_lines"][0], got["name_lines"][2]) == (200, "Line OneTwo Three"), got["name_lines"]
+    assert (got["name_own_id"][0], got["name_own_id"][2]) == (200, None), got["name_own_id"]
+    assert (got["name_account_id"][0], got["name_account_id"][2]) == (200, None), got["name_account_id"]
+    assert (got["name_64"][0], got["name_64"][2]) == (200, "m" * 64), got["name_64"]
+    assert (got["name_surrogate"][0], got["name_surrogate"][2]) == (200, "Abc"), got["name_surrogate"]
+
+
+def test_v4_a_lone_surrogate_is_refused_past_the_bound_and_taken_out_inside_it(monkeypatch):
+    """RULING-BAN-RECORD-Q5 point 2, the details route's two texts, both arms.
+    Refused by the bound: a text past the request model's bound (eight times
+    the limit) or past the rules' bound (the limit) that holds a lone
+    surrogate is a 422 that answers (never a 500) and writes nothing.
+    Accepted and stored without it: a text inside the bounds is stored with
+    the character taken out (it never reaches the driver, which refuses one),
+    and the log row counts the STORED text as changed: the same text sent
+    again, character included, is no change and writes no second record."""
+    lone, low = "\ud800", "\udc00"
+
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        p = await env.player("Arms Live")
+        out = {}
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid)
+            ban_id = (await _row(env, p.sid))["id"]
+            arms = [("details past the model's bound", {"details": lone + "x" * (8 * main.BAN_DETAILS_MAX + 1)}),
+                    ("details past the rules' bound", {"details": lone + "x" * (main.BAN_DETAILS_MAX + 1)}),
+                    ("name past the model's bound", {"name": low + "n" * (8 * main.BAN_NAME_MAX + 1)}),
+                    ("name past the rules' bound", {"name": low + "n" * (main.BAN_NAME_MAX + 1)}),
+                    ("details accepted", {"details": "s" + lone + "t"}),
+                    ("details sent again", {"details": "s" + lone + "t"}),
+                    ("name accepted", {"name": "Ab" + low + "c"}),
+                    ("name sent again", {"name": "Ab" + low + "c"})]
+            for label, fields in arms:
+                r = await _details(c, admin, p.sid, **fields)
+                row = await _row(env, p.sid)
+                out[label] = (r.status_code, r.json(), row["details"], row["display_name_at_ban"],
+                              len(await _records(env, ban_id)))
+            out["records"] = await _records(env, ban_id)
+        return out
+    got = {}
+
+    async def run(env):
+        got.update(await body(env))
+    case(monkeypatch, run, prefix="banrec")
+    for label, v in got.items():
+        if label != "records":
+            print("[ARMS] %-32s %s %s" % (label, v[0], ascii(v[1])[:100]))
+    for label in ("details past the model's bound", "name past the model's bound"):
+        st, ans, details, name, recs = got[label]
+        assert st == 422 and ans["detail"][0]["type"] == "string_too_long", (label, st, ascii(ans)[:200])
+        assert (details, name, recs) == (None, "Arms Live", 0), (label, details, name, recs)
+    assert got["details past the rules' bound"] == (422, {"detail": "details_too_long"}, None, "Arms Live", 0), \
+        got["details past the rules' bound"]
+    assert got["name past the rules' bound"] == (422, {"detail": "name_too_long"}, None, "Arms Live", 0), \
+        got["name past the rules' bound"]
+    assert got["details accepted"][0] == 200 and got["details accepted"][1]["details"] == "st", got["details accepted"]
+    assert got["details accepted"][2:] == ("st", "Arms Live", 1), got["details accepted"]
+    assert got["details sent again"][0] == 200 and got["details sent again"][2:] == ("st", "Arms Live", 1), \
+        got["details sent again"]
+    assert got["name accepted"][0] == 200 and got["name accepted"][1]["display_name"] == "Arms Live", \
+        got["name accepted"]   # the live row's name is what the list shows; the kept name is the row's
+    assert got["name accepted"][2:] == ("st", "Abc", 2), got["name accepted"]
+    assert got["name sent again"][0] == 200 and got["name sent again"][2:] == ("st", "Abc", 2), got["name sent again"]
+    first, second = got["records"]
+    assert (first["d"]["details_change"], first["d"]["new_details"]) == ("added", "st"), first["d"]
+    assert (second["d"]["name_change"], second["d"]["new_name"]) == ("changed", "Abc"), second["d"]
+
+
+async def _last_record(env, sid):
+    """The newest moderator-log record about sid: (action, reason), or None."""
+    row = await env.conn.fetchrow("SELECT action, reason FROM admin_actions WHERE target_steam_id = $1"
+                                  " ORDER BY created_at DESC, id DESC LIMIT 1", sid)
+    return None if row is None else (row["action"], row["reason"])
+
+
+def test_v4_the_ban_routes_texts_with_a_lone_surrogate(monkeypatch):
+    """RULING-BAN-RECORD-Q5 point 2, the sweep: every text a ban route of this
+    programme takes in a request and stores or searches by, with a lone
+    surrogate inside its bound (sent as ASCII JSON, its escape), and what the
+    route answers; the details route's two are the test above. The ban's
+    reason is stored in the ban row: the route takes the character out before
+    the writer (it answered 500 without that: the database driver refuses the
+    text), and has no bound that refuses (the writer keeps 256 characters).
+    The length change's reason and the unban's are kept in their records
+    only, where the moderator log's own rule (_modlog_text) writes U+FFFD in
+    the character's place: both answered 200 before the change. The list's
+    search text travels in the query string, which cannot carry a lone
+    surrogate: its bytes (ED A0 80) arrive as three U+FFFD characters."""
+    lone = "\ud800"
+
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        a = await env.player("Sweep Ban")
+        b = await env.player("Sweep Length")
+        out = {}
+        async with _client(env) as c:
+            r = await _post_ascii(c, "/api/v1/admin/ban", {
+                "admin_steam_id": admin, "target_steam_id": a.sid, "reason": "r" + lone + "s",
+                "hmac_signature": _sig(admin, "ban", a.sid)})
+            row = await env.conn.fetchrow("SELECT reason FROM player_bans WHERE steam_id = $1", a.sid)
+            out["ban reason"] = (r.status_code, row and row["reason"], await _last_record(env, a.sid))
+            await _ban(c, admin, b.sid)
+            r = await _post_ascii(c, "/api/v1/admin/ban", {
+                "admin_steam_id": admin, "target_steam_id": b.sid, "reason": "l" + lone + "c",
+                "duration_minutes": 60, "hmac_signature": _sig(admin, "ban", b.sid)})
+            out["length change reason"] = (r.status_code, None, await _last_record(env, b.sid))
+            r = await _post_ascii(c, "/api/v1/admin/unban", {
+                "admin_steam_id": admin, "target_steam_id": b.sid, "reason": "u" + lone + "n",
+                "hmac_signature": _sig(admin, "unban", b.sid)})
+            out["unban reason"] = (r.status_code, None, await _last_record(env, b.sid))
+            r = await c.get("/api/v1/admin/banned-users?admin_steam_id=%s&hmac_signature=%s&search=%%ED%%A0%%80"
+                            % (admin, _sig(admin, "list_bans", "")))
+            out["list search"] = (r.status_code, r.json().get("total") if r.status_code == 200 else r.text[:80],
+                                  None)
+        return out
+    got = {}
+
+    async def run(env):
+        got.update(await body(env))
+    case(monkeypatch, run, prefix="banrec")
+    for label, v in got.items():
+        print("[SWEEP] %-22s %s" % (label, ascii(v)))
+    assert got["ban reason"] == (200, "rs", ("ban", "rs")), got["ban reason"]
+    assert got["length change reason"][0] == 200 and got["length change reason"][2][1] == "l�c", \
+        got["length change reason"]
+    assert got["unban reason"] == (200, None, ("unban", "u�n")), got["unban reason"]
+    assert got["list search"] == (200, 0, None), got["list search"]
+
+
+def test_v4_the_ban_of_an_account_deleted_before_any_name_was_kept_takes_a_name(monkeypatch):
+    """ADD1: an active ban stands under the raw id of an account whose
+    deletion committed (the deletion-shaped anonymising, ledger included).
+    The route accepts it, keeps the name, and writes the raw id nowhere."""
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        p = await env.player("Deleted Under Ban")
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid)
+            ban_id = (await _row(env, p.sid))["id"]
+            await env.conn.execute("UPDATE player_bans SET display_name_at_ban = NULL WHERE id = $1", ban_id)
+            side = await env.side()
+            await side.execute("BEGIN")
+            await side.execute(KEY_SQL, p.sid)
+            await _tombstone(side, p)
+            await side.execute("COMMIT")
+            r = await _details(c, admin, p.sid, name="Known Name", details="seen on stream")
+            listed = _by_sid(await _list(c, admin))[p.sid]
+        recs = await _records(env, ban_id)
+        raw_named = await env.conn.fetchval(
+            "SELECT count(*) FROM admin_actions WHERE action = 'ban_details'"
+            "   AND (target_steam_id = $1 OR $1 = ANY(affected_steam_ids) OR CAST(details AS text) LIKE '%' || $1 || '%')",
+            p.sid)
+        return r.status_code, r.json(), listed, recs, raw_named
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    st, ans, listed, recs, raw_named = out["v"]
+    assert st == 200 and (ans["display_name"], ans["details"]) == ("Known Name", "seen on stream"), ans
+    assert (listed["account"], listed["display_name"], listed["name_kept"]) == ("deleted", "Known Name", True)
+    assert len(recs) == 1 and (recs[0]["target_steam_id"], recs[0]["affected_steam_ids"]) == (None, []), recs
+    assert raw_named == 0, raw_named
+
+
+async def _blocked_by(env, pid, tries=200):
+    """Whether some backend of the case waits on `pid`'s locks (polled)."""
+    return bool(await waiting_on(env, pid, tries=tries))
+
+
+def test_v4_two_writers_on_one_ban_interleaved(monkeypatch):
+    """Both writers wait on the target's identity lock held by a third
+    connection; released, they run one after the other: one final text, one
+    record per change, each record's old text the text the other left."""
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        p = await env.player("Two Writers")
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid)
+            ban_id = (await _row(env, p.sid))["id"]
+            side = await env.side()
+            side_pid = await side.fetchval("SELECT pg_backend_pid()")
+            await side.execute("BEGIN")
+            await side.execute(KEY_SQL, p.sid)
+            first = asyncio.ensure_future(_details(c, admin, p.sid, details="from writer one"))
+            assert await _blocked_by(env, side_pid)
+            second = asyncio.ensure_future(_details(c, admin, p.sid, details="from writer two"))
+            await asyncio.sleep(0.3)
+            assert not first.done() and not second.done()
+            await side.execute("COMMIT")
+            r1, r2 = await asyncio.wait_for(asyncio.gather(first, second), BOUND)
+        return (r1.status_code, r1.json()), (r2.status_code, r2.json()), await _row(env, p.sid), \
+            await _records(env, ban_id)
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    a, b, row, recs = out["v"]
+    assert a[0] == b[0] == 200, (a, b)
+    assert row["details"] in ("from writer one", "from writer two"), row
+    assert len(recs) == 2, recs
+    chain = [(r["d"]["old_details"], r["d"]["new_details"]) for r in recs]
+    assert chain[0][0] is None and chain[1][0] == chain[0][1] and chain[1][1] == row["details"], chain
+
+
+@pytest.mark.parametrize("first", ["unban", "writer"])
+def test_v4_a_writer_against_an_unban_interleaved(monkeypatch, first):
+    """The unban and the writer queue on the same identity lock in a known
+    order. Unban first: the writer finds no active ban, 404, no record.
+    Writer first: its text and its one record stand, then the ban is lifted."""
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        p = await env.player("Writer Unban")
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid)
+            ban_id = (await _row(env, p.sid))["id"]
+            side = await env.side()
+            side_pid = await side.fetchval("SELECT pg_backend_pid()")
+            await side.execute("BEGIN")
+            await side.execute(KEY_SQL, p.sid)
+
+            def unban():
+                return c.post("/api/v1/admin/unban", json={
+                    "admin_steam_id": admin, "target_steam_id": p.sid, "reason": "lifted",
+                    "hmac_signature": _sig(admin, "unban", p.sid)})
+
+            def writer():
+                return _details(c, admin, p.sid, details="written in the race")
+            calls = {"unban": unban, "writer": writer}
+            order = [first, "writer" if first == "unban" else "unban"]
+            t1 = asyncio.ensure_future(calls[order[0]]())
+            assert await _blocked_by(env, side_pid)
+            t2 = asyncio.ensure_future(calls[order[1]]())
+            await asyncio.sleep(0.3)
+            await side.execute("COMMIT")
+            r1, r2 = await asyncio.wait_for(asyncio.gather(t1, t2), BOUND)
+            got = dict(zip(order, (r1, r2)))
+        return ((got["unban"].status_code, got["unban"].json()), (got["writer"].status_code, got["writer"].json()),
+                await _row(env, p.sid), await _records(env, ban_id))
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    unban, writer, row, recs = out["v"]
+    assert unban[0] == 200 and unban[1]["rows"] == 1 and row["unbanned_at"] is not None, (unban, row)
+    if first == "unban":
+        assert writer == (404, {"detail": "no_active_ban"}) and row["details"] is None and recs == [], (writer, recs)
+    else:
+        assert writer[0] == 200 and row["details"] == "written in the race" and len(recs) == 1, (writer, recs)
+
+
+# -- V5: nothing reaches the banned account ---------------------------------------------------------
+
+# player_bans.details is TEXT and is set as text (the details route); the moderator log's own column of
+# that name (admin_actions.details, jsonb, which _modlog_scrub_records sets as jsonb) is another column.
+_COLUMN_TEXT = re.compile(r"display_name_at_ban|details_at|\bpb\.details\b|\bdetails\s*=\s*CAST\(:d AS (?i:text)\)")
+_READERS = {("main", "_apply_ban_core"), ("main", "_BAN_LIST_SQL"), ("main", "admin_list_bans"),
+            ("main", "admin_ban_details"), ("main", "_ban_record_forget")}
+
+
+def _column_holders():
+    """(module, top-level name) of every string constant in backend/api and the
+    bot that names one of the three columns in SQL (docstrings left out)."""
+    found = set()
+    files = [(n[:-3], os.path.join(API, n)) for n in sorted(os.listdir(API)) if n.endswith(".py")]
+    files.append(("discord_bot", os.path.normpath(os.path.join(HERE, "..", "discord_bot.py"))))
+    for mod, path in files:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        docs = {id(n.body[0].value) for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body
+                and isinstance(n.body[0], ast.Expr)}
+        for top in tree.body:
+            name = getattr(top, "name", None) or (
+                top.targets[0].id if isinstance(top, ast.Assign) and isinstance(top.targets[0], ast.Name) else None)
+            for n in ast.walk(top):
+                if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs \
+                        and _COLUMN_TEXT.search(n.value):
+                    found.add((mod, name))
+    return found
+
+
+def test_v5_the_columns_are_read_only_by_the_two_admin_routes_and_written_by_the_writers():
+    """Over the source: the SQL that names the three columns stands in the
+    ban writer, the list's statement and its search, the details route (its
+    row read and its write) and the deletion's helper alone; the list's
+    statement is used by the list route alone; the list and the details route
+    are admin-signed, each checking the admin signature (which refuses a
+    banned admin) before any read."""
+    assert _column_holders() == _READERS, _column_holders() ^ _READERS
+    with open(os.path.join(API, "main.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fns = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    users = {}
+    for name, fn in fns.items():
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name) and n.id == "_BAN_LIST_SQL":
+                users.setdefault(n.id, set()).add(name)
+    assert users == {"_BAN_LIST_SQL": {"admin_list_bans"}}, users
+    for name in ("admin_list_bans", "admin_ban_details"):
+        awaited = [ast.unparse(st.value.value.func) for st in fns[name].body
+                   if isinstance(st, ast.Expr) and isinstance(st.value, ast.Await)
+                   and isinstance(st.value.value, ast.Call)]
+        assert awaited and awaited[0] == "_require_admin", (name, awaited)
+    # the ORM class is named by its definition and main.py's import alone: no ORM read loads the columns
+    named = []
+    for n in sorted(os.listdir(API)):
+        if n.endswith(".py") and n != "models.py":
+            with open(os.path.join(API, n), encoding="utf-8") as fh:
+                t = ast.parse(fh.read())
+            named += [(n, x.lineno) for x in ast.walk(t) if isinstance(x, ast.Name) and x.id == "PlayerBan"]
+    assert named == [], named
+
+
+def _routes_answering_a_banned_account():
+    """The ban census's lists of the routes a banned account calls (its
+    exits and the routes open to it), with the answers R4 names: the ban
+    check, the sign-in, the deletion's refusal and a gated route's refusal,
+    and the bot's feed (what Discord is told)."""
+    routes = set(BSC.OPEN_ROUTES) | set(BSC.BAN_R17_EXITS) | set(BSC.STRICT_EXITS)
+    routes |= {("GET", "/api/v1/mod/check/{steam_id}"), ("POST", "/api/v1/auth/steam"),
+               ("DELETE", "/api/v1/players/{steam_id}/data"), ("POST", "/api/v1/queue/join"),
+               ("GET", "/api/v1/internal/recent-bans")}
+    return sorted(routes)
+
+
+def test_v5_no_answer_to_the_banned_account_holds_either_text(monkeypatch):
+    marks = ("Zq7DetailsMark", "Zq7NameMark")
+
+    async def body(env):
+        _open(env)
+        _armed(env)
+        env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
+        env.mp.setenv("API_SECRET_KEY", INTERNAL_KEY)
+        admin = await _admin(env)
+        p = await _account(env)
+        await env.conn.execute("UPDATE players SET display_name = $1 WHERE id = $2", marks[1], p.id)
+        await _session(env, p.sid)
+        answers = []
+        known = {(m, r.path) for r in main.app.routes if hasattr(r, "methods") for m in r.methods}
+        async with _client(env) as c:
+            await _ban(c, admin, p.sid, reason="plain reason")
+            r = await _details(c, admin, p.sid, details="the details " + marks[0])
+            assert r.status_code == 200, r.text
+            row = await _row(env, p.sid)
+            assert (marks[0] in row["details"], row["display_name_at_ban"]) == (True, marks[1]), row
+            await env.conn.execute("UPDATE players SET display_name = 'Shown Name' WHERE id = $1", p.id)
+            for method, path in _routes_answering_a_banned_account():
+                assert (method, path) in known, (method, path)
+                url = re.sub(r"\{steam_id\}", p.sid, path)
+                url = re.sub(r"\{[a-z_]+\}", str(uuid.uuid4()), url)
+                headers = {"X-Session-Token": TOKEN, "X-Internal-Key": INTERNAL_KEY}
+                body_ = {"steam_id": p.sid, "session_token": TOKEN, "target_steam_id": p.sid}
+                if method == "GET":
+                    r = await c.get(url, params={"steam_id": p.sid}, headers=headers)
+                elif method == "DELETE":
+                    r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
+                else:
+                    r = await c.request(method, url, json=body_, params={"steam_id": p.sid}, headers=headers)
+                answers.append((method, path, r.status_code, r.text))
+        return answers
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    answers = out["v"]
+    held = [(m, p, s) for m, p, s, t in answers if any(k in t for k in marks)]
+    assert held == [], held
+    by = {(m, p): (s, t) for m, p, s, t in answers}
+    check = json.loads(by[("GET", "/api/v1/mod/check/{steam_id}")][1])
+    assert check["banned"] is True and check["ban_reason"] == "plain reason", check
+    assert by[("DELETE", "/api/v1/players/{steam_id}/data")][0] == 409, by[("DELETE", "/api/v1/players/{steam_id}/data")]
+    feed = json.loads(by[("GET", "/api/v1/internal/recent-bans")][1])
+    assert any(b["reason"] == "plain reason" for b in feed["bans"]), feed
+    print("V5 answers:", sorted((m, p, s) for m, p, s, _ in answers))
+
+
+# -- V6: the account deletion -----------------------------------------------------------------------
+
+async def _texted_ended_ban(env, c, admin, p):
+    """A ban of p with both texts (each holding p's id), one ban_details
+    record, then ended; its id."""
+    await _ban(c, admin, p.sid)
+    ban_id = (await _row(env, p.sid))["id"]
+    r = await _details(c, admin, p.sid, details="alt of %s, seen twice" % p.sid, name="Alias %s x" % p.sid)
+    assert r.status_code == 200, r.text
+    await _end(env, ban_id)
+    return ban_id
+
+
+def test_v6_the_deletion_after_an_ended_ban_clears_the_record(monkeypatch):
+    async def body(env):
+        _armed(env)
+        env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
+        admin = await _admin(env)
+        p = await _account(env)
+        async with _client(env) as c:
+            ban_id = await _texted_ended_ban(env, c, admin, p)
+            await _session(env, p.sid)   # after the ban: the ban writer ends the account's sessions
+            before = (await _row(env, p.sid), await _records(env, ban_id))
+            r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
+            listed = (await _list(c, admin)).json()
+        return r.status_code, r.json(), before, await _row(env, p.sid), await _records(env, ban_id), listed
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    st, ans, (row0, recs0), row, recs, listed = out["v"]
+    assert st == 200 and ans["status"] == "anonymized", (st, ans)
+    assert row0["details"] and row0["display_name_at_ban"] and row0["details_at"], row0
+    assert (row["display_name_at_ban"], row["details"], row["details_at"]) == (None, None, None), row
+    assert (row["reason"], row["banned_at"], row["expires_at"]) == (row0["reason"], row0["banned_at"],
+                                                                    row0["expires_at"]), row
+    assert len(recs) == 1 and recs[0]["target_steam_id"] == ans["placeholder"], recs
+    assert recs0[0]["d"]["old_name"] == "Ban Answers P", recs0   # the name R2 kept at the ban
+    assert recs[0]["d"] == {"ban_id": str(row["id"]), "details_change": "added", "name_change": "changed",
+                            "texts_removed": True}, recs[0]["d"]
+    assert modlog.sentence("ban_details", recs[0]["d"]) == (
+        "Ban details added and kept name changed. Its texts were removed when the account was deleted.")
+    assert listed["bans"] == [], listed
+
+
+def test_v6_a_failure_after_the_statement_leaves_the_texts(monkeypatch):
+    """The deletion's own transaction: a statement that fails after the
+    clearing (the ledger's insert, made to fail) rolls the clearing back."""
+    async def body(env):
+        _armed(env)
+        env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
+        admin = await _admin(env)
+        p = await _account(env)
+        async with _client(env) as c:
+            ban_id = await _texted_ended_ban(env, c, admin, p)
+            await _session(env, p.sid)   # after the ban: the ban writer ends the account's sessions
+            before = (await _row(env, p.sid), await _records(env, ban_id))
+            with env.rewriting("INSERT INTO deleted_steam_ids", "INSERT INTO deleted_steam_ids_absent") as hits:
+                r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
+        return r.status_code, len(hits), before, (await _row(env, p.sid), await _records(env, ban_id))
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    st, hits, before, after = out["v"]
+    assert st >= 500 and hits >= 1, (st, hits)
+    assert after == before, (before, after)
+
+
+def test_v6_the_scrub_alone_leaves_the_texts(monkeypatch):
+    """The measurement R5 asks for: the deletion with the records' clearing
+    made to match nothing. The moderator log's own scrub rewrites the account's
+    id inside each text to the tombstone and leaves the rest as written; the
+    ban row's columns are cleared by the first statement all the same."""
+    async def body(env):
+        _armed(env)
+        env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
+        admin = await _admin(env)
+        p = await _account(env)
+        async with _client(env) as c:
+            ban_id = await _texted_ended_ban(env, c, admin, p)
+            await _session(env, p.sid)   # after the ban: the ban writer ends the account's sessions
+            with env.rewriting(" WHERE action = 'ban_details'", " WHERE FALSE AND action = 'ban_details'",
+                               where="'texts_removed'") as hits:
+                r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
+        return r.status_code, r.json(), len(hits), await _row(env, p.sid), await _records(env, ban_id), p.sid
+    out = {}
+
+    async def run(env):
+        out["v"] = await body(env)
+    case(monkeypatch, run, prefix="banrec")
+    st, ans, hits, row, recs, sid = out["v"]
+    assert st == 200 and hits == 1, (st, hits)
+    tomb = ans["placeholder"]
+    assert (row["details"], row["display_name_at_ban"]) == (None, None), row
+    (rec,) = recs
+    assert (rec["d"]["new_details"], rec["d"]["new_name"]) == ("alt of %s, seen twice" % tomb, "Alias %s x" % tomb), rec
+    assert sid not in json.dumps(rec["d"]), rec
+    print("V6 the scrub alone leaves:", {k: rec["d"][k] for k in ("new_details", "new_name")})

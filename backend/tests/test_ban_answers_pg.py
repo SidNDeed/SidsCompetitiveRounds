@@ -688,7 +688,15 @@ def test_every_writer_of_player_bans_takes_the_targets_identity_lock_before_it_w
     the target's lock (_mail_lock_identities) before its write and commits
     once, after it. Each lock is counted only as an awaited call that is one
     of its function's own top-level statements (_top_level_awaited), and it
-    is the function's only call of that lock."""
+    is the function's only call of that lock.
+
+    BAN-RECORD-1 adds two writers. The details route (admin_ban_details)
+    takes the target's lock through its lattice (_ban_details_identities,
+    whose first call of _mail_lock_identities names the target) before its
+    one write, and commits once, after it; a call that changes nothing rolls
+    back, after the lock, and writes nothing. The deletion's helper
+    (_ban_record_forget) is called by delete_player_data alone, after the
+    deletion's own identity lock, and neither commits nor rolls back."""
     fns, writers, length_callers = {}, {}, []
     for mod, name, node in _api_functions():
         lines = _write_lines(node)
@@ -698,7 +706,8 @@ def test_every_writer_of_player_bans_takes_the_targets_identity_lock_before_it_w
         if name != "_ban_set_length_core":
             length_callers += [name] * len(_call_lines(node, "_ban_set_length_core"))
     assert writers == {("main", "_ban_set_length_core"): 1, ("main", "_apply_ban_core"): 2,
-                       ("main", "admin_unban"): 1}, writers
+                       ("main", "admin_unban"): 1, ("main", "admin_ban_details"): 1,
+                       ("main", "_ban_record_forget"): 1}, writers
     assert length_callers == ["_apply_ban_core"], length_callers
     core, core_writes = fns["_apply_ban_core"]
     def core_lock(c):
@@ -721,3 +730,30 @@ def test_every_writer_of_player_bans_takes_the_targets_identity_lock_before_it_w
     assert "req.target_steam_id" in [ast.unparse(a) for a in lock.args], ast.unparse(lock)
     (commit,) = _call_lines(unban, "commit")
     assert lock.lineno < write < commit and not _call_lines(unban, "rollback"), (lock.lineno, write, commit)
+    every = {name: node for mod, name, node in _api_functions() if mod == "main"}
+    details, (dwrite,) = fns["admin_ban_details"]
+
+    def details_lock(c):
+        return ast.unparse(c.func) == "_ban_details_identities"
+    anywhere = [n.lineno for n in ast.walk(details) if isinstance(n, ast.Call) and details_lock(n)]
+    top = _top_level_awaited(details, details_lock)
+    assert len(top) == 1 and anywhere == [top[0].lineno], ([c.lineno for c in top], anywhere)
+    assert "req.target_steam_id" in [ast.unparse(a) for a in top[0].args], ast.unparse(top[0])
+    (dcommit,) = _call_lines(details, "commit")
+    (drollback,) = _call_lines(details, "rollback")   # the call that changes nothing: no write, no record
+    assert top[0].lineno < drollback < dwrite < dcommit, (top[0].lineno, drollback, dwrite, dcommit)
+    first = min((n for n in ast.walk(every["_ban_details_identities"]) if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) == "_mail_lock_identities"), key=lambda n: (n.lineno, n.col_offset))
+    assert [ast.unparse(a) for a in first.args] == ["db", "admin_steam_id", "target_steam_id"], ast.unparse(first)
+    forget, _ = fns["_ban_record_forget"]
+    assert not _call_lines(forget, "commit") + _call_lines(forget, "rollback")
+    callers = [name for name, node in every.items() if _call_lines(node, "_ban_record_forget")
+               and name != "_ban_record_forget"]
+    assert callers == ["delete_player_data"], callers
+    deletion = every["delete_player_data"]
+
+    def deletion_lock(c):
+        return ast.unparse(c) == ("db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:sid))'),"
+                                  " {'sid': steam_id})")
+    dlocks = [c.lineno for c in _top_level_awaited(deletion, deletion_lock)]
+    assert dlocks and dlocks[0] < min(_call_lines(deletion, "_ban_record_forget")), dlocks

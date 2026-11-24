@@ -503,6 +503,11 @@ class FakeDb:
         if sql.lstrip().startswith("SELECT id FROM players WHERE steam_id = :sid AND deleted_at IS NULL"):
             p = self.player_by_sid(params["sid"])
             return _Res([(p["id"],)] if p and p["deleted_at"] is None else [])
+        if sql.lstrip().startswith("SELECT display_name FROM players WHERE steam_id = :sid AND deleted_at IS NULL"):
+            # BAN-RECORD-1 R2: the name a new ban keeps (main._ban_kept_name), read by the ban
+            # writer after the target's identity lock: the live row's name, none without one.
+            p = self.player_by_sid(params["sid"])
+            return _Res([(p["display_name"],)] if p and p["deleted_at"] is None else [])
         if sql.lstrip().startswith("SELECT id FROM players WHERE steam_id = :sid"):
             p = self.player_by_sid(params["sid"])
             return _Res([(p["id"],)] if p else [])

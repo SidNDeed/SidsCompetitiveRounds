@@ -91,6 +91,14 @@
           "eeb182de6cfe27e35ae082dd2d4b61935fbfcb7c"
         ],
         [
+          "/api/v1/admin/ban/details",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_ban_details"
+        ],
+        [
           "/api/v1/admin/banned-users",
           [
             "GET"

@@ -26,6 +26,7 @@ REASONS = ("read", "read_upkeep", "own", "gameplay", "service", "config", "autom
 CENSUS = {
     ('POST', '/api/v1/admin/artists/set'): (MOD, 'grants', (('main', 'admin_set_artist'), )),  # main.admin_set_artist
     ('POST', '/api/v1/admin/ban'): (MOD, 'bans', (('main', '_apply_ban_core'), ('main', '_ban_set_length_core'), ('main', '_ban_rate_gate_or_raise'), )),  # main.admin_ban
+    ('POST', '/api/v1/admin/ban/details'): (MOD, 'bans', (('main', 'admin_ban_details'), )),  # main.admin_ban_details (BAN-RECORD-1)
     ('POST', '/api/v1/admin/cosmetic-review'): (MOD, 'grants', (('main', '_admin_cosmetic_review_impl'), )),  # main.admin_cosmetic_review
     ('POST', '/api/v1/admin/ffa-g3-seats'): (MOD, 'grants', (('main', 'admin_ffa_g3_seat'), )),  # main.admin_ffa_g3_seat
     ('POST', '/api/v1/admin/grant-achievement'): (MOD, 'grants', (('main', 'admin_grant_achievement'), )),  # main.admin_grant_achievement
