@@ -13,9 +13,12 @@ route that drops its identity key changes the site's class, and a new route
 that reaches the site adds an entry; the unchanged source, computed the same
 way, gives the frozen record (the control).
 
-A site whose class rests on an identity key (its fallback, the class without
-the key, is above it) names whose key covers whose row, or is judged to its
-fallback by hand (lesson 732). The regression control of the reader's
+A site whose class rests on a covering key, the identity key or the
+deletion key (its fallback, the class without the key, is above it) names
+whose key covers whose row, or is judged to its fallback by hand (lesson
+732). A two-key key is named by its class; a class the reader cannot
+resolve is refused, and the four routes' players sites rest on the deletion
+key (round mdplg-r2). The regression control of the reader's
 widening: with its eleven switches off it computes mdpl_census_base.json, the
 census frozen before the widening, exactly (the test keeps the name it had
 with six). A lock taken without a wait (SKIP LOCKED, NOWAIT) is a hold: a
@@ -94,6 +97,53 @@ def test_every_unread_statement_is_the_frozen_one(measured, frozen):
 def test_every_untyped_store_is_the_frozen_one(measured, frozen):
     """A store of a Player column on an object the reader cannot type (ORM_TYPES)."""
     assert measured["untyped"] == sorted(frozen["untyped"])
+
+
+def _unclassed_keys(src):
+    """(name, function, statement) of every two-key advisory key the census
+    reads whose class the reader could not resolve, over every entry and the
+    deletion."""
+    bad = set()
+    for entry in sorted(set(src.roots) | {mc.DELETION}):
+        for e in src.events(entry):
+            if e[0] == "L" and e[1].startswith("key:" + mc.UNRESOLVED_CLASS):
+                bad.add((e[1], e[4][0], e[4][1]))
+    return sorted(bad)
+
+
+def test_every_two_key_key_the_census_reads_is_named_by_its_class(src):
+    """Round mdplg-r2: a two-key key is named by the class its statement's
+    own call passes, so two classes never read as one key; a statement whose
+    class the reader cannot resolve is refused here, never read as a key of
+    another class."""
+    assert _unclassed_keys(src) == []
+
+
+# MDPL-GATE-REREAD-1 (b): the routes that take the deletion key SHARED.
+DELETION_KEY_ROUTES = ("toggle_ranked", "unlock_achievement", "generate_link_code", "admin_grant_achievement")
+DELETION_KEY_HELPER = "_player_deletion_key_shared_bounded"
+
+
+def test_the_four_routes_players_sites_rest_on_the_deletion_key(src, measured):
+    """Round mdplg-r2: each players site of the four routes (a site of the
+    route's own body that holds something) is KEY on the deletion key: class
+    KEY, fallback UPGRADE, its covering key the helper's statement, and no
+    key that step 1 names (a key the deletion waits on once its row is held)
+    among its held locks. The deletion key's name comes from main's own
+    constants (Source.deletion_key)."""
+    dkey = src.deletion_key
+    assert dkey is not None and dkey.startswith("key:") and mc.UNRESOLVED_CLASS not in dkey, dkey
+    step1_names = {w.split(" / ")[0] for ph in ("A", "B") for w in measured["step1"][ph]
+                   if w.startswith("key:")}
+    own = {k: d for k, d in measured["sites"].items()
+           if k.split(" | ")[0] in DELETION_KEY_ROUTES and d["held"]}
+    assert own, "no players site of the four routes is read"
+    bad = {k: d for k, d in own.items()
+           if d["class"] != "KEY" or d["fallback"] != "UPGRADE"
+           or not d["keys"] or any(x.split(" | ")[0] != DELETION_KEY_HELPER for x in d["keys"])
+           or set(d["held"]) & step1_names}
+    assert not bad, (dkey, bad)
+    assert dkey in src.covering_keys and dkey not in step1_names, (dkey, sorted(src.covering_keys))
 
 
 def test_every_read_site_and_unread_statement_carries_its_judgement(frozen):
@@ -777,8 +827,10 @@ def test_the_gate_and_the_deletion_take_one_identity_key(src):
 _PIN_MUTANTS = {
     "the deletion's key made shared": (
         "async def delete_player_data(",
-        'text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})\n    player = ',
-        'text("SELECT pg_advisory_xact_lock_shared(hashtext(:sid))"), {"sid": steam_id})\n    player = ', "(ii)"),
+        'text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})\n'
+        '    await db.execute(text("SELECT pg_advisory_xact_lock(" + ',
+        'text("SELECT pg_advisory_xact_lock_shared(hashtext(:sid))"), {"sid": steam_id})\n'
+        '    await db.execute(text("SELECT pg_advisory_xact_lock(" + ', "(ii)"),
     "the gate's shared statement given another key expression": (
         "async def _ban_lock_and_gate(", "pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))",
         "pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text) || ':x'))", "(i)"),

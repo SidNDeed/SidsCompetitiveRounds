@@ -149,8 +149,9 @@ place that can happen:
    conflicts with a lock the deletion holds on a players row then (its own
    row's, and with NB_HOLDS every other players row it locks).
 3. Rows are (the statement's place, the phase, the held tables), with their
-   entries. Each gets one class: CLEAR (it holds none: computed), KEY (an
-   identity key is taken before the statement and before every held lock:
+   entries. Each gets one class: CLEAR (it holds none: computed), KEY (a
+   covering key, the identity key or the deletion key (Source.covering_keys),
+   is taken before the statement and before every held lock:
    computed, the place named), UPGRADE (computed: the one held lock that
    conflicts is a FOR KEY SHARE on a players row, a foreign key naming the
    player, against the tombstone's upgrade; its circle and outcome are the
@@ -218,6 +219,14 @@ OPENERS = frozenset({"async_session", "session_factory", "release_session", "asm
 ROUTE_METHODS = frozenset({"get", "post", "put", "delete", "patch", "api_route", "websocket"})
 KEY_COLUMNS = {"players": frozenset({"id", "steam_id", "discord_id"})}
 IDENTITY_KEYS = frozenset({"key:hashtext(:p)"})
+# A two-key advisory key is named by its class (key_name): the number the statement's own call binds as its
+# first argument, so two classes never read as one key. A class the reader cannot resolve to an integer is
+# named with UNRESOLVED_CLASS, and test_mdpl_census refuses every such name in the census.
+UNRESOLVED_CLASS = "?class"
+# The deletion key of MDPL-GATE-REREAD-1 (b): delete_player_data takes it EXCLUSIVE, four routes take it SHARED.
+# Its name is built from main's own constants (Source.deletion_key); no class number is typed here.
+DELETION_KEY_CLASS = "PLAYER_DELETION_LOCK_CLASS"
+DELETION_KEY_ARGS = "_PLAYER_DELETION_KEY_ARGS"
 
 # The eleven widenings of the census, each a switch (all off = the census as first
 # frozen, mdpl_census_base.json: main.py alone, no triggers, no insert waits, the
@@ -320,12 +329,33 @@ def _balanced(s):
     return s
 
 
-def key_name(arg):
-    """An advisory key's table name. Binds become ':p', so the identity key's
-    two spellings (`hashtext(:sid)`, `hashtext(CAST(:sid AS text))`) are one."""
+def _key_arg(arg):
     a = re.sub(r":" + _W, ":p", _norm(arg))
-    a = re.sub(r"CAST\((:p) AS text\)", r"\1", a, flags=re.I)
-    return "key:" + a
+    return re.sub(r"CAST\((:p) AS text\)", r"\1", a, flags=re.I)
+
+
+def key_name(arg, cls_of=None):
+    """An advisory key's table name. Binds become ':p', so the identity key's
+    two spellings (`hashtext(:sid)`, `hashtext(CAST(:sid AS text))`) are one.
+    A two-key key's first argument is its class, and its name carries the
+    class's number (`key:<class number>, hashtext(:p)`): an integer literal, or a bind
+    (`:cls`, `CAST(:cls AS integer)`) that `cls_of(bind name)` resolves to an
+    integer, the value the statement's own call passes. A class not resolved
+    is named UNRESOLVED_CLASS (`key:?class, hashtext(:p)`)."""
+    parts = Source._split_top(_norm(arg))
+    if len(parts) != 2:
+        return "key:" + _key_arg(arg)
+    first = parts[0]
+    cls = None
+    if re.fullmatch(r"-?[0-9]+", first):
+        cls = int(first)
+    else:
+        m = re.fullmatch(r"(?:CAST\( ?)?:(" + _W + r")(?: AS (?:integer|int|int4) ?\))?", first, re.I)
+        if m is not None and (m.group(0).upper().startswith("CAST(") == m.group(0).endswith(")")) \
+                and cls_of is not None:
+            cls = cls_of(m.group(1))
+    head = str(cls) if type(cls) is int else UNRESOLVED_CLASS
+    return "key:%s, %s" % (head, _key_arg(parts[1]))
 
 
 def conflicts(held_mode, wait_mode):
@@ -414,6 +444,8 @@ class Source:
                     self.trees[stem] = tree
         self._cur = "main"                      # the module whose names a text is read in
         self._ns = {}
+        self._ints = {}                         # int_consts, per module
+        self._int_imports = {}                  # _const_imports, per module
         with open(os.path.join(api, "models.py"), encoding="utf-8") as fh:
             mtree = ast.parse(fh.read())
         self.defs = {}
@@ -1308,6 +1340,86 @@ class Source:
         t = self.text(x, local, plain=True)
         return None if t is None else [t]
 
+    def int_consts(self, mod):
+        """An api module's integer constants: each module-level `NAME = <integer>`
+        whose name the module binds once."""
+        if mod not in self._ints:
+            tree = self.trees.get(mod)
+            path = os.path.join(self.api, mod + ".py")
+            if tree is None and re.fullmatch(_W, mod) and os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read())
+            got = {}
+            for node in (tree.body if tree is not None else []):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                        and isinstance(node.value, ast.Constant) and type(node.value.value) is int \
+                        and _module_bind_count(tree, node.targets[0].id) == 1:
+                    got[node.targets[0].id] = node.value.value
+            self._ints[mod] = got
+        return self._ints[mod]
+
+    def _const_imports(self, m):
+        """Module m's module-level imports of api modules (also under try/if),
+        read for its integer constants whether or not MODULES is on: a class
+        number is a constant, not a statement of the other module."""
+        if m not in self._int_imports:
+            imp, todo = {}, list(self.trees[m].body) if m in self.trees else []
+            while todo:
+                n = todo.pop(0)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    imp.update(self._import_targets(n))
+                    continue
+                todo.extend(x for x in ast.iter_child_nodes(n) if isinstance(x, ast.stmt))
+                for h in getattr(n, "handlers", []) or []:
+                    todo.extend(h.body)
+            self._int_imports[m] = imp
+        return self._int_imports[m]
+
+    def _int_value(self, v, caller, modvars=None):
+        """The integer an expression is: a literal, a name of the caller's module
+        or one `from X import` brings, or `A.NAME` with A a module's alias; else None."""
+        if isinstance(v, ast.Constant) and type(v.value) is int:
+            return v.value
+        m = mod_of(caller)
+        if isinstance(v, ast.Name):
+            got = self.int_consts(m).get(v.id)
+            t = (self._imported(v.id, caller) or self._const_imports(m).get(v.id)) if got is None else None
+            return self.int_consts(t[1]).get(t[2]) if t and t[0] == "name" else got
+        if isinstance(v, ast.Attribute) and isinstance(v.value, ast.Name):
+            mod = self._alias_mod(v.value.id, caller, modvars)
+            if mod is None:
+                t = self._const_imports(m).get(v.value.id)
+                mod = t[1] if t and t[0] == "mod" else None
+            return None if mod is None else self.int_consts(mod).get(v.attr)
+        return None
+
+    def _bound_int(self, params, bind, ctx):
+        """The integer a call's parameter dictionary passes for `bind`, or None."""
+        if not isinstance(params, ast.Dict):
+            return None
+        v = next((x for k, x in zip(params.keys, params.values)
+                  if isinstance(k, ast.Constant) and k.value == bind), None)
+        return self._int_value(v, ctx["fn"], ctx["modvars"])
+
+    @property
+    def deletion_key(self):
+        """The deletion key's name, built from main's own constants (the class
+        DELETION_KEY_CLASS and the key's text DELETION_KEY_ARGS, its first
+        argument the class's bind), or None when main defines either not."""
+        n = self.int_consts("main").get(DELETION_KEY_CLASS)
+        args = next((x.value.value for x in self.tree.body if isinstance(x, ast.Assign) and len(x.targets) == 1
+                     and isinstance(x.targets[0], ast.Name) and x.targets[0].id == DELETION_KEY_ARGS
+                     and isinstance(x.value, ast.Constant) and isinstance(x.value.value, str)), None)
+        return None if n is None or args is None else key_name(args, lambda _bind: n)
+
+    @property
+    def covering_keys(self):
+        """The keys a players site can rest on (class KEY): the identity key and
+        the deletion key."""
+        return IDENTITY_KEYS | ({self.deletion_key} if self.deletion_key else set())
+
     def _module_consts(self, mod):
         """Another api module's string constants, read in its own order."""
         if mod not in self._modules:
@@ -1529,13 +1641,14 @@ class Source:
                 d += 1
         return out
 
-    def locks_of_sql(self, sql, _active=()):
+    def locks_of_sql(self, sql, _active=(), cls_of=None):
         """[(table, mode, blocking)] a statement takes, in its text's order, then
-        (TRIGGERS) what the triggers its writes fire take."""
+        (TRIGGERS) what the triggers its writes fire take. `cls_of` resolves a
+        two-key key's class bind (key_name)."""
         s = _norm(sql)
         out = []
         for m in RX_KEY.finditer(s):
-            out.append((m.start(), key_name(_balanced(m.group(2))), "KEY", m.group(1) is None))
+            out.append((m.start(), key_name(_balanced(m.group(2)), cls_of), "KEY", m.group(1) is None))
         for m in RX_UPDATE.finditer(s):
             cols = {c.split("=")[0].strip().strip('"').lower() for c in m.group(2).split(",") if "=" in c}
             for t in self.tables(m.group(1)):
@@ -1865,6 +1978,12 @@ class Source:
                 for a in c.args:
                     spawned.update(id(sub) for sub in ast.walk(a))
         calls.sort(key=lambda c: (c.lineno, c.col_offset))
+        params_of = {}                          # a text() call -> the parameters its execute call passes
+        for c in calls:
+            if getattr(c.func, "attr", None) in ("execute", "exec_driver_sql") and c.args \
+                    and isinstance(c.args[0], ast.Call) and getattr(c.args[0].func, "id", "") == "text":
+                params_of[id(c.args[0])] = c.args[1] if len(c.args) > 1 else next(
+                    (k.value for k in c.keywords if k.arg == "params"), None)
         out = []
         for c in calls:
             if id(c) in spawned:
@@ -1884,7 +2003,8 @@ class Source:
                     self.unread.add("%s | text(%s)" % (ctx["fn"], ast.unparse(c.args[0])[:60]))
                     continue
                 place = self._place(ctx, _norm(sql)[:72])
-                for t, mode, b in self.locks_of_sql(sql):
+                cls_of = lambda b, _p=params_of.get(id(c)): self._bound_int(_p, b, ctx)  # noqa: E731
+                for t, mode, b in self.locks_of_sql(sql, cls_of=cls_of):
                     out.append(("L", t, mode, b, place))
             elif fname in ("update", "delete") and first in self.models:
                 place = self._place(ctx, "%s(%s)" % (fname, first))
@@ -1933,11 +2053,12 @@ class Source:
         return out
 
 
-def walk(events):
+def walk(events, covering):
     """One pass: (the held list, [(index, event, held length)] for every
     blocking players lock, the first index of a lock held per table (a
-    blocking one, a HELD one and, with NB_HOLDS, a no-wait one), the identity
-    keys taken [(index, event)]). A HOIST's locks count as held."""
+    blocking one, a HELD one and, with NB_HOLDS, a no-wait one), the covering
+    keys taken [(index, event)], `covering` being Source.covering_keys). A
+    HOIST's locks count as held."""
     held, players, first, keys = [], [], {}, []
     for i, e in enumerate(events):
         if e[0] == "HOIST":
@@ -1951,14 +2072,14 @@ def walk(events):
             continue
         if e[1] == "players":
             players.append((i, e, len(held)))
-        if e[2] == "KEY" and e[1] in IDENTITY_KEYS:
+        if e[2] == "KEY" and e[1] in covering:
             keys.append((i, e))
         first.setdefault(e[1], i)
         held.append((e[1], e[2]))
     return held, players, first, keys
 
 
-def _deletion_wait(e):
+def _deletion_wait(e, covering):
     """The deletion's event as a wait (table, mode), or None when it is no wait."""
     fn, head = e[4][0], e[4][1]
     if not e[3] or e[3] == HELD:
@@ -1971,7 +2092,7 @@ def _deletion_wait(e):
                 return ("players", OWN_UP)
             # OWN_FK_WAITS: a foreign key's KEY SHARE, on another player's row
             return ("players", KS) if OWN_FK_WAITS and e[2] == KS else None
-    if e[1] in IDENTITY_KEYS and fn in OWN_KEY_FNS:
+    if e[1] in covering and fn in OWN_KEY_FNS:     # its identity key and its deletion key: its own, no wait
         return None
     return (e[1], e[2])
 
@@ -1980,11 +2101,12 @@ def step1(src):
     """{'A': {(table, mode)}, 'B': {(table, mode)}}: the deletion's blocking waits
     after its own players row is held FOR NO KEY UPDATE (A) and FOR UPDATE (B)."""
     ev = [e for e in src.events(DELETION) if e[0] == "L"]
+    cover = src.covering_keys
     a_at = next(i for i, e in enumerate(ev) if e[4][0] == DELETION and e[4][1].startswith(PHASE_A_MARK))
     b_at = next(i for i, e in enumerate(ev) if e[4][0] == DELETION and e[4][1] == PHASE_B_HEAD)
     out = {}
     for ph, at in (("A", a_at), ("B", b_at)):
-        out[ph] = {w for w in (_deletion_wait(e) for e in ev[at + 1:]) if w is not None}
+        out[ph] = {w for w in (_deletion_wait(e, cover) for e in ev[at + 1:]) if w is not None}
     # From the tombstone's flush on it holds its row FOR UPDATE: a later store
     # of a key column (discord_id) waits for nothing.
     out["B"].discard(("players", OWN_UP))
@@ -2022,15 +2144,16 @@ def deletion_holds(src):
 def census(src=None, entries=None):
     """(step 1, rows): rows = {(place, phase, held tables): {"entries": [...],
     "class": CLEAR|KEY|UPGRADE|READ, "fallback": the class without the
-    identity key, "key": the identity key's place, for KEY}}."""
+    covering key, "key": the covering key's place, for KEY}}."""
     src = src or Source()
     s1 = step1(src)
     dheld = deletion_holds(src)
+    cover = src.covering_keys
     rows = defaultdict(lambda: {"entries": set(), "keys": set(), "nokey": False, "beyond_upgrade": False})
     for entry in sorted(src.roots if entries is None else entries):
         if entry == DELETION:
             continue
-        held, players, first, keys = walk(src.events(entry))
+        held, players, first, keys = walk(src.events(entry), cover)
         for i, e, n in players:
             for phase in ("A", "B"):
                 if not any(conflicts(m, e[2]) for m in dheld[phase]):
@@ -2051,7 +2174,7 @@ def census(src=None, entries=None):
                         r["keys"].add(k[4])
     out = {}
     for (place, phase, hit), r in rows.items():
-        # the class without the identity key: a KEY row's is UPGRADE or READ (docstring, 3.)
+        # the class without the covering key: a KEY row's is UPGRADE or READ (docstring, 3.)
         fallback = "CLEAR" if not hit else "UPGRADE" if not r["beyond_upgrade"] else "READ"
         cls = "KEY" if hit and not r["nokey"] and len(r["keys"]) == 1 else fallback
         out[(place, phase, hit)] = {"entries": sorted(r["entries"]), "class": cls, "fallback": fallback,
@@ -2069,9 +2192,9 @@ def site_key(place):
 def sites(src=None, entries=None):
     """The census keyed by statement site: {site: {"class": the highest of its
     rows (READ > UPGRADE > KEY > CLEAR), "fallback": the highest of its rows'
-    fallbacks (the site's class were no identity key read), "phases": the
+    fallbacks (the site's class were no covering key read), "phases": the
     phases where it holds something, "held": the tables it can hold there,
-    "entries": every entry that reaches it, "keys": the identity keys' places
+    "entries": every entry that reaches it, "keys": the covering keys' places
     of its KEY rows}}."""
     s1, rows = census(src, entries)
     out = {}
