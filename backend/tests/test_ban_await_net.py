@@ -5,8 +5,9 @@ a ban read as an ast.Call of a name from the census's own lists
 (RAISING_CALLS, the soft session check, the admin roster's _is_admin,
 BAN_READS, SWEEP_GATE_READS, LOCK_CALLERS, IDENTITY_LOCKERS,
 EXCLUSIVE_TAKERS_BY_NAME, the functions of SINGLE_KEY_TAKERS, RETURN_GUARDED
-and INSERT_CORES) or test_mdpl_gate_bound_pg's HELPER, and an advisory lock
-as an execute whose statement text holds one. A call of a
+and INSERT_CORES), test_mdpl_gate_bound_pg's HELPER, or a name a ban lane
+test counts by its call and no list holds (LANE_COUNTED), and an advisory
+lock as an execute whose statement text holds one. A call of a
 coroutine function that is not awaited runs nothing of its body; a count of
 bare calls counts it all the same. This net holds that premise for every
 such count at once, over the source text (no database):
@@ -45,6 +46,14 @@ PLAIN = {
     "_require_internal_key": "a plain function: it compares the internal key and raises; it returns no awaitable",
 }
 
+# Names a ban lane test counts by a bare call that no list of the census holds.
+LANE_COUNTED = {
+    "_mail_lock_identities": ("the unban's lock as test_ban_answers_pg's test_every_writer counts it; it locks "
+                              "through _identity_lock_many, so the takers rule below does not find it"),
+    "_ban_set_length_core": ("the length change's writer of player_bans, which test_every_writer counts by its "
+                             "call (its one caller, and the core's lock before that call)"),
+}
+
 # (module, enclosing function, name): a call that is not the direct value of an Await, and why.
 NOT_AWAITED = {
     ("main", "_region_pings_store", "_region_pings_store_task"): (
@@ -71,11 +80,12 @@ def _bound_helper_name() -> str:
 def act_names() -> set:
     """Every name the ban lane's counts take as a lock, a locker, a gate or a
     ban read: the census's lists, its return-guarded helpers and insert cores,
-    and the deletion key's bounded taker that test_mdpl_gate_bound_pg counts."""
+    the deletion key's bounded taker that test_mdpl_gate_bound_pg counts, and
+    LANE_COUNTED."""
     return (set(B.RAISING_CALLS) | {B.SOFT_CALL, "_is_admin"} | set(B.BAN_READS) | set(B.SWEEP_GATE_READS)
             | set(B.LOCK_CALLERS) | set(B.IDENTITY_LOCKERS) | set(B.EXCLUSIVE_TAKERS_BY_NAME)
             | {n for _m, n in B.SINGLE_KEY_TAKERS} | set(B.RETURN_GUARDED) | set(B.INSERT_CORES)
-            | {_bound_helper_name()})
+            | {_bound_helper_name()} | set(LANE_COUNTED))
 
 
 def api_sources() -> dict:
@@ -104,8 +114,10 @@ def await_failures(sources, names, plain=None, listed=None):
     listed = NOT_AWAITED if listed is None else listed
     trees = {m: ast.parse(s) for m, s in sources.items()}
     texts = B.StatementTexts(trees)
-    # a coroutine function whose own body executes an advisory lock is a locker too (_mail_lock_identities, which
-    # the census names only in its prose): its calls are held like the census's names
+    # the takers rule: a coroutine function whose own body executes an advisory lock is a locker too, and its calls
+    # are held like the lists' names. At this writing it adds 32 names beyond the lists, main._pc_lock_blob among
+    # them. A function that locks only through another locker (_mail_lock_identities, through _identity_lock_many)
+    # is not found by it; LANE_COUNTED holds the one a lane test counts.
     takers = {fn.name for m, t in trees.items() for fn in B._functions(t) if isinstance(fn, ast.AsyncFunctionDef)
               and any(isinstance(c, ast.Call) and B._name_of(c) in EXECUTES
                       and ADVISORY.search(texts.call_text(m, c)) for c in B._own_nodes(fn))}
@@ -160,7 +172,7 @@ def test_every_act_the_census_counts_by_its_call_is_awaited():
     names = act_names()
     out, _keys, counts = await_failures(api_sources(), names)
     assert out == [], "\n".join(out)
-    # the walk reads what it is about (the census's names number 38 at this writing)
+    # the walk reads what it is about (act_names() numbers 47 at this writing, the takers rule 32 more)
     assert len(names) >= 30 and counts["calls"] >= 250 and counts["advisory"] >= 50, (len(names), counts)
 
 
