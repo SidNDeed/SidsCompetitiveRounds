@@ -942,7 +942,7 @@
     "admin_pc_portrait_clear"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)"
+    "key:770902, hashtext(:p)"
    ],
    "keys": [
     "admin_pc_portrait_clear | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -957,7 +957,7 @@
     "admin_pc_portrait_clear"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)"
+    "key:770902, hashtext(:p)"
    ],
    "keys": [
     "admin_pc_portrait_clear | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -1019,7 +1019,7 @@
     "_pc_snapshot_janitor_step"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_delivery_leases",
     "pc_portrait_nonces",
     "pc_portraits"
@@ -1107,7 +1107,7 @@
     "_pc_steam_process"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_portraits"
    ],
    "keys": [
@@ -1123,7 +1123,7 @@
     "_pc_steam_process"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_portraits"
    ],
    "keys": [
@@ -1139,7 +1139,7 @@
     "_pc_steam_process"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_portraits"
    ],
    "keys": [
@@ -1155,7 +1155,7 @@
     "_pc_steam_process"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_portraits"
    ],
    "keys": [
@@ -1171,7 +1171,7 @@
     "_pc_steam_process"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_portraits"
    ],
    "keys": [
@@ -1851,7 +1851,6 @@
     "submit_ovt_match"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
     "ovt_series",
     "players"
    ],
@@ -2110,7 +2109,7 @@
     "players"
    ],
    "keys": [
-    "_identity_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
    ],
    "phases": [
     "A"
@@ -2650,7 +2649,7 @@
     "pc_portrait_upload"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)"
+    "key:770902, hashtext(:p)"
    ],
    "keys": [
     "pc_portrait_upload | SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text))) | 0"
@@ -2665,7 +2664,7 @@
     "pc_portrait_upload"
    ],
    "held": [
-    "key:CAST(:p AS integer), hashtext(:p)",
+    "key:770902, hashtext(:p)",
     "pc_portraits",
     "players"
    ],
@@ -3569,7 +3568,7 @@
     "players"
    ],
    "keys": [
-    "_identity_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text))) | 0"
+    "_player_deletion_key_shared_bounded | SELECT pg_advisory_xact_lock_shared(CAST(:cls AS integer), hashtext(CAST | 0"
    ],
    "phases": [
     "A"
@@ -3595,7 +3594,7 @@
    "i18n_portal_sessions / UPDATE",
    "i18n_proposals / NO KEY UPDATE",
    "i18n_review_events / NO KEY UPDATE",
-   "key:CAST(:p AS integer), hashtext(:p) / KEY",
+   "key:770902, hashtext(:p) / KEY",
    "language_grants / NO KEY UPDATE",
    "lobby_bets / NO KEY UPDATE",
    "lobby_invites / NO KEY UPDATE",
