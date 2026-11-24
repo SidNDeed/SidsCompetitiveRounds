@@ -303,6 +303,11 @@ ROW_SERIALIZED = {
     ("main", "_moderation_case_act"): (
         1, "the actor's read, under the EXCLUSIVE identity key _mail_lock_identities took just "
            "before (actor and subject in one ordered pass), before its first write"),
+    # BAN-FIRST-1: the account deletion.
+    ("main", "delete_player_data"): (
+        2, "the first takes no key and writes nothing: it refuses before the session check; the "
+           "second is under the EXCLUSIVE identity key the deletion itself takes just before "
+           "(the key the ban core takes), before its read of the account's row and its first write"),
     # STACK-SEAM-1 (R3): the held-report list's read form.
     ("main", "_qapply_verdict"): (
         1, "the held-report list's and digest's advisory read form (log=False): it takes no key and "
@@ -319,14 +324,16 @@ _ROW_LOCK_SQL = re.compile(r"\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE
 
 
 # F4: a BAN-class handler that writes reaches the locking helper, or one of
-# these functions, each of which takes the identity lock of the same key
-# itself (shared, or exclusive, which is stronger) before its ban read.
+# these functions, or is one of them, each of which takes the identity lock of
+# the same key itself (shared, or exclusive, which is stronger) before its ban
+# read (the account deletion, before its second; its first takes no key).
 IDENTITY_LOCKERS = {
     "_identity_lock_many": "exclusive identity locks of a roster, in the canonical order",
     "_enrollment_identity_gate": "the exclusive identity lock, then the ban read",
     "_pc_verified_actor": "the shared identity lock, then the ban read (player cards)",
     "_pc_claim_daily": "the shared identity lock, then the ban read (the bot's daily claim)",
     "_pc_bot_actor": "the shared identity lock, then the ban read (the bot's pack open)",
+    "delete_player_data": "the exclusive identity lock, the deletion key, then the ban read (a handler itself)",
 }
 _IDENTITY_LOCK_SQL = re.compile(r"pg_advisory_xact_lock(_shared)?\(hashtext\(")
 _I18N = ("the translation portal: it writes the portal session (issue, refresh, touch) and translation "
@@ -346,7 +353,7 @@ F4_LISTED = {
 
 def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=None, texts=None):
     """Every BAN-class route that writes and reaches neither the locking
-    helper nor an identity locker, unless listed; every listed route that
+    helper nor an identity locker and is none, unless listed; every listed route that
     no longer needs its entry; every locker whose own body executes no
     identity lock (a statement the reader reads, StatementTexts)."""
     listed = F4_LISTED if listed is None else listed
@@ -357,7 +364,8 @@ def ban_writers_without_the_lock(rows, funcs_by_module, listed=None, lockers=Non
     for method, path, module, name, _deps in rows:
         if BAN not in res[(method, path)][1] or not reaches(funcs_by_module, module, name, _write_call):
             continue
-        if reaches(funcs_by_module, module, name, lambda c, cn: cn in LOCK_CALLERS or cn in lockers):
+        if name in lockers or reaches(funcs_by_module, module, name,
+                                      lambda c, cn: cn in LOCK_CALLERS or cn in lockers):
             continue
         need.add((method, path))
         if (method, path) not in listed:
@@ -1274,8 +1282,6 @@ OPEN_ROUTES = {
     ("POST", "/api/v1/ovt/lobby/leave"): "an exit (BAN-R17): the caller's own 1v2 lobby seat",
     ("POST", "/api/v1/tournaments/{tournament_id}/unsignup"): (
         "an exit: withdraws the caller's own signup; a banned signup is forfeited at activation"),
-    ("DELETE", "/api/v1/players/{steam_id}/data"): (
-        "account data deletion (BAN-R11): open to a banned account by design"),
     ("GET", "/api/v1/presence/ping"): (
         "WRITES: stamps last_seen and presence only under the caller's verified session, which a ban"
         " deletes; otherwise answers the online count and writes no row"),

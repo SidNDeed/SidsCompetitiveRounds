@@ -1952,7 +1952,13 @@ def test_the_helper_closure_stays_affordable():
     # against 87) and p90 (230 against 239) bounds stay, and so do the three
     # bounds of the whole closure (250 against 261, 433 against 453, 882
     # against 897 at the health route).
-    assert code_worst <= 605, f"worst code closure {code_worst} of {total}"
+    # The ban answers (BAN-FIRST-1) on the stack's tip b8b8301d (2026-11-24):
+    # 606 measured at GET /api/v1/health of 6034 indexed bindings (605 of 6033
+    # at b8b8301d): +1 by name, main._BAN_ANSWERS_BUILD, the build marker,
+    # which the health route reads in both arms; that closure is otherwise
+    # equal by name. The bound moves to 606, the measured value, for that
+    # reason and no other.
+    assert code_worst <= 606, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

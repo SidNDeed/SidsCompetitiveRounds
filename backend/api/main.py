@@ -8192,7 +8192,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
                               review_calibrate_build=_REVIEW_CALIBRATE_BUILD, qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
-                              ban_sweep_build=_BAN_SWEEP_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD, ban_answers_build=_BAN_ANSWERS_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               account_deletion_lock_build=_ACCOUNT_DELETION_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -8271,7 +8271,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
                               review_calibrate_build=_REVIEW_CALIBRATE_BUILD, qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
-                              ban_sweep_build=_BAN_SWEEP_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD, ban_answers_build=_BAN_ANSWERS_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               account_deletion_lock_build=_ACCOUNT_DELETION_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -16830,24 +16830,24 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
     # keeps its value and its place. The 1.41.0 client reads this answer with
     # JsonUtility.FromJson<ModCheckResponse>, which ignores keys its class
     # does not declare, wherever they stand.
-    if not player:
-        return {"registered": False, "ranked": False, "banned": False, "ban_reason": "",
-                "ban_expires_at": None, "ban_seconds_left": None}
-
     # Item 4: surface mod-wide ban status here so the OTHER player's client (which
     # already calls /mod/check on its opponent at room handshake) can notify +
-    # leave when it's matched against a banned cheater.
+    # leave when it's matched against a banned cheater. Read for every id asked
+    # about, a players row or none: an account's deletion leaves no row under
+    # its own id, and its ban stays (player_bans keeps the id it was written
+    # with).
     ban = await _active_ban_details(db, steam_id)
-    return {
-        "registered": True,
-        "ranked": player.ranked_enabled,
-        "display_name": player.display_name,
+    about_ban = {
         "banned": ban is not None,
         "ban_reason": (ban["reason"] or "") if ban is not None else "",
         "ban_expires_at": _ban_end_iso(ban["expires_at"]) if ban is not None else None,
         "ban_seconds_left": (int(ban["seconds_left"])
                              if ban is not None and ban["seconds_left"] is not None else None),
     }
+    if not player:
+        return {"registered": False, "ranked": False, **about_ban}
+    return {"registered": True, "ranked": player.ranked_enabled,
+            "display_name": player.display_name, **about_ban}
 
 
 @app.post("/api/v1/mod/toggle-ranked/{steam_id}", tags=["Mod"])
@@ -47240,11 +47240,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     its own it must not authorize an irreversible action against an arbitrary
     account (security item A3), and the soft carve-outs (old X-Mod-Version
     claims, unarmed accounts) are exactly what an attacker would present
-    (Codex review find). Two deliberate exceptions: STEAM_WEB_API_KEY unset
-    (no-op pipeline mode — nothing can be verified) and BANNED accounts —
-    a ban revokes sessions and blocks re-minting, and the right to delete
-    your own data must survive a ban, so a banned account falls back to
-    HMAC-only (the pre-batch protection level).
+    (Codex review find). One deliberate exception: STEAM_WEB_API_KEY unset
+    (no-op pipeline mode: nothing can be verified). An account under an
+    ACTIVE ban is refused whatever the request carries (_ban_gate_or_raise,
+    409), by two reads: after the signature check, before the session check,
+    and under the identity lock, before the player read and the first write.
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -47262,11 +47262,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # session's timeouts before each one (_deletion_arm_every_statement).
     _deadline = _deletion_deadline.get()
 
-    # `is None`, not truthiness (round-16 find 5): a legacy reason="" ban is
-    # an ACTIVE ban whose sessions are already purged — the truthiness form
-    # demanded a session that player structurally cannot mint, stranding
-    # their documented HMAC-only deletion path.
-    if os.getenv("STEAM_WEB_API_KEY") and (await _is_banned(db, steam_id)) is None:
+    # A banned account deletes its data only once the ban has ended (the owner's
+    # words of 24 Nov 2026). This read takes no key and writes nothing; the read
+    # under the identity lock below is the guarantee.
+    await _ban_gate_or_raise(db, steam_id, request)
+    if os.getenv("STEAM_WEB_API_KEY"):
         token = None
         try:
             if request is not None:
@@ -47300,12 +47300,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 detail="session_required_update_mod",
             )
 
-    # Identity lock FIRST (round-14 find 1): before the authoritative player read and before ANY queue/lobby/lease
-    # discovery or sweep. An enrollment writer holding this lock commits its row before our sweeps run; one that
-    # hasn't acquired it yet blocks, then fails its post-lock tombstone/live re-reads. Then the deletion key
-    # (PLAYER_DELETION_LOCK_CLASS) EXCLUSIVE, which (b)'s four routes wait on. Global order: identity -> deletion key -> lobby/series -> queue -> lease.
+    # Identity lock FIRST (round-14 find 1): before the authoritative player read and before ANY queue/lobby/lease discovery or sweep. An enrollment
+    # writer holding this lock commits its row before our sweeps run; one that hasn't acquired it yet blocks, then fails its post-lock tombstone/live re-reads.
+    # Then the deletion key (PLAYER_DELETION_LOCK_CLASS) EXCLUSIVE, which (b)'s four routes wait on. Global order: identity -> deletion key -> lobby/series -> queue -> lease.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
     await db.execute(text("SELECT pg_advisory_xact_lock(" + _PLAYER_DELETION_KEY_ARGS + ")"), {"cls": PLAYER_DELETION_LOCK_CLASS, "sid": steam_id})
+    await _ban_gate_or_raise(db, steam_id, request)  # every writer of a key's player_bans rows holds its identity lock to its commit
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
         return {"status": "not_found", "steam_id": steam_id}
@@ -88139,3 +88139,17 @@ async def _player_deletion_key_shared_bounded(db: AsyncSession, steam_id) -> Non
 # Defined at the end of the module, so nothing above it in main.py moves; the
 # health route reads it at request time.
 _REVIEW_CALIBRATE_BUILD = 1
+
+
+# ── the ban answers' build marker (BAN-FIRST-1) ──────────────────────────────
+# Release-train verification plumbing, not a design mechanism: 1 = in this build
+# GET /mod/check reads the ban of an id that has no players row too, and the
+# account deletion refuses an account under an active ban, reported on /health
+# as `ban_answers_build`. It names build identity only: what the batch changes
+# is seen by no phase of the train, so without it the train could not tell a
+# box on the new build from a stale one (learnings 780, 794, 1186). A code
+# constant, equal on both boxes by construction, probed by the release train
+# and read by nothing else (#306). Absent on any build before it. Defined at
+# the end of the module, so nothing above it in main.py moves; the health route
+# reads it at request time.
+_BAN_ANSWERS_BUILD = 1

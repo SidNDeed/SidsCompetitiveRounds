@@ -86,10 +86,12 @@ every other advisory class number defined there; each of the four function
 bodies holds ONE call of the helper and NO string naming pg_advisory; the
 helper's key statement is the shared lock of the key text, bound to the class
 and the steam id; in delete_player_data the exclusive lock of the key text
-is the statement directly after its first identity key statement, and the
-read of P by steam_id the statement directly after it, among the function's
-top-level statements of every kind; two cases plant a compound statement in
-that order, and the row names part (e).
+is the statement directly after its first identity key statement, the ban
+read (_ban_gate_or_raise, BAN-FIRST-1) the statement directly after it, and
+the read of P by steam_id the statement directly after that, among the
+function's top-level statements of every kind; two cases plant a compound
+statement in that order, two more take the ban read out of it or put it
+before the deletion key, and the row names part (e).
 
 The real session check: inv_pg puts a stand-in for main._check_steam_session
 in every case. One row each for toggle_ranked and unlock_achievement, whose
@@ -609,16 +611,18 @@ def _deletion_key_census(sources):
               and "pg_advisory" in ast.unparse(n)]
     if helper != [shared]:
         out.append("(d) the helper's key statement: %s" % helper)
-    # (e) the deletion's order: the identity key, the deletion key, the read of P, among the function's
-    # top-level statements of every kind (an if, a try or an annotated assignment between them is seen)
+    # (e) the deletion's order: the identity key, the deletion key, the ban read (BAN-FIRST-1), the read of P,
+    # among the function's top-level statements of every kind (an if, a try or an annotated assignment between
+    # them is seen)
     body = top["delete_player_data"].body
     lines = [ast.unparse(st) for st in body]
     ident = next((i for i, (st, ln) in enumerate(zip(body, lines))
                   if isinstance(st, ast.Expr) and "pg_advisory_xact_lock(hashtext(" in ln), None)
     if ident is None or lines[ident + 1:ident + 2] != [exclusive] \
-            or "select(Player).where(Player.steam_id == steam_id)" not in "".join(lines[ident + 2:ident + 3]):
+            or lines[ident + 2:ident + 3] != ["await _ban_gate_or_raise(db, steam_id, request)"] \
+            or "select(Player).where(Player.steam_id == steam_id)" not in "".join(lines[ident + 3:ident + 4]):
         out.append("(e) the deletion's statements after its first identity key: %s"
-                   % (None if ident is None else [ln[:90] for ln in lines[ident:ident + 3]]))
+                   % (None if ident is None else [ln[:90] for ln in lines[ident:ident + 4]]))
     if sum(ln == exclusive for ln in lines) != 1:
         out.append("(e) the deletion's key statement stands %d times" % sum(ln == exclusive for ln in lines))
     return out
@@ -628,6 +632,14 @@ def test_census_only_the_four_routes_and_the_deletion_take_the_deletion_key():
     """The census row of the module docstring, over backend/api as it stands."""
     assert _deletion_key_census(_api_sources()) == []
 
+
+# The deletion's key statement and the ban read after it, as main.py writes them.
+_DELETION_KEY_LINE = (
+    '    await db.execute(text("SELECT pg_advisory_xact_lock(" + _PLAYER_DELETION_KEY_ARGS + ")"),'
+    ' {"cls": PLAYER_DELETION_LOCK_CLASS, "sid": steam_id})\n')
+_BAN_READ_LINE = (
+    "    await _ban_gate_or_raise(db, steam_id, request)"
+    "  # every writer of a key's player_bans rows holds its identity lock to its commit\n")
 
 # Part (e)'s cases, each main.py's text with one change (old, new), red on (e).
 _ORDER_CASES = {
@@ -647,6 +659,9 @@ _ORDER_CASES = {
         '    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()\n'
         '    if player is None:\n'
         '        return {"status": "not_found", "steam_id": steam_id}'),
+    "the ban read under the two keys taken out": (_BAN_READ_LINE, ""),
+    "the ban read put before the deletion key": (
+        _DELETION_KEY_LINE + _BAN_READ_LINE, _BAN_READ_LINE + _DELETION_KEY_LINE),
 }
 
 
