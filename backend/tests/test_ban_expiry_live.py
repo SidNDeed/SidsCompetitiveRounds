@@ -324,8 +324,10 @@ async def _obs_tournament(sm, sid, pid):
             ans = await tournaments._player_id_banned(db, pid)
         finally:
             await db.rollback()
-    if isinstance(ans, bool):
-        return ans
+    # the helper answers a word: "banned", "" (may go on), or "removed" (a
+    # deleted account, which no case of this file makes)
+    if ans in ("banned", ""):
+        return ans == "banned"
     raise SiteAnswerUnexpected(("tournament_gate", ans))
 
 

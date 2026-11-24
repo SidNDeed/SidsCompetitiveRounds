@@ -468,19 +468,39 @@ async def _pick_region_for_players(db: AsyncSession, player_ids: list,
 
 # ── Helpers ───────────────────────────────────────────────────────
 
-async def _player_id_banned(db: AsyncSession, player_id) -> bool:
-    """Active-ban check by player UUID (round-18 find 2): tournaments create
-    RankedSeries rows and sct-* rooms, so they are formation surfaces under
-    the no-new-pairing-after-ban invariant. Inline query — importing main's
+async def _player_id_banned(db: AsyncSession, player_id) -> str:
+    """A non-empty answer means the caller refuses or leaves the player out:
+    `banned` (an active ban) or `removed` (the account was deleted); the
+    empty string means the player may go on. Round-18 find 2: tournaments
+    create RankedSeries rows and sct-* rooms, so they are formation surfaces
+    under the no-new-pairing-after-ban invariant.
+
+    ONE statement reads the players row by id: its
+    deletion mark (deleted_at) beside the ban word of the steam id that same
+    row carries, so the mark and the ban come from one snapshot. A caller
+    holds an id read in an earlier statement, and the account deletion
+    rewrites the row in place (steam_id `deleted_<hex>`, deleted_at set):
+    a ban join on that row alone finds no ban and would read "may go on".
+    `removed` is said whenever the mark stands, whatever ban stands
+    or stood under the account's former id. `player_id` None, or no row by
+    that id: the empty string, as before. Inline query: importing main's
     helper would be circular. "Active" is the one definition,
     models.player_ban_active_sql: a ban past its end reads as lifted."""
     if player_id is None:
-        return False
+        return ""
     row = (await db.execute(text(
-        "SELECT 1 FROM player_bans pb JOIN players p ON p.steam_id = pb.steam_id"
-        " WHERE p.id = :pid AND " + player_ban_active_sql("pb") + " LIMIT 1"
-    ), {"pid": player_id})).scalar()
-    return row is not None
+        "SELECT p.deleted_at IS NOT NULL AS removed,"
+        " EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = p.steam_id"
+        " AND " + player_ban_active_sql("pb") + ") AS banned"
+        " FROM players p WHERE p.id = :pid"
+    ), {"pid": player_id})).mappings().first()
+    if row is None:
+        return ""
+    if row["removed"]:
+        return "removed"
+    if row["banned"]:
+        return "banned"
+    return ""
 
 
 # ONE eligibility domain for a tournament's quorum (Discord fix round 4, fix
@@ -1968,11 +1988,15 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # Round-18 find 2: a ban during the bracket phase becomes a FORFEIT
         # right here, before this match can mint a series/sct-* room — the
         # existing forfeit machinery then advances the opponent exactly as
-        # for a no-show.
+        # for a no-show. A removed account (_player_id_banned answers
+        # `removed`) is forfeited the same way; the log names the word.
         for _sig in (p1_sig, p2_sig):
-            if _sig is not None and not _sig.forfeited                     and await _player_id_banned(db, _sig.player_id):
+            if _sig is None or _sig.forfeited:
+                continue
+            _left_out = await _player_id_banned(db, _sig.player_id)
+            if _left_out:
                 _sig.forfeited = True
-                print(f"[TOURNAMENT] activation: banned signup {_sig.id} forfeited")
+                print(f"[TOURNAMENT] activation: {_left_out} signup {_sig.id} forfeited")
         p1_ff = p1_sig is not None and p1_sig.forfeited
         p2_ff = p2_sig is not None and p2_sig.forfeited
         if p1_ff and not p2_ff and m.p2_signup_id:
@@ -4144,8 +4168,10 @@ async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: date
     # version disabled the in-play grace for BOTH seats, letting a 120s
     # heartbeat gap (crash/relaunch — the case the grace exists for)
     # double-forfeit the innocent leader.
-    p1_banned = p1 is not None and await _player_id_banned(db, p1.player_id)
-    p2_banned = p2 is not None and await _player_id_banned(db, p2.player_id)
+    # A removed account (`removed`) is treated as a banned one; bool() keeps
+    # the comparison below about refused-or-not, whichever word each seat got.
+    p1_banned = p1 is not None and bool(await _player_id_banned(db, p1.player_id))
+    p2_banned = p2 is not None and bool(await _player_id_banned(db, p2.player_id))
     if p1_banned != p2_banned:
         # Round-24 find 1: re-check AFTER observing the ban — ban-visible
         # implies any deciding series committed first (shared identity-
@@ -4626,8 +4652,12 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest,
     import main as _main
     await _main._reread_player_or_404(db, player.id)
     # Round-18 find 2: banned players cannot sign up — the bracket would
-    # otherwise pair them into new series/rooms after the ban.
-    if await _player_id_banned(db, player.id):
+    # otherwise pair them into new series/rooms after the ban. A removed
+    # account gets the re-read's own answer for a row that is not there.
+    _left_out = await _player_id_banned(db, player.id)
+    if _left_out == "removed":
+        raise HTTPException(status_code=404, detail="Player not found")
+    if _left_out:
         raise HTTPException(status_code=409, detail="Banned players cannot sign up")
     # Discord linkage is required so the bot can DM match-ready notifications
     # + role-ping for tournament matches. The earlier hotfix that dropped this
@@ -5095,8 +5125,12 @@ async def force_vote(tournament_id: uuid.UUID, req: TournamentForceVoteRequest,
         raise HTTPException(status_code=400, detail="Must sign up to vote")
     # Fence r3 find 4 sibling: a banned entrant is outside the quorum the
     # trigger counts (_eligible_entrant_ids), so its force vote is refused
-    # rather than stored as a row nothing reads.
-    if await _player_id_banned(db, player.id):
+    # rather than stored as a row nothing reads. A removed account gets
+    # _get_player_by_steam's own answer for a row that is not there.
+    _left_out = await _player_id_banned(db, player.id)
+    if _left_out == "removed":
+        raise HTTPException(status_code=404, detail="Player not found")
+    if _left_out:
         raise HTTPException(status_code=409, detail="Banned players cannot vote")
     stmt = pg_insert(TournamentForceVote).values(
         tournament_id=tournament_id, player_id=player.id,
