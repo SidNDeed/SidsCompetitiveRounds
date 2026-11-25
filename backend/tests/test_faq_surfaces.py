@@ -341,9 +341,13 @@ _ITEM_ANCHORS = ("backend/tests/test_faq_surfaces.py",
 # the bullet's last sentence. Those are that lane's and ship under its
 # review; they are not this item's to sweep or to hand back. A named commit
 # must be one the log lists, so the record cannot outlive the commit it names.
+# ALT-BAN-1's sentence commit (the third) changed only this module's docstring
+# beside its own files (alt_signals.py, the disclosure map and its test, the
+# bot's answer, docs/FAQ.md): that lane's, under its review.
 _OTHER_LANE_COMMITS = (
     "f683d3440dc006981401d5637204767523f6809d",
     "7675e46c7b78c207b72407c1310cb59d6ad908e7",
+    "6fd013f79bc618daf6c7f970cb9d87df5445ad79",
 )
 
 # A DRIVE-LETTER PATH, any of them and not only one under a home directory: a

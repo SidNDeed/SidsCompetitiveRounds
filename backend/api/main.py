@@ -8228,8 +8228,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
-                              alt_signals_build=_ALT_SIGNALS_BUILD,
-                              alt_signals_key=_alt_signals.key_word(),
+                              alt_signals_build=_ALT_SIGNALS_BUILD, alt_ban_build=_ALT_BAN_BUILD,
+                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await asyncio.to_thread(_geo_region.file_word),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -8309,8 +8309,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
-                              alt_signals_build=_ALT_SIGNALS_BUILD,
-                              alt_signals_key=_alt_signals.key_word(),
+                              alt_signals_build=_ALT_SIGNALS_BUILD, alt_ban_build=_ALT_BAN_BUILD,
+                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await asyncio.to_thread(_geo_region.file_word),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -88881,3 +88881,23 @@ _REVIEW_CALIBRATE_BUILD = 1
 # the end of the module, so nothing above it in main.py moves; the health route
 # reads it at request time.
 _BAN_ANSWERS_BUILD = 1
+
+
+# ── ALT-BAN-1: the region reader and the build marker ────────────────────────
+# The region reader (geo_region.py: our own reader of the region file mounted
+# read-only at /app/private/geo). main reaches it only by its two attributes,
+# _geo_region.region_of(host) and _geo_region.file_word(), each call run in a
+# thread; never by importing its names. Imported here, at the end of the
+# module, so nothing above it in main.py moves: the health route and the
+# recording read the name at call time.
+import geo_region as _geo_region  # noqa: E402
+# Release-train verification plumbing, not a design mechanism: 1 = this build
+# carries ALT-BAN-1 (the region reader, and the recording of a verified
+# connection of an account under an active ban, kept while the ban stands),
+# reported on /health as `alt_ban_build`, beside `ban_region_file`
+# (geo_region.file_word(): 'absent', 'refused' or the file's build month). It
+# names build identity only (learnings 780, 794, 1186). A code constant, equal
+# on both boxes by construction, probed by the release train and read by
+# nothing else (#306). Absent on any build before it. Defined at the end of the
+# module, so nothing above it in main.py moves.
+_ALT_BAN_BUILD = 1

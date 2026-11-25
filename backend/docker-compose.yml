@@ -178,6 +178,12 @@ services:
       # conn_ranges=absent and every post's class is `unknown`. The api never
       # fetches a list; staging one is an operator step.
       - ${SCR_RANGES_DIR:-/opt/competitive-rounds/private/ranges}:/app/private/ranges:ro
+      # The region file (geo_region.py, ALT-BAN-1): staged per box as
+      # /opt/competitive-rounds/private/geo/region.mmdb, a new file written
+      # beside it and RENAMED over it, the PARENT mounted READ-ONLY. With
+      # nothing staged /health reads ban_region_file=absent and no region is
+      # kept. The api never fetches the file; staging it is an operator step.
+      - ${SCR_GEO_DIR:-/opt/competitive-rounds/private/geo}:/app/private/geo:ro
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:

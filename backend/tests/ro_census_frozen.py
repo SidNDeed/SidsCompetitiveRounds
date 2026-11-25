@@ -4105,3 +4105,17 @@ FROZEN_COUNT = FROZEN_COUNT + ALT_SIGNALS_COUNT
 # The complete layer's two keyed tables cover every CENSUS_FILES entry too.
 COMPLETE_FROZEN.setdefault('api/alt_signals.py#complete', [])
 R10_FROZEN.setdefault('api/alt_signals.py#complete', [])
+# ALT-BAN-1 (24 Nov 2026): api/geo_region.py joins CENSUS_FILES (main.py
+# imports it). Its forms, reviewed by hand and measured by ro_census.file_forms:
+# none in either layer (it imports datetime, ipaddress, os and stat under
+# private names and opens one local file read-only by os.open; no driver,
+# engine, session, URL or connection opener). The derivation: 904 + 0 = 904.
+# Frozen by hand as two empty entries, so a form that appears in it later is a
+# '+' row of the diff.
+GEO_REGION_FROZEN = {'api/geo_region.py': [], 'api/geo_region.py#complete': []}
+GEO_REGION_COUNT = 0
+for _k, _v in GEO_REGION_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = FROZEN_COUNT + GEO_REGION_COUNT
+COMPLETE_FROZEN.setdefault('api/geo_region.py#complete', [])
+R10_FROZEN.setdefault('api/geo_region.py#complete', [])

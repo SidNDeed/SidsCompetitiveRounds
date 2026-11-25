@@ -360,6 +360,12 @@ def _lane_files():
     files += [BACKEND / "api" / "alt_signals.py", BACKEND / "sql" / "427_alt_signals.sql",
               BACKEND / "sql" / "rollback_427_alt_signals.sql",
               BACKEND / "tests" / "fixtures" / "alt_signals_disclosure.json"]
+    # ALT-BAN-1: its migration, the region reader and its stand-in writer, and
+    # its own test files. The reader's test file is not read: it holds an
+    # unparsable address on purpose (the reader's refusal of one).
+    files += sorted((BACKEND / "tests").glob("test_alt_ban_*.py"))
+    files += [BACKEND / "sql" / "431_ban_links.sql", BACKEND / "sql" / "rollback_431_ban_links.sql",
+              BACKEND / "api" / "geo_region.py", BACKEND / "tests" / "mmdb_standin.py"]
     return files
 
 
@@ -480,8 +486,9 @@ def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_
               sum(k is ast.ClassDef for k in kinds), sum(k in (ast.Assign, ast.AnnAssign) for k in kinds))
     # 17 functions since the lane's merge of main f1460a11 (2026-11-24):
     # _alt_delete_account, the three DELETEs the deletion calls at its three
-    # places; 16 before it.
-    assert counts == (17, 2, 6), (counts, [(n, l) for n, l, _t in texts])
+    # places; 16 before it. 7 assignments since ALT-BAN-1's step 3: its build
+    # marker _ALT_BAN_BUILD at the module's end.
+    assert counts == (17, 2, 7), (counts, [(n, l) for n, l, _t in texts])
     for _name, first, text_ in texts:
         found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
                   for w, t, c in _literals("main.py", text_)]

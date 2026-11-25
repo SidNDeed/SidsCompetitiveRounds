@@ -8,6 +8,9 @@ the same text in a migration that bumps that row's `revision`.
 
 Each `## Message N` section below is one Discord message (must stay under 2000 chars).
 
+IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0: the rough region kept for a banned
+account (message 1) is read from DB-IP's file.
+
 ---
 
 ## Message 1 — Installing

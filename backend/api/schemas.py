@@ -1476,6 +1476,18 @@ class HealthResponse(BaseModel):
     # "refused" (the value set failed its check): alt_signals.key_word(). The
     # id only, never the key. In memory, so both arms answer it. No default.
     alt_signals_key: str
+    # alt_ban_build: release-train verification plumbing, not a design
+    # mechanism (main._ALT_BAN_BUILD; 1 = this build carries ALT-BAN-1: the
+    # region reader, and the recording of a verified connection of an account
+    # under an active ban, kept while the ban stands). Build identity only. A
+    # code constant, equal on both roles by construction. Probed by the release
+    # train and read by nothing else (#306). No default. Absent before it.
+    alt_ban_build: int
+    # ban_region_file: geo_region.file_word(): "absent" (no file staged),
+    # "refused" (the staged one failed a check) or the file's build month
+    # (YYYY-MM, UTC). Nothing of the file's records. Read in a thread on both
+    # arms. No default.
+    ban_region_file: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
