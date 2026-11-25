@@ -17281,9 +17281,9 @@ async def _alt_delete_account(db: AsyncSession, steam_id: str) -> None:
 
 
 # -- Alternate-account signals: the retention pass (CHEAT-ALT-1 R4, design 6) --
-# Every row of the three tables is gone no later than DEADLINE_DAYS after its
-# own last sight (last_at for a marker row, last_seen_at for a share row and
-# for the facts row). A row is due DUE_DAYS after it. One pass an hour takes
+# Every row of the three tables is gone no later than DEADLINE_DAYS after its own last sight (last_at for a
+# marker row, last_seen_at for a share row and for the facts row), or after the end of an active ban of its
+# account (ALT-BAN-1: kept while it stands, F4). A row is due DUE_DAYS after it. One pass an hour takes
 # every due row: rounds of batches, one batch per table per round, each batch
 # its own short transaction under the pass's own limits; a table is finished
 # when a batch takes fewer than PASS_BATCH rows; the budget is checked after
@@ -17298,7 +17298,7 @@ async def _alt_limits(db: AsyncSession, lock_ms: int, statement_ms: int) -> None
 
 
 async def _alt_retention_batch(db: AsyncSession, table: str, at=None) -> int:
-    """One batch of the pass on one table ('markers', 'shares' or 'facts'),
+    """One batch of the pass on one table ('markers', 'shares', 'facts'; 'regions', 'notices': ALT-BAN-1),
     as its own transaction: the pass's limits, then up to PASS_BATCH due rows
     deleted, oldest first, rows another transaction holds skipped; commit.
     `at` is the instant a row's age is counted to (None: the server's now()).
@@ -17311,8 +17311,8 @@ async def _alt_retention_batch(db: AsyncSession, table: str, at=None) -> int:
             " WHERE (steam_id, day, key_id, addr_mark) IN ("
             " SELECT x.steam_id, x.day, x.key_id, x.addr_mark FROM conn_markers x"
             " WHERE x.last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
-            " ORDER BY x.last_at LIMIT CAST(:batch AS integer)"
-            " FOR UPDATE SKIP LOCKED)"
+            " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_at LIMIT CAST(:batch AS integer) FOR UPDATE OF x SKIP LOCKED)"
             " RETURNING 1"), bind)
     elif table == "shares":
         res = await db.execute(text(
@@ -17320,8 +17320,8 @@ async def _alt_retention_batch(db: AsyncSession, table: str, at=None) -> int:
             " WHERE (steam_id, key_id, owner_mark) IN ("
             " SELECT x.steam_id, x.key_id, x.owner_mark FROM steam_family_shares x"
             " WHERE x.last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
-            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer)"
-            " FOR UPDATE SKIP LOCKED)"
+            " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer) FOR UPDATE OF x SKIP LOCKED)"
             " RETURNING 1"), bind)
     elif table == "facts":
         res = await db.execute(text(
@@ -17329,11 +17329,11 @@ async def _alt_retention_batch(db: AsyncSession, table: str, at=None) -> int:
             " WHERE steam_id IN ("
             " SELECT x.steam_id FROM steam_signin_facts x"
             " WHERE x.last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
-            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer)"
-            " FOR UPDATE SKIP LOCKED)"
+            " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer) FOR UPDATE OF x SKIP LOCKED)"
             " RETURNING 1"), bind)
     else:
-        raise ValueError(table)
+        res = await _ban_retention_batch(db, table, bind)
     n = len(res.all())
     await db.commit()
     return n
@@ -17345,29 +17345,27 @@ async def _alt_retention_left(db: AsyncSession, at=None) -> dict:
     await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
     row = (await db.execute(text(
         "SELECT (SELECT count(*) FROM conn_markers"
-        " WHERE last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))),"
-        " (SELECT count(*) FROM steam_family_shares"
-        " WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))),"
-        " (SELECT count(*) FROM steam_signin_facts"
-        " WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer)))"),
+        " WHERE last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
+        " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = conn_markers.steam_id AND " + player_ban_active_sql("pb") + ")" "),"
+        " (SELECT count(*) FROM steam_family_shares WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now())"
+        " - make_interval(days => CAST(:days AS integer))" " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = steam_family_shares.steam_id AND " + player_ban_active_sql("pb") + ")" "),"
+        " (SELECT count(*) FROM steam_signin_facts WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now())"
+        " - make_interval(days => CAST(:days AS integer))" " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = steam_signin_facts.steam_id AND " + player_ban_active_sql("pb") + ")" ")"),
         {"days": _alt_signals.DUE_DAYS, "at": at})).one()
     return {"markers": int(row[0]), "shares": int(row[1]), "facts": int(row[2])}
 
 
 async def _alt_retention_pass(session_factory=None, at=None) -> dict:
-    """One pass (design 6.3). Each batch runs in its own session from
-    `session_factory` (the app's sessions by default); `at` is the instant
-    ages are counted to (None: the server's now(), as in production). A
-    batch that fails ends the batches. Unless it is cancelled, the pass then
-    counts the due rows left in a session and under limits of their own, says
-    what it deleted per table, and says the rows left when the count is read
-    and any are, or that they were not counted when the count fails; then it
-    raises a failed batch's exception. A cancelled pass re-raises and prints nothing."""
+    """One pass (design 6.3). Each batch runs in its own session from `session_factory` (the app's sessions by
+    default); `at` is the instant ages are counted to (None: the server's now(), as in production). A batch that
+    fails ends the batches. Unless cancelled, the pass then counts the due rows left in a session and under limits
+    of their own, says what it deleted per table (ALT-BAN-1's two arms in "ban"), and the rows left when counted
+    and any are, or that they were not counted; then raises a failed batch's. A cancelled pass prints nothing."""
     if session_factory is None:
         from database import async_session as session_factory
     t0 = time.monotonic()
-    deleted = {"markers": 0, "shares": 0, "facts": 0}
-    todo = ["markers", "shares", "facts"]
+    deleted = {"markers": 0, "shares": 0, "facts": 0, "regions": 0, "notices": 0}
+    todo = list(deleted)
     batches = 0
     failed = None
     try:
@@ -17386,10 +17384,11 @@ async def _alt_retention_pass(session_factory=None, at=None) -> dict:
         raise
     except Exception as ex:
         failed = ex
-    left, left_failed = None, None
+    left, left_failed, ban_left = None, None, None
     try:
         async with session_factory() as db:
             left = await _alt_retention_left(db, at)
+            ban_left = await _ban_retention_left(db)
     except asyncio.CancelledError:
         raise
     except Exception as ex:
@@ -17398,6 +17397,7 @@ async def _alt_retention_pass(session_factory=None, at=None) -> dict:
             if failed is not None else "[ALT-RETENTION] pass: deleted")
     _alt_print("%s markers %d, shares %d, facts %d in %d batch(es)"
                % (head, deleted["markers"], deleted["shares"], deleted["facts"], batches))
+    ban = _ban_retention_said(deleted, ban_left)
     if left is None:
         _alt_print("[ALT-RETENTION] due rows left: not counted (%s)" % left_failed)
     elif any(left.values()):
@@ -17405,8 +17405,8 @@ async def _alt_retention_pass(session_factory=None, at=None) -> dict:
                    % (left["markers"], left["shares"], left["facts"]))
     if failed is not None:
         raise failed
-    return {"deleted": deleted, "left": left, "batches": batches,
-            "seconds": round(time.monotonic() - t0, 3)}
+    return {"deleted": {k: deleted[k] for k in ("markers", "shares", "facts")}, "left": left, "batches": batches,
+            "seconds": round(time.monotonic() - t0, 3), "ban": ban}
 
 
 async def alt_signals_retention_loop(clock=None) -> None:
@@ -89103,3 +89103,63 @@ async def _ban_region_store(db: AsyncSession, steam_id: str, region: str, conn_c
         " OR (SELECT count(*) FROM ban_regions x WHERE x.steam_id = CAST(:sid AS text)) < CAST(:cap AS integer)"
         " ON CONFLICT (steam_id, region, conn_class) DO UPDATE SET last_at = GREATEST(r.last_at, now())"),
         {"sid": steam_id, "rg": region, "cls": conn_class, "cap": _ALT_BAN_REGIONS_CAP})
+
+
+# -- ALT-BAN-1 step 5: the retention keeps what an active ban keeps (F4) --
+# The lane's three arms (_alt_retention_batch, _alt_retention_left) skip every
+# row of an account under an active ban, read by models.player_ban_active_sql
+# (the one definition); once the ban has ended, its rows go by their own last
+# sight. Two arms more, here: a ban_regions row goes at the first pass after
+# its account's ban has ended, whatever its age; a ban_link_notices row goes
+# when the ban of its banned side has ended or its other side has no marker
+# row left. Same batches, limits, SKIP LOCKED and budget as the lane's arms.
+
+async def _ban_retention_batch(db: AsyncSession, table: str, bind: dict):
+    """One batch of the 'regions' or 'notices' arm, in the transaction
+    _alt_retention_batch opened under the pass's limits (it commits). Returns
+    the DELETE's result."""
+    if table == "regions":
+        return await db.execute(text(
+            "DELETE FROM ban_regions"
+            " WHERE (steam_id, region, conn_class) IN ("
+            " SELECT x.steam_id, x.region, x.conn_class FROM ban_regions x"
+            " WHERE NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND "
+            + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), {"batch": bind["batch"]})
+    if table == "notices":
+        return await db.execute(text(
+            "DELETE FROM ban_link_notices"
+            " WHERE (banned_steam_id, other_steam_id) IN ("
+            " SELECT x.banned_steam_id, x.other_steam_id FROM ban_link_notices x"
+            " WHERE NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.banned_steam_id AND "
+            + player_ban_active_sql("pb") + ")"
+            " OR NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id)"
+            " ORDER BY x.noticed_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), {"batch": bind["batch"]})
+    raise ValueError(table)
+
+
+async def _ban_retention_left(db: AsyncSession) -> dict:
+    """The rows the two arms would take, read in the transaction the lane's
+    count opened under the pass's limits."""
+    row = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM ban_regions x WHERE NOT EXISTS (SELECT 1 FROM player_bans pb"
+        " WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")),"
+        " (SELECT count(*) FROM ban_link_notices x WHERE NOT EXISTS (SELECT 1 FROM player_bans pb"
+        " WHERE pb.steam_id = x.banned_steam_id AND " + player_ban_active_sql("pb") + ")"
+        " OR NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id))"))).one()
+    return {"regions": int(row[0]), "notices": int(row[1])}
+
+
+def _ban_retention_said(deleted: dict, left) -> dict:
+    """The two arms' lines and the result's "ban" part: the rows deleted, when
+    any; the rows left, when counted and any are."""
+    gone = {"regions": deleted["regions"], "notices": deleted["notices"]}
+    if any(gone.values()):
+        _alt_print("[ALT-RETENTION] ban rows: deleted regions %d, notices %d" % (gone["regions"], gone["notices"]))
+    if left is not None and any(left.values()):
+        _alt_print("[ALT-RETENTION] ban rows left: regions %d, notices %d" % (left["regions"], left["notices"]))
+    return {"deleted": gone, "left": left}

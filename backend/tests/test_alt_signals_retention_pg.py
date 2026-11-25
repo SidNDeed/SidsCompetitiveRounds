@@ -264,9 +264,11 @@ def test_due_rows_above_one_batch_all_go_in_one_pass(clean, monkeypatch, capsys)
 
     res, counts = rec._with(clean, body)
     assert counts == {k: (0, 1) for k in TABLES}, counts
-    assert res["deleted"] == {k: 20 for k in TABLES} and res["batches"] == 9, res
+    # 11 batches since ALT-BAN-1 step 5 (9 before it): its two arms (regions,
+    # notices) take one batch each, with nothing to take here.
+    assert res["deleted"] == {k: 20 for k in TABLES} and res["batches"] == 11, res
     assert res["left"] == {k: 0 for k in TABLES}, res
-    assert _pass_line(_alt_lines(capsys)) == (20, 20, 20, 9)
+    assert _pass_line(_alt_lines(capsys)) == (20, 20, 20, 11)
 
 
 @pytest.mark.parametrize("count", ["counted", "not counted"])
@@ -780,7 +782,11 @@ def test_the_pass_is_a_janitor_root_and_its_statements_are_inventoried():
             if s["module"] == "main" and s["func"] in ("_alt_retention_batch", "_alt_retention_left", "_alt_limits")]
     deletes = [q for q in mine if q.startswith("DELETE FROM ")]
     assert sorted(q.split()[2] for q in deletes) == ["conn_markers", "steam_family_shares", "steam_signin_facts"], mine
-    assert all("FOR UPDATE SKIP LOCKED" in q and "make_interval(days => CAST(:days AS integer))" in q
+    # FOR UPDATE OF x and the active-ban read since ALT-BAN-1 step 5 (F4): a
+    # banned account's rows are kept, read by models.player_ban_active_sql.
+    active = " ".join(main.player_ban_active_sql("pb").split())
+    assert all("FOR UPDATE OF x SKIP LOCKED" in q and "make_interval(days => CAST(:days AS integer))" in q
+               and "NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + active in q
                for q in deletes), deletes
     assert len([q for q in mine if q.startswith("SELECT (SELECT count(*)")]) == 1, mine
     assert len([q for q in mine if "set_config('lock_timeout'" in q]) == 1, mine

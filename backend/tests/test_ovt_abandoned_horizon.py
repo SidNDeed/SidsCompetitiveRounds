@@ -1748,10 +1748,14 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # and this lane's two declines, 43 + 2, 31 + 1, 40 + 2, 28 + 1.
     # CHEAT-ALT-1 merged onto main f1460a11 (24 Nov 2026): its three declines
     # at three sites on main's 45/32/42/29, 45 + 3, 32, 42 + 3, 29.
+    # ALT-BAN-1 (step 5): two declines at two sites more, no waiter: the
+    # retention pass's regions and notices arms (_ban_retention_batch), each a
+    # DELETE whose row read is FOR UPDATE OF x SKIP LOCKED. 48 + 2, 32, 45 + 2, 29.
     assert [r["func"] for r in census["declines"]].count("_alt_retention_batch") == 3, census["declines"]
-    assert len(census["declines"]) == 48, census["declines"]
+    assert [r["func"] for r in census["declines"]].count("_ban_retention_batch") == 2, census["declines"]
+    assert len(census["declines"]) == 50, census["declines"]
     assert len(census["waits"]) == 32, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 45, census["decline_sites"]
+    assert len(census["decline_sites"]) == 47, census["decline_sites"]
     assert len(census["wait_sites"]) == 29, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 
