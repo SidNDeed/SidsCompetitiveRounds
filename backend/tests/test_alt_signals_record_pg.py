@@ -1281,7 +1281,9 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
     assert {"_alt_retention_batch", "_alt_retention_left"} <= set(fns), sorted(fns)
     # 17 since the lane's merge of main f1460a11 (2026-11-24): _alt_delete_account,
     # the three DELETEs the deletion calls at its three places; 16 before it.
-    assert len(fns) == 17, (len(fns), sorted(fns))
+    # 21 since ALT-BAN-1 step 4: _alt_store (the upserts split out of
+    # _alt_record), _alt_ban_spacing, _alt_ban_notice_open, _alt_ban_refused.
+    assert len(fns) == 21, (len(fns), sorted(fns))
     loggers = {n for n, v in vars(main).items() if isinstance(v, logging.Logger)}
     aliases, members = _stream_bindings(Path(main.__file__).read_text(encoding="utf-8"))
     assert "*" not in members, members

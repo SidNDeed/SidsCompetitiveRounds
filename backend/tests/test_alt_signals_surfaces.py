@@ -637,8 +637,10 @@ _ORM_CLASSES = frozenset({"SteamSigninFacts", "SteamFamilyShare", "ConnMarker"})
 
 # Where the three tables may be named: the recording, account deletion, the
 # retention pass, the read function and its statement, and the ORM classes.
+# _alt_store since ALT-BAN-1 step 4: _alt_record's upserts moved into it
+# (_ban_ticket_seen calls it too); _alt_record names none of the tables since.
 _ALLOWED = {
-    ("main.py", "_alt_record"),
+    ("main.py", "_alt_store"),
     ("main.py", "_alt_delete_account"),
     ("main.py", "_alt_retention_batch"),
     ("main.py", "_alt_retention_left"),

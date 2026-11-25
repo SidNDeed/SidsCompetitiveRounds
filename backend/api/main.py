@@ -17064,12 +17064,9 @@ def _alt_notice_line() -> None:
 
 
 async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
-    """The recording's transaction, after the sign-in's commit (design 5.2):
-    its own time limits; the account's identity key exclusive with the ban
-    read under it; the tombstone read again; the notice check; the upserts,
-    each capped; commit. Raises on every refusal and every failure: the
-    route's guard ends the transaction with _alt_abandon. With no key loaded
-    it returns before any statement."""
+    """The recording's transaction after the sign-in's commit (design 5.2): limits; the identity key exclusive
+    with the ban read under it; the tombstone; the notice; _alt_store's capped upserts and commit. Raises on every
+    refusal and failure (the route's guard calls _alt_abandon); with no key loaded, returns before any statement."""
     key = _alt_signals.loaded_key()
     if key is None:
         return
@@ -17084,9 +17081,7 @@ async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
         ), {"h": _hash_steam_id(steam_id)})).scalar()
         if tombed:
             raise _AltNotRecorded("deleted")
-    # The notice check (R6): open only when exactly one message 1 row exists,
-    # the bot has posted its current revision, and it holds the disclosure.
-    # A failed read is a closed notice.
+    # The notice (R6): one message 1 row, its revision posted, holding the disclosure; a failed read is closed.
     try:
         notice = tuple((await db.execute(text(
             "SELECT count(*), count(*) FILTER (WHERE p.posted_revision = p.revision"
@@ -17098,10 +17093,14 @@ async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
         notice = None
     if notice != (1, 1):
         raise _AltNotRecorded("notice")
+    await _alt_store(db, steam_id, key, facts, seen)
+
+
+async def _alt_store(db: AsyncSession, steam_id: str, key, facts, seen, region: str = "") -> None:
+    """The capped upserts and the commit (_alt_record's; _ban_ticket_seen's, with the region of a banned account)."""
     over = False
     if facts.copy_state == "shared" and facts.owner_mark is not None:
-        # Stored when the row exists or the account holds fewer than
-        # SHARES_PER_ACCOUNT share rows; no row back means the limit refused it.
+        # Stored when the row exists or fewer than SHARES_PER_ACCOUNT stand; no row back: the limit refused it.
         stored = (await db.execute(text(
             "INSERT INTO steam_family_shares AS s (steam_id, key_id, owner_mark)"
             " SELECT CAST(:sid AS text), CAST(:kid AS text), CAST(:om AS bytea)"
@@ -17116,8 +17115,7 @@ async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
              "cap": _alt_signals.SHARES_PER_ACCOUNT})).first()
         over = over or stored is None
     if seen is not None:
-        # One row per account, UTC day, key and address; at most
-        # MARKERS_PER_DAY rows per account and day.
+        # One row per account, UTC day, key and address; at most MARKERS_PER_DAY rows per account and day.
         stored = (await db.execute(text(
             "INSERT INTO conn_markers AS c"
             " (steam_id, day, key_id, addr_mark, block_mark, family, conn_class)"
@@ -17136,6 +17134,8 @@ async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
              "fam": seen.family, "cls": seen.conn_class,
              "cap": _alt_signals.MARKERS_PER_DAY})).first()
         over = over or stored is None
+        if region:
+            await _ban_region_store(db, steam_id, region, seen.conn_class)
     # The account's row: last-ats move forward only, first-ats back only; a
     # reported value replaces the stored one only when this sign-in is not
     # older than the row's last sight; Steam reporting nothing keeps the
@@ -17260,24 +17260,24 @@ async def _alt_delete_one(db: AsyncSession, stmt, steam_id: str) -> None:
 
 
 async def _alt_delete_account(db: AsyncSession, steam_id: str) -> None:
-    # CHEAT-ALT-1 (items 11, 12): the account's rows of the three
-    # alternate-account signal tables, under the identity key. Account
-    # deletion (delete_player_data) calls this at three places. In the branch
-    # of a missing players row and in the branch of a row already deleted,
-    # each directly before that branch's commit, so an identity with no
-    # players row, or one deleted before, loses them too. For a live row
-    # directly after the pool snapshot's key and before the first personal
-    # DELETE: the deletion takes no row lock before that key (MDPL R3), and
-    # the wait for the bot's leases above it holds none another deletion
-    # needs. A retention batch skips a row this holds (SKIP LOCKED); a batch
-    # holding one of these rows ends the attempt as a held row
-    # (_DeletionRowHeld), which the bound runs again while its time allows.
+    # CHEAT-ALT-1 (items 11, 12), ALT-BAN-1: the account's rows of the three signal tables and of ban_regions
+    # and ban_link_notices (either side), under the identity key. delete_player_data calls this at three places:
+    # in the branch of a missing players row and of a row already deleted, each directly before that branch's
+    # commit; for a live row directly after the pool snapshot's key and before the first personal DELETE (the
+    # deletion takes no row lock before that key, MDPL R3, and the wait for the bot's leases holds none another
+    # deletion needs). A retention batch skips a row this holds (SKIP LOCKED); a batch holding one ends the
+    # attempt as a held row (_DeletionRowHeld), which the bound runs again while its time allows. ban_regions
+    # and ban_link_notices are kept only while a ban stands (retention, ALT-BAN-1 step 5); deletion takes them now.
     await _alt_delete_one(db, text(
         "DELETE FROM conn_markers WHERE steam_id = CAST(:sid AS text)"), steam_id)
     await _alt_delete_one(db, text(
         "DELETE FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"), steam_id)
     await _alt_delete_one(db, text(
         "DELETE FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text(
+        "DELETE FROM ban_regions WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text("DELETE FROM ban_link_notices WHERE banned_steam_id = CAST(:sid AS text)"
+                                   " OR other_steam_id = CAST(:sid AS text)"), steam_id)
 
 
 # -- Alternate-account signals: the retention pass (CHEAT-ALT-1 R4, design 6) --
@@ -17696,16 +17696,16 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db),
     # (ticket_hex='...&appid=<other>'). Runs even in key-unset no-op mode.
     if not _re.fullmatch(r"[0-9a-fA-F]+", req.ticket_hex):
         raise HTTPException(status_code=400, detail="bad_ticket")
-    # Review find: without a ban gate here, admin_ban's session revocation held
-    # only until the client's automatic re-mint ("re-minting on next
-    # heartbeat") — a banned account could immediately obtain a fresh verified
-    # session and keep using every session-gated endpoint that lacks a
-    # usage-site ban check. Bans must also stop the mint.
-    # This early read takes NO lock: the Steam call below waits up to 6 s, and
-    # an identity key held across it would hold every report that names the
-    # account for that long. A banned account is still refused here, before
-    # the call; the writing transaction below takes the key and reads again.
-    await _ban_gate_or_raise(db, req.steam_id)
+    # Bans stop the mint too (admin_ban's revocation otherwise held only until
+    # the client's automatic re-mint). This early read takes NO lock: a key held
+    # across the Steam call below would hold every report naming the account;
+    # the writing transaction takes the key and reads again. On the refusal,
+    # ALT-BAN-1's recording runs first (_alt_ban_refused); the same refusal is raised.
+    try:
+        await _ban_gate_or_raise(db, req.steam_id)
+    except HTTPException:
+        await _alt_ban_refused(db, req, request)
+        raise
     # End the read's transaction: nothing is written yet, and no transaction
     # stays open across the wait.
     await db.rollback()
@@ -88901,3 +88901,205 @@ import geo_region as _geo_region  # noqa: E402
 # nothing else (#306). Absent on any build before it. Defined at the end of the
 # module, so nothing above it in main.py moves.
 _ALT_BAN_BUILD = 1
+
+
+# -- ALT-BAN-1 (Sid's asks B7 and B8): what is kept for an account under an active ban --
+# For an account under an active ban the server records, at a sign-in that
+# Steam has verified, the lane's records (alt_signals) and the rough region of
+# the connection (country and state, migration 431's ban_regions), and keeps
+# them while the ban stands. The sign-in of a banned account is refused before
+# it asks Steam (steam_auth's early gate); on that refusal _alt_ban_refused may
+# ask Steam to verify the ticket the request already carries, spaced (at most
+# once in two seconds overall, once in ten minutes per account after an OK and
+# once a minute after anything else), with no identity key, no transaction and
+# no lock held while Steam answers, and then records through _ban_ticket_seen.
+# The refusal the client receives is the same object, whatever the recording
+# does. _ban_ticket_seen is also the one function BAN-MAIL-1's route calls
+# after its own verification; _steam_ticket_check is the Steam helper both use.
+
+_ALT_BAN_SPACE_ALL_S = 2.0       # one Steam ask overall at most every two seconds
+_ALT_BAN_SPACE_OK_S = 600.0      # per account, after Steam answered OK
+_ALT_BAN_SPACE_OTHER_S = 60.0    # per account, after any other outcome
+_ALT_BAN_LATE_S = 8.0            # no recording begins later than this after the request came in
+_ALT_BAN_STEAM_SOCKET_S = 3.0    # each socket operation of the Steam call
+_ALT_BAN_STEAM_WAIT_S = 4.0      # the whole wait for Steam's answer
+_ALT_BAN_REGION_WAIT_S = 1.0     # the whole wait for the region reader
+_ALT_BAN_REGIONS_CAP = 50        # ban_regions rows per account
+# Monotonic stamps, in this process only (the api runs one worker): the last
+# ask overall, and per account the time before which it is not asked again.
+_alt_ban_asked = {"all": None, "ids": {}}
+
+
+def _steam_ticket_url(key: str, ticket_hex: str) -> str:
+    """The ticket check's URL, as steam_auth builds it. NEVER logged: it
+    carries the Web API key."""
+    return ("https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/"
+            f"?key={key}&appid={STEAM_APPID}&ticket={ticket_hex}"
+            f"&identity={STEAM_TICKET_IDENTITY}")
+
+
+def _steam_ticket_params(body, steam_id: str):
+    """Steam's params when the answer is OK for `steam_id`, else None: the
+    predicate steam_auth applies."""
+    params = ((body or {}).get("response") or {}).get("params") or {}
+    if params.get("result") == "OK" and str(params.get("steamid") or "") == steam_id:
+        return params
+    return None
+
+
+async def _steam_ticket_check(ticket_hex, steam_id, socket_s: float = 6.0, wait_s=None):
+    """The Steam helper beside steam_auth: verify `ticket_hex` for
+    `steam_id` the way steam_auth does (the same URL, the same predicate),
+    the blocking call in a thread with `socket_s` for each socket operation
+    and, when `wait_s` is given, the whole wait cut there. Returns (params,
+    word): Steam's params and "OK", or None and a word ("no_key",
+    "bad_ticket", "not_ok", or an exception's class name). Never raises
+    but a cancellation; logs nothing."""
+    key = os.getenv("STEAM_WEB_API_KEY", "")
+    if not key:
+        return None, "no_key"
+    if not isinstance(ticket_hex, str) or not _re.fullmatch(r"[0-9a-fA-F]+", ticket_hex):
+        return None, "bad_ticket"
+    try:
+        call = asyncio.to_thread(_steam_http_get_json, _steam_ticket_url(key, ticket_hex), socket_s)
+        body = await (asyncio.wait_for(call, wait_s) if wait_s is not None else call)
+        params = _steam_ticket_params(body, str(steam_id))
+    except Exception as ex:
+        return None, type(ex).__name__
+    return (params, "OK") if params is not None else (None, "not_ok")
+
+
+def _alt_ban_spacing(steam_id: str, now: float, take: bool) -> bool:
+    """True when both spacings are free for `steam_id` at `now`; with
+    `take`, stamps both in the same call (no await between the check and
+    the stamp, so two requests cannot both pass). Stamps that have run out
+    are dropped first, so the table holds only accounts asked for in the
+    last ten minutes."""
+    ids = _alt_ban_asked["ids"]
+    for k in [k for k, until in ids.items() if until <= now]:
+        del ids[k]
+    last = _alt_ban_asked["all"]
+    if (last is not None and now - last < _ALT_BAN_SPACE_ALL_S) or steam_id in ids:
+        return False
+    if take:
+        _alt_ban_asked["all"] = now
+        ids[steam_id] = now + _ALT_BAN_SPACE_OK_S
+    return True
+
+
+async def _alt_ban_notice_open(db: AsyncSession) -> bool:
+    """The notice check with both sentences: exactly one FAQ message 1 row,
+    its current revision posted, holding alt_signals.NOTICE_BAN (the lane's
+    paragraph and the sentence for a banned account). A failed read is a
+    closed notice."""
+    try:
+        notice = tuple((await db.execute(text(
+            "SELECT count(*), count(*) FILTER (WHERE p.posted_revision = p.revision"
+            " AND strpos(p.content, CAST(:sentence AS text)) > 0)"
+            " FROM pending_channel_posts p"
+            " WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1"),
+            {"sentence": _alt_signals.NOTICE_BAN, "ch": _ALT_FAQ_CHANNEL})).one())
+    except Exception:
+        return False
+    return notice == (1, 1)
+
+
+async def _alt_ban_refused(db: AsyncSession, req, request) -> None:
+    """steam_auth's early ban refusal, before the refusal is raised: for a
+    banned account, ask Steam to verify the ticket the request carries and
+    record through _ban_ticket_seen. In this order: memory only (a signal
+    key loaded, STEAM_WEB_API_KEY set, both spacings free); the notice read
+    in the route's open read transaction; that transaction rolled back, so
+    nothing is held from here on; the spacings checked again and stamped;
+    Steam asked (3 s a socket operation, 4 s in all); the account's stamp
+    set to ten minutes after an OK and to one minute after anything else;
+    no recording when more than 8 s have passed since this function was
+    entered. Lets no Exception out; its lines carry a word only."""
+    entered = time.monotonic()
+    try:
+        sid = str(req.steam_id)
+        if _alt_signals.loaded_key() is None or not os.getenv("STEAM_WEB_API_KEY", ""):
+            return
+        if not _alt_ban_spacing(sid, time.monotonic(), take=False):
+            return
+        if not await _alt_ban_notice_open(db):
+            return
+        await db.rollback()
+        if not _alt_ban_spacing(sid, time.monotonic(), take=True):
+            return
+        params, word = await _steam_ticket_check(req.ticket_hex, sid, _ALT_BAN_STEAM_SOCKET_S,
+                                                 _ALT_BAN_STEAM_WAIT_S)
+        _alt_ban_asked["ids"][sid] = time.monotonic() + (
+            _ALT_BAN_SPACE_OK_S if params is not None else _ALT_BAN_SPACE_OTHER_S)
+        if params is None:
+            _alt_print("[ALT-BAN] not verified: %s" % word)
+            return
+        if time.monotonic() - entered > _ALT_BAN_LATE_S:
+            _alt_print("[ALT-BAN] not recorded: late")
+            return
+        await _ban_ticket_seen(db, request, sid, params)
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _alt_print("[ALT-BAN] not recorded: %s" % type(ex).__name__)
+
+
+async def _ban_ticket_seen(db: AsyncSession, request, steam_id: str, steam_params) -> None:
+    """The one recording of a verified connection of an account under an
+    active ban (F3), for steam_auth's refusal and BAN-MAIL-1's route, each
+    after its own Steam verification and with no transaction open on `db`
+    (an open one is left as it is and nothing is recorded: the line says
+    `open`). Without a lock: the key, the connecting address, Steam's fields,
+    the marks, and the region (geo_region.region_of in a thread, cut at 1 s,
+    "" on anything else; only for an address the lane marks). Then one
+    transaction: the lane's limits; the account's identity key EXCLUSIVE as
+    its first lock; the active ban read under it (none: not recorded); the
+    notice check with both sentences; the lane's upserts and the region's
+    (_alt_store); commit. A deleted account under an active ban is recorded
+    like any other. Lets no Exception out (_alt_abandon)."""
+    if db.in_transaction():
+        _alt_print("[ALT-BAN] not recorded: open")
+        return
+    try:
+        key = _alt_signals.loaded_key()
+        if key is None:
+            return
+        host = _rl_client_address(request) if request is not None else None
+        facts = _alt_signals.steam_fields(steam_params, steam_id, key)
+        seen = _alt_signals.observe(host, key, _conn_ranges.classify_address, _conn_ranges.CR_LAN_NETS)
+        region = ""
+        if seen is not None:
+            try:
+                region = await asyncio.wait_for(asyncio.to_thread(_geo_region.region_of, host),
+                                                _ALT_BAN_REGION_WAIT_S)
+            except Exception:
+                region = ""
+            region = region if isinstance(region, str) else ""
+        await _alt_limits(db, _alt_signals.RECORD_LOCK_TIMEOUT_MS, _alt_signals.RECORD_STATEMENT_TIMEOUT_MS)
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+        banned = (await db.execute(text(
+            "SELECT 1 FROM player_bans pb WHERE pb.steam_id = CAST(:sid AS text) AND "
+            + player_ban_active_sql("pb") + " LIMIT 1"), {"sid": steam_id})).scalar()
+        if banned is None:
+            raise _AltNotRecorded("not_banned")
+        if not await _alt_ban_notice_open(db):
+            raise _AltNotRecorded("notice")
+        await _alt_store(db, steam_id, key, facts, seen, region)
+    except Exception as ex:
+        await _alt_abandon(db, ex)
+
+
+async def _ban_region_store(db: AsyncSession, steam_id: str, region: str, conn_class: str) -> None:
+    """The region's upsert in the recording's transaction: one row per
+    account, region and class, stored when the row stands or the account
+    holds fewer than _ALT_BAN_REGIONS_CAP rows; last_at moves forward only."""
+    await db.execute(text(
+        "INSERT INTO ban_regions AS r (steam_id, region, conn_class)"
+        " SELECT CAST(:sid AS text), CAST(:rg AS text), CAST(:cls AS varchar)"
+        " WHERE EXISTS (SELECT 1 FROM ban_regions x WHERE x.steam_id = CAST(:sid AS text)"
+        " AND x.region = CAST(:rg AS text) AND x.conn_class = CAST(:cls AS varchar))"
+        " OR (SELECT count(*) FROM ban_regions x WHERE x.steam_id = CAST(:sid AS text)) < CAST(:cap AS integer)"
+        " ON CONFLICT (steam_id, region, conn_class) DO UPDATE SET last_at = GREATEST(r.last_at, now())"),
+        {"sid": steam_id, "rg": region, "cls": conn_class, "cap": _ALT_BAN_REGIONS_CAP})

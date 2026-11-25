@@ -487,8 +487,11 @@ def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_
     # 17 functions since the lane's merge of main f1460a11 (2026-11-24):
     # _alt_delete_account, the three DELETEs the deletion calls at its three
     # places; 16 before it. 7 assignments since ALT-BAN-1's step 3: its build
-    # marker _ALT_BAN_BUILD at the module's end.
-    assert counts == (17, 2, 7), (counts, [(n, l) for n, l, _t in texts])
+    # marker _ALT_BAN_BUILD at the module's end. 21 functions and 16
+    # assignments since its step 4: _alt_store (split out of _alt_record),
+    # _alt_ban_spacing, _alt_ban_notice_open, _alt_ban_refused; the eight
+    # _ALT_BAN_* spacings, limits and cap, and the stamps _alt_ban_asked.
+    assert counts == (21, 2, 16), (counts, [(n, l) for n, l, _t in texts])
     for _name, first, text_ in texts:
         found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
                   for w, t, c in _literals("main.py", text_)]
