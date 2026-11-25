@@ -44,8 +44,10 @@
 -- under the pinned search path, naming another table; a column of one of the
 -- three names whose type is another (compared by type oid); a constraint
 -- named ck_player_bans_details_len that is not the validated CHECK this file
--- adds (compared by its deparsed text); a read-only session (the lock is the
--- first write and fails inside the transaction).
+-- adds (compared by its deparsed text). A read-only session refuses a run
+-- that has to alter: the run fails inside its transaction, at the ACCESS
+-- EXCLUSIVE lock or at the first ALTER after it, and nothing is applied. A
+-- complete re-run takes no lock, reads the catalog and changes nothing.
 --
 -- THE SESSION'S SETTINGS (as 418 and 420). The transaction is READ COMMITTED
 -- whatever the session brought. The search path is pinned at the head of the
