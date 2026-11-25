@@ -5,8 +5,8 @@
 -- ORDER: the api that names the columns goes first (deploy the previous api,
 -- or the ban list, the ban writer, the details route and the account deletion
 -- fail on the missing columns). The kept names and the details texts go with
--- the columns; each change of a text stays in its ban_details record of the
--- moderator log.
+-- the columns; no record of the moderator log holds either (a ban_details
+-- record holds the ban's id and the word of each change, never a text).
 --
 -- Each drop is guarded on the catalog, so a rerun after a successful rollback
 -- takes no lock and changes nothing. A column of one of the three names is

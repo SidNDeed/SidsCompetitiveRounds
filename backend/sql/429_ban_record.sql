@@ -24,8 +24,9 @@
 -- earlier api names, and a CHECK every NULL passes), so it may land any time
 -- before the api.
 -- ROLLBACK ORDER: the previous api first, then rollback_429_ban_record.sql
--- (the kept names and the details texts go with the columns; each change of
--- a text stays in its ban_details record of the moderator log).
+-- (the kept names and the details texts go with the columns; no record of
+-- the moderator log holds either: a ban_details record holds the ban's id
+-- and the word of each change, never a text).
 --
 -- RE-RUNS. The first read takes no lock: when the three columns stand with
 -- their types and the CHECK stands as this file adds it, the DO changes
