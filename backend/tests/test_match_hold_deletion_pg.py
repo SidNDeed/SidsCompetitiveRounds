@@ -590,3 +590,23 @@ def test_fix1_h4_receipt_identity_wait_is_bounded(monkeypatch, mode):
         retried = await reports_test.post_report(mode, s, reporter, g)
         assert retried.status_code == 202, ("FIX1 H4 receipt retry", mode, retried.text)
     hold_test.run_env(monkeypatch, body, prefix="fix1h4bound")
+
+
+@pytest.fixture(autouse=True)
+def _seed_players_in_id_domain(monkeypatch):
+    """The account deletion acts only on an id main._mod_target_ok admits, and the shared
+    seeder's ids ("s2" and hex) are outside that domain, so this module's accounts get "22"
+    and twelve decimal digits. This fixture goes when hold_test.seed_players makes such ids."""
+
+    async def seed_players(conn, n):
+        out = []
+        for _ in range(n):
+            steam = "22" + "%012d" % (uuid.uuid4().int % 10 ** 12)
+            assert main._mod_target_ok(steam), steam
+            pid = await conn.fetchval(
+                "INSERT INTO players (steam_id, display_name) VALUES ($1, $2) RETURNING id",
+                steam, "rjs2 " + steam[-4:])
+            out.append((pid, steam))
+        return out
+
+    monkeypatch.setattr(hold_test, "seed_players", seed_players)

@@ -132,7 +132,13 @@ def _census_line(rows):
 # lock_timeout statement, main._player_deletion_key_shared_bounded:88115 (named _identity_key_shared_bounded until
 # round mdplg-r2, which measured the line unchanged); "bounded": every text the statement can send is known, a word
 # about its text and nothing about a wait; remaining 8 -> 11 by the counting program's three places (J13 to J15).
-CENSUS_LINE = {"bounded": 26, "expanded": 122, "judged": 4, "read": 107, "remaining": 11}
+# BAN-RECORD-1 (RULING-BAN-RECORD-R1 7.3, J03), measured by _measure at a9c1ac01 and at the fix tip, 270 rows each:
+# bounded 26 -> 27 and expanded 122 -> 121, both by 247d6bb6. The details route's UPDATE, main.admin_ban_details
+# (POST /api/v1/admin/ban/details), is a new place, bounded: its SET list is built from literals alone. The admin
+# list, main.admin_list_bans (GET /api/v1/admin/banned-users), reads its count and its page in ONE statement
+# (_BAN_LIST_SQL.format, bounded) where it sent an expanded count and a bounded page. tournaments._player_id_banned's
+# one statement (73bc3072) stays read. J03 read the same line at 73edff39; the fix moved no value.
+CENSUS_LINE = {"bounded": 27, "expanded": 121, "judged": 4, "read": 107, "remaining": 11}
 
 
 def test_the_census_line_is_as_measured(base):

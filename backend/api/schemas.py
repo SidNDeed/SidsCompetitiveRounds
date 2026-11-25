@@ -1396,6 +1396,16 @@ class HealthResponse(BaseModel):
     # release train and read by nothing else (#306). No default, as above.
     # Absent on any build before it.
     ban_answers_build: int
+    # ban_record_build: release-train verification plumbing, not a design
+    # mechanism (main._BAN_RECORD_BUILD; 1 = in this build a ban keeps the
+    # account's name and the moderators' details, the admin list answers them,
+    # POST /api/v1/admin/ban/details writes them and the account deletion
+    # clears them). It names build identity only. A code constant, equal on
+    # both roles by construction, so the train can read it through the edge;
+    # this is the key that tells a stale box from a refreshed one (learnings
+    # 780, 794, 1186). Probed by the release train and read by nothing else
+    # (#306). No default, as above. Absent on any build before it.
+    ban_record_build: int
     # bot_text_build: release-train verification plumbing, not a design
     # mechanism (main._BOT_TEXT_BUILD; 1 = in this build typed text in the
     # api's Discord posts and DMs and in the bot's messages passes one helper

@@ -75,6 +75,16 @@ ALLOWED = {
            " clock read), which reads no row"),
     ("models.py", "PlayerBan"): (
         1, "__tablename__ of the model itself"),
+    # BAN-RECORD-1 (migration 429): the ban record's two writers.
+    ("main.py", "admin_ban_details"): (
+        2, "the details route reads ONE ban row BY ID after the definition chose it (_active_ban_details, under"
+           " the identity lock), and writes that row's texts by id"),
+    # BAN-RECORD-1 FIX N1 (RULING-BAN-RECORD-R1): 2 -> 1. The second statement, which cleared the texts of
+    # the ban_details records, went with N1: a ban_details record holds the ban's id and the word of each
+    # change, never a text.
+    ("main.py", "_ban_record_forget"): (
+        1, "the account deletion clears the kept name and the details of EVERY ban row of the account,"
+           " whatever each ban's state"),
 }
 # ORM uses of the PlayerBan model: (module, qualname) -> (uses, reason). None
 # since the cap ruling: the writer inserts by SQL (main._apply_ban_core).

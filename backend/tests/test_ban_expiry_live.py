@@ -324,8 +324,10 @@ async def _obs_tournament(sm, sid, pid):
             ans = await tournaments._player_id_banned(db, pid)
         finally:
             await db.rollback()
-    if isinstance(ans, bool):
-        return ans
+    # the helper answers a word: "banned", "" (may go on), or "removed" (a
+    # deleted account, which no case of this file makes)
+    if ans in ("banned", ""):
+        return ans == "banned"
     raise SiteAnswerUnexpected(("tournament_gate", ans))
 
 
@@ -467,7 +469,7 @@ async def _obs_recent_bans(sm, sid, pid):
 async def _obs_h2h_is_banned(sm, sid, pid):
     async with sm() as db:
         try:
-            ans = (await main._h2h_profile_block(db, pid)).is_banned
+            ans = (await main._h2h_profile_block(db, pid, sid)).is_banned
         finally:
             await db.rollback()
     if isinstance(ans, bool):
@@ -904,12 +906,15 @@ def test_t5_old_clients_and_the_key_order_of_every_changed_answer(case, admin_op
                      "ban_expires_at": None, "ban_seconds_left": None}
     assert list(unreg) == ["registered", "ranked", "banned", "ban_reason", "ban_expires_at", "ban_seconds_left"]
     # banned-users: the row's whole key order, and the 1.41.0 parse is unchanged by the two keys
+    # (and by BAN-RECORD-1's ten after them, CONTRACT-BAN-1124 point 1)
     listed = out["list"]
     assert list(listed) == ["bans", "total", "limit", "offset"] and len(listed["bans"]) == 1, listed
     row = listed["bans"][0]
+    record_keys = ["account", "name_kept", "banned_by_name", "details", "details_at", "details_by_name",
+                   "region", "region_at", "regions", "links"]
     assert list(row) == ["id", "steam_id", "display_name", "reason", "banned_by_steam_id", "banned_at",
-                         "expires_at", "seconds_left"], row
-    stripped = dict(listed, bans=[{k: v for k, v in r.items() if k not in ("expires_at", "seconds_left")}
+                         "expires_at", "seconds_left"] + record_keys, row
+    stripped = dict(listed, bans=[{k: v for k, v in r.items() if k not in ["expires_at", "seconds_left"] + record_keys}
                                   for r in listed["bans"]])
     parsed = _parse_banned_users_1410(_wire(listed))
     assert parsed == _parse_banned_users_1410(_wire(stripped)) and parsed[0]["steam_id"] == timed, parsed
@@ -1050,7 +1055,7 @@ async def _presence_answers(sm, w, fns=None):
     async with sm() as db:
         out["h2h"] = {}
         for k in ("B", "C", "E"):
-            blk = await f["h2h"](db, w[k][1])
+            blk = await f["h2h"](db, w[k][1], w[k][0])
             out["h2h"][w[k][0]] = (blk.is_online, blk.is_banned)
         out["marker"] = dict((await db.execute(text(
             "SELECT p.steam_id, " + f["marker"] + " AS lit FROM players p WHERE p.steam_id = ANY(:s)"),

@@ -23,6 +23,7 @@ ACTIONS: dict[str, str] = {
     "ban_length": "Ban length changed",
     "ban_repeat": "Repeat ban",
     "ban_rate_blocked": "Ban refused by the rate limit",
+    "ban_details": "Ban details changed",
     "unban": "Unban",
     # Chat
     "chat_mute": "Chat mute",
@@ -256,6 +257,12 @@ def _sentence(word: str, details, ended=None) -> str:
         n = _num(d.get("recent_bans"))
         return (f"Ban refused: {n} bans already in 5 minutes." if n is not None
                 else "Ban refused by the rate limit.")
+    if word == "ban_details":
+        # Which texts changed and how (main.admin_ban_details); the record holds no text (RULING-BAN-RECORD-R1 N1).
+        said = [f"{what} {d.get(key)}" for key, what in (("details_change", "details"),
+                                                         ("name_change", "kept name"))
+                if d.get(key) in ("added", "changed", "cleared")]
+        return ("Ban " + " and ".join(said) + ".") if said else "Ban details changed (what changed not recorded)."
     if word == "unban":
         rows = _num(d.get("rows"))
         if rows == 0:
