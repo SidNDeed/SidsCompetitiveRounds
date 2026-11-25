@@ -1872,13 +1872,13 @@ def test_n3_the_eight_held_rows_bind_the_id_in_no_statement_of_the_route_in_eith
         _armed(env)
         inside, seen = [False], []
 
-        async def check(*a, **k):
+        async def observed_session_check(*a, **k):
             inside[0] = True
             try:
                 return await _REAL_SESSION_CHECK(*a, **k)
             finally:
                 inside[0] = False
-        env.mp.setattr(main, "_check_steam_session", check)
+        env.mp.setattr(main, "_check_steam_session", observed_session_check)
 
         def listen(conn, cursor, statement, parameters, context, executemany):
             seen.append((inside[0], statement, parameters))
