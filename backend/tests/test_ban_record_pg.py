@@ -394,15 +394,16 @@ def test_v3_no_bans_answers_an_empty_list_with_a_zero_total(monkeypatch):
     assert searched == {"bans": [], "total": 0, "limit": 5, "offset": 0}, searched
 
 
-def test_v3_the_list_reads_at_most_two_statements_and_no_statement_carries_the_secret(monkeypatch):
-    """RULING-BAN-RECORD-Q1-Q3 Q2, added to the bar: the statements of a list
-    call after its admin check are counted (every statement the case's engine
-    runs, from the moment _require_admin returns): two at most (the list's
-    one statement, then one read of the deletion ledger for the page's ids
-    with no live row); one when every id of the page is live; one when the
-    ledger's secret is unset. No statement text and no bind value of the
-    whole call carries the ledger's secret (MATCH_HMAC_SECRET) or the admin
-    signatures' secret."""
+def test_v3_the_list_counts_two_statements_before_the_mark_and_one_or_two_after_and_none_carries_the_secret(
+        monkeypatch):
+    """RULING-BAN-RECORD-Q1-Q3 Q2, added to the bar, and N2 of RULING-BAN-RECORD-R1: BOTH counts of a list
+    call, exact, per arm (every statement the case's engine runs; the mark is the moment _require_admin
+    returns). Before the mark: exactly the admin check's two (the roster's, admin_users; the acting admin's
+    own ban read, player_bans). After it: exactly one when every id of the page is live, or when the
+    ledger's secret is unset; exactly two for an id with no live row and the secret set (the list's one
+    statement, then one read of the deletion ledger). So three or four per call. No statement text and no
+    bind value of the whole call carries the ledger's secret (MATCH_HMAC_SECRET) or the admin signatures'
+    secret. Mutants: one more read before the mark; one more after it."""
     from sqlalchemy import event
     ledger = "ban-record-ledger-secret"
     out = {}
@@ -445,6 +446,12 @@ def test_v3_the_list_reads_at_most_two_statements_and_no_statement_carries_the_s
     for label, got in out.items():
         print("[Q2] %s: %d statements after the admin check: %s" % (
             label, len(got["after"]), [re.sub(r"\s+", " ", s)[:70] for s in got["after"]]))
+        before = [re.sub(r"\s+", " ", s)[:90] for a, s, _p in got["all"] if not a]
+        print("[Q2] %s: %d statements before the mark: %s" % (label, len(before), before))
+        assert len(before) == 2 and "admin_users" in before[0] and "player_bans" in before[1], (
+            "before the mark exactly the admin check's two statements, the roster's (admin_users) and the acting"
+            " admin's own ban read (player_bans); if this moves, re-measure the list's whole-call count", label,
+            before)
     two = out["a no-row id on the page"]
     assert two["accounts"] == ["live", "none"] and len(two["after"]) == 2, two["after"]
     assert "player_bans" in two["after"][0] and "deleted_steam_ids" in two["after"][1], two["after"]

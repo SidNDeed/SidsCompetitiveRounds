@@ -51190,10 +51190,10 @@ async def admin_list_bans(
     got = (await db.execute(text(_BAN_LIST_SQL.format(
         search=search_sql, page=page_sql)), params)).mappings().all()
     rows = [r for r in got if r["id"] is not None]
-    # account (R3 as amended, at most TWO statements per call): "live" is the first statement's word; "deleted"
-    # needs no live row in the first statement and the id's hash in the ledger at the second (_purged_steam_ids:
-    # at most one read, for the page's ids with no live row, only with MATCH_HMAC_SECRET set, which is never a
-    # bind value nor a statement's text); an id with both reads "live"; without the secret the word is "none".
+    # account (R3 as amended): after the admin check ONE statement, or TWO with the ledger read; with the admin
+    # check's two, THREE or FOUR per call. "live" is the first statement's word; "deleted" needs no live row in
+    # the first statement and the id's hash in the ledger at the second (_purged_steam_ids: one read, for the page's
+    # ids with no live row, only with MATCH_HMAC_SECRET set, never a bind value nor a statement's text); else "none".
     gone = await _purged_steam_ids(db, sorted({r["steam_id"] for r in rows if r["live_id"] is None}))
     return {"bans": [
         {
