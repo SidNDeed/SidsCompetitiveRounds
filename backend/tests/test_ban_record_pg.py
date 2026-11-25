@@ -66,6 +66,7 @@ from inv_pg import FLOOR, STEAM_BASE, case, waiting_on  # noqa: E402
 import main  # noqa: E402
 import modlog  # noqa: E402
 import ban_sweep_census as BSC  # noqa: E402
+import test_ban_record_tournament_rows_pg as TR  # noqa: E402
 from test_ban_answers_pg import TOKEN, _account, _armed, _delete, _session  # noqa: E402
 from test_ban_expiry_live import _parse_banned_users_1410  # noqa: E402
 from test_mail_case_scrub_pg import BOUND  # noqa: E402
@@ -73,6 +74,10 @@ from test_mdpl_gate_reread_pg import _tombstone  # noqa: E402
 
 ADMIN_SECRET = "ban-record-admin-secret"
 INTERNAL_KEY = "ban-record-internal-key"
+# The case harness stands a recorder in for main._check_steam_session that admits every caller (inv_pg.py,
+# Env: "admits every caller"). N3.1's sweep and N8 put the real one back, so each route answers as deployed.
+_REAL_SESSION_CHECK = main._check_steam_session
+assert (_REAL_SESSION_CHECK.__module__, _REAL_SESSION_CHECK.__name__) == ("main", "_check_steam_session")
 KEY_SQL = "SELECT pg_advisory_xact_lock(hashtext($1))"   # the identity key, exclusive
 OLD_KEYS = ["id", "steam_id", "display_name", "reason", "banned_by_steam_id", "banned_at",
             "expires_at", "seconds_left"]
@@ -989,16 +994,96 @@ def _routes_answering_a_banned_account():
     return sorted(routes)
 
 
+# N8 (RULING-BAN-RECORD-R1 section 4; FX2 of the integrator's entry of 01:24:29Z): every route of the list
+# is sent its OWN request, and the answer the banned account gets is asserted FIRST: its status and the word
+# its answer starts with. A request that ends before that answer (a validation refusal, the version check) is
+# red there. The account holds no session (the ban deleted it); the client still sends the token it held.
+N8_ANSWERS = {
+    # the sign-in: the body of test_ban_expiry_live.py's _obs_sign_in (steam_id, ticket_hex "00"), over HTTP
+    ("POST", "/api/v1/auth/steam"): (409, "Banned"),
+    ("DELETE", "/api/v1/players/{steam_id}/data"): (409, "Banned"),
+    ("POST", "/api/v1/queue/join"): (409, "Banned"),
+    ("POST", "/api/v1/tournaments/{tournament_id}/unsignup"): (409, "Banned"),
+    ("POST", "/api/v1/spectate/leave"): (401, "session_required"),
+    ("POST", "/api/v1/queue/leave"): (200, "left"),
+    ("POST", "/api/v1/queue/decline"): (409, "not_matched_with_that_player"),
+    ("POST", "/api/v1/queues/escape"): (200, "ok"),
+    ("POST", "/api/v1/team/queue/leave"): (200, "left"),
+    ("POST", "/api/v1/ovt/queue/leave"): (200, "ok"),
+    ("POST", "/api/v1/ffa/queue/leave"): (200, "ok"),
+    ("POST", "/api/v1/team/lobby/leave"): (200, "ok"),
+    ("POST", "/api/v1/ovt/lobby/leave"): (200, "ok"),
+    ("GET", "/api/v1/presence/ping"): (200, "keys:"),
+    ("GET", "/api/v1/series/active"): (200, "keys:series"),
+    ("GET", "/api/v1/team/series/{series_id}/state"): (200, "canceled"),
+    ("GET", "/api/v1/mod/check/{steam_id}"): (200, "banned=True"),
+    ("GET", "/api/v1/internal/recent-bans"): (200, "bans"),
+}
+
+
+def _n8_word(r):
+    try:
+        j = r.json()
+    except ValueError:
+        return r.text[:60]
+    if not isinstance(j, dict):
+        return type(j).__name__
+    for k in ("detail", "status", "result", "error"):
+        if isinstance(j.get(k), str):
+            return j[k]
+    if "banned" in j:
+        return "banned=%s" % j["banned"]
+    if isinstance(j.get("bans"), list):
+        return "bans"
+    return "keys:" + ",".join(sorted(j))
+
+
+def _n8_requests(p, ids):
+    """(method, path) -> (url, keyword arguments) of each route's own request."""
+    sid, q, held = p.sid, {"steam_id": p.sid}, {"X-Session-Token": TOKEN}
+    return {
+        ("POST", "/api/v1/auth/steam"): ("/api/v1/auth/steam", {"json": {"steam_id": sid, "ticket_hex": "00"}}),
+        ("DELETE", "/api/v1/players/{steam_id}/data"): None,   # test_ban_answers_pg._delete, the token held
+        ("POST", "/api/v1/queue/join"): ("/api/v1/queue/join", {"json": {"steam_id": sid}, "headers": held}),
+        ("POST", "/api/v1/tournaments/{tournament_id}/unsignup"): (
+            "/api/v1/tournaments/%s/unsignup" % ids["tournament"], {"json": {"steam_id": sid}, "headers": held}),
+        ("POST", "/api/v1/spectate/leave"): (
+            "/api/v1/spectate/leave", {"json": {"steam_id": sid, "lease_id": ids["lease"]}, "headers": held}),
+        ("POST", "/api/v1/queue/leave"): ("/api/v1/queue/leave", {"params": q, "headers": held}),
+        ("POST", "/api/v1/queue/decline"): (
+            "/api/v1/queue/decline", {"json": {"steam_id": sid, "opponent_steam_id": ids["opponent"]},
+                                      "headers": held}),
+        ("POST", "/api/v1/queues/escape"): ("/api/v1/queues/escape", {"params": q, "headers": held}),
+        ("POST", "/api/v1/team/queue/leave"): ("/api/v1/team/queue/leave", {"params": q, "headers": held}),
+        ("POST", "/api/v1/ovt/queue/leave"): ("/api/v1/ovt/queue/leave", {"params": q, "headers": held}),
+        ("POST", "/api/v1/ffa/queue/leave"): ("/api/v1/ffa/queue/leave", {"params": q, "headers": held}),
+        ("POST", "/api/v1/team/lobby/leave"): ("/api/v1/team/lobby/leave", {"params": q, "headers": held}),
+        ("POST", "/api/v1/ovt/lobby/leave"): ("/api/v1/ovt/lobby/leave", {"params": q, "headers": held}),
+        ("GET", "/api/v1/presence/ping"): ("/api/v1/presence/ping", {"params": q, "headers": held}),
+        ("GET", "/api/v1/series/active"): ("/api/v1/series/active", {}),
+        ("GET", "/api/v1/team/series/{series_id}/state"): ("/api/v1/team/series/%s/state" % ids["series"], {}),
+        ("GET", "/api/v1/mod/check/{steam_id}"): ("/api/v1/mod/check/%s" % sid, {}),
+        ("GET", "/api/v1/internal/recent-bans"): (
+            "/api/v1/internal/recent-bans", {"headers": {"X-Internal-Key": INTERNAL_KEY}}),
+    }
+
+
 def test_v5_no_answer_to_the_banned_account_holds_either_text(monkeypatch):
+    """V5, and N8 of RULING-BAN-RECORD-R1 with FX2: each route's own request; its banned answer asserted
+    FIRST (N8_ANSWERS); then no answer holds the details or the kept name. Mutants: the sign-in's banned
+    answer holding the details; /mod/check's answer holding them."""
     marks = ("Zq7DetailsMark", "Zq7NameMark")
 
     async def body(env):
         _open(env)
         _armed(env)
-        env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
-        env.mp.setenv("API_SECRET_KEY", INTERNAL_KEY)
+        env.mp.setattr(main, "_check_steam_session", _REAL_SESSION_CHECK)
         admin = await _admin(env)
         p = await _account(env)
+        opponent = await env.player("N8 Opponent")
+        seats = [await env.player("N8 Seat %d" % i) for i in range(3)]
+        tid = await TR._tournament(env, "voting")
+        await TR._signup(env, tid, p)
         await env.conn.execute("UPDATE players SET display_name = $1 WHERE id = $2", marks[1], p.id)
         await _session(env, p.sid)
         answers = []
@@ -1009,20 +1094,22 @@ def test_v5_no_answer_to_the_banned_account_holds_either_text(monkeypatch):
             assert r.status_code == 200, r.text
             row = await _row(env, p.sid)
             assert (marks[0] in row["details"], row["display_name_at_ban"]) == (True, marks[1]), row
+            left = await env.conn.fetchval("SELECT count(*) FROM steam_sessions WHERE steam_id = $1", p.sid)
+            assert left == 0, "the ban deletes the account's sessions; %d left" % left
             await env.conn.execute("UPDATE players SET display_name = 'Shown Name' WHERE id = $1", p.id)
-            for method, path in _routes_answering_a_banned_account():
+            series = uuid.uuid4()
+            await env.conn.execute(
+                "INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, created_at)"
+                " VALUES ($1, $2, $3, $4, $5, 'canceled', NOW())", series, p.id, *[s.id for s in seats])
+            ids = {"tournament": str(tid), "lease": str(uuid.uuid4()), "opponent": opponent.sid,
+                   "series": str(series)}
+            for (method, path), req in sorted(_n8_requests(p, ids).items()):
                 assert (method, path) in known, (method, path)
-                url = re.sub(r"\{steam_id\}", p.sid, path)
-                url = re.sub(r"\{[a-z_]+\}", str(uuid.uuid4()), url)
-                headers = {"X-Session-Token": TOKEN, "X-Internal-Key": INTERNAL_KEY}
-                body_ = {"steam_id": p.sid, "session_token": TOKEN, "target_steam_id": p.sid}
-                if method == "GET":
-                    r = await c.get(url, params={"steam_id": p.sid}, headers=headers)
-                elif method == "DELETE":
+                if req is None:
                     r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
                 else:
-                    r = await c.request(method, url, json=body_, params={"steam_id": p.sid}, headers=headers)
-                answers.append((method, path, r.status_code, r.text))
+                    r = await c.request(method, req[0], **req[1])
+                answers.append((method, path, r.status_code, _n8_word(r), r.text))
         return answers
     out = {}
 
@@ -1030,15 +1117,21 @@ def test_v5_no_answer_to_the_banned_account_holds_either_text(monkeypatch):
         out["v"] = await body(env)
     case(monkeypatch, run, prefix="banrec")
     answers = out["v"]
-    held = [(m, p, s) for m, p, s, t in answers if any(k in t for k in marks)]
+    for m, p, s, w, t in answers:
+        print("[N8] %-6s %-48s %s %-30s %s" % (m, p, s, w[:30], t[:140]))
+    routes = _routes_answering_a_banned_account()
+    assert sorted(N8_ANSWERS) == routes and sorted((m, p) for m, p, *_ in answers) == routes, routes
+    # FIRST: each route's banned answer, its status and its word
+    wrong = [(m, p, (s, w), N8_ANSWERS[(m, p)]) for m, p, s, w, _t in answers
+             if s != N8_ANSWERS[(m, p)][0] or not w.startswith(N8_ANSWERS[(m, p)][1])]
+    assert wrong == [], wrong
+    held = [(m, p, s) for m, p, s, _w, t in answers if any(k in t for k in marks)]
     assert held == [], held
-    by = {(m, p): (s, t) for m, p, s, t in answers}
-    check = json.loads(by[("GET", "/api/v1/mod/check/{steam_id}")][1])
+    by = {(m, p): t for m, p, _s, _w, t in answers}
+    check = json.loads(by[("GET", "/api/v1/mod/check/{steam_id}")])
     assert check["banned"] is True and check["ban_reason"] == "plain reason", check
-    assert by[("DELETE", "/api/v1/players/{steam_id}/data")][0] == 409, by[("DELETE", "/api/v1/players/{steam_id}/data")]
-    feed = json.loads(by[("GET", "/api/v1/internal/recent-bans")][1])
+    feed = json.loads(by[("GET", "/api/v1/internal/recent-bans")])
     assert any(b["reason"] == "plain reason" for b in feed["bans"]), feed
-    print("V5 answers:", sorted((m, p, s) for m, p, s, _ in answers))
 
 
 # -- V6: the account deletion -----------------------------------------------------------------------
