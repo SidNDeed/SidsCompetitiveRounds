@@ -1983,7 +1983,20 @@ def test_the_helper_closure_stays_affordable():
     # The median (87 against 87) and p90 (230 against 239) bounds stay, and so
     # do the three bounds of the whole closure (250 against 261, 433 against
     # 453, 887 against 897 at the health route).
-    assert code_worst <= 607, f"worst code closure {code_worst} of {total}"
+    # ALT-BAN-1 with main e2b485d9 (BAN-RECORD-1) merged in (2026-11-25):
+    # 637 measured at GET /api/v1/health on the merged tree, of 6193 indexed
+    # bindings (607 of 6055 at e2b485d9, 636 of 6172 at the lane's tip
+    # af4693d6, the same walk over each tree): +30 by name against main, the
+    # stack's own: the three of CHEAT-ALT-1 above, main._ALT_BAN_BUILD (the
+    # lane's build marker) and geo_region.file_word with the 25 names of the
+    # region reader it reaches, which the health route reads in both arms;
+    # +1 against the lane's tip, main._BAN_RECORD_BUILD (main's, above). No
+    # other code binding of that closure is new. The bound moves to 637, the
+    # measured value, for that reason and no other. The median (87 against
+    # 87) and p90 (230 against 239) bounds stay, and so do the whole
+    # closure's median and p90 (250 against 261, 433 against 453). Its worst
+    # is stated at its own bound below.
+    assert code_worst <= 637, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -2509,7 +2522,26 @@ def test_the_helper_closure_stays_affordable():
     # leaves. The bound moves to 897, the measurement times 1.05 rounded up,
     # for that reason and no other. The median (236 against 245) and p90
     # (398 against 425) bounds stay.
-    assert all_worst <= 897, f"worst closure {all_worst} of {total}"
+    # ALT-BAN-1 with main e2b485d9 (BAN-RECORD-1) merged in (2026-11-25):
+    # 929 measured at GET /api/v1/health, of 6193 indexed bindings (884 at
+    # e2b485d9, of 6055, the same route): +45 by name. 30 the health route
+    # runs: main's two build words _ALT_SIGNALS_BUILD and _ALT_BAN_BUILD;
+    # the key word alt_signals.key_word and the _INSTALLED it reads; and
+    # geo_region.file_word with the 25 names of the region reader it
+    # reaches (_rgn_Breach, _rgn_Meta, _rgn_Walk, _rgn_charge, _rgn_head,
+    # _rgn_key, _rgn_metadata, _rgn_node, _rgn_open, _rgn_parse, _rgn_pass,
+    # _rgn_read, _rgn_text and _rgn_value; _rgn_BYTES, _rgn_DEPTH, _rgn_DIR,
+    # _rgn_EXACT, _rgn_MARKER, _rgn_META_MAX, _rgn_META_WANT, _rgn_MOST,
+    # _rgn_NAME, _rgn_VALUES and _rgn_kept). 15 import lines: main's
+    # _alt_signals and _geo_region; geo_region's _rgn_datetime, _rgn_os and
+    # _rgn_stat; and the timedelta import the reader's source leads to in
+    # auto_logs, card_evidence, combat_evidence, identity_clock_evidence,
+    # main, match_hold, match_report_window, review_calibrate, seat_evidence
+    # and tournaments. The bound moves to 976, the measurement times 1.05
+    # rounded up, for that reason and no other. The median (250 against 261)
+    # and p90 (433 against 453) bounds stay.
+    # Measured again at the item's tip (turn 2, step 8).
+    assert all_worst <= 976, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

@@ -673,7 +673,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "dfffeb14d0f173815a2027053fb67f3140f0196a"
+          "f033b1afdb85716e762e9290e4e74a1004f379ad"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -970,7 +970,7 @@
           ],
           "main",
           "delete_player_data",
-          "32b25ce83e8350a7f4baa0d5b7bd63a27cf0c4fd"
+          "adb5a2a7e61552635d102d6a960e52fc33b5c984"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1204,7 +1204,7 @@
           ],
           "main",
           "submit_team_match",
-          "23947970b1aeafe7c0b5d0db395b00ad67e277fd"
+          "c92faaa7f5ee97d4580efeb792e5c5aa7dd27ebd"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1516,7 +1516,7 @@
           ],
           "main",
           "steam_auth",
-          "9ccd2978be18c496aedf3b2cbc215bd94af8445c"
+          "860db6d6d57e9bfe54d366db0b487ebd1cc6fa15"
         ],
         [
           "/api/v1/bets",
@@ -1885,7 +1885,7 @@
           ],
           "main",
           "health_check",
-          "7219f1a0262359eb07a377b247b4fffc0265a9f6"
+          "6cf887028180a7806735cc4f09692a0daa7cb84d"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3887,7 +3887,7 @@
           ],
           "match_hold",
           "match_hold_entered",
-          "b11ebfdc09c658dff2072b6755e6dee03a1c4099"
+          "5d685159f9ee8fc71897382115359744e3a01a9f"
         ],
         [
           "/api/v1/match/hold/{hold_id}/state",
@@ -4130,7 +4130,7 @@
       [
         "main",
         "lifespan",
-        "285d4ca4c4498b502482ee7b9c1a47440d451b42"
+        "5818ca32699076f37821b91af3f8ffe83bda0030"
       ]
     ]
   },

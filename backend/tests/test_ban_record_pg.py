@@ -1467,7 +1467,7 @@ ban hmac_signature nonascii | 500 Internal Server Error | 403 Bad admin signatur
 ban hmac_signature long | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
 ban reason nul | 500 Internal Server Error | 200 banned | the reason helper takes NUL out
 ban reason lone | 200 banned | 200 banned | the reason helper takes it out (Q5 point 2)
-ban reason long | 200 banned | 200 banned | the writer keeps 256 characters (M:51823)
+ban reason long | 200 banned | 200 banned | the writer keeps 256 characters (M:52551)
 ban target_steam_id nul | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_target_or_422
 ban target_steam_id lone | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_target_or_422
 ban target_steam_id long | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_target_or_422
@@ -1556,10 +1556,10 @@ forfeit steam_id nul | 503 session_check_unavailable | 503 session_check_unavail
 forfeit steam_id lone | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
 forfeit steam_id long | 404 Player not found | 404 Player not found | no account has it
 checkin - valid | 200 recorded | 200 recorded |
-checkin X-Internal-Key nul | 403 forbidden | 403 forbidden | the internal paths' key compare (M:7018)
+checkin X-Internal-Key nul | 403 forbidden | 403 forbidden | the internal paths' key compare (M:7035)
 checkin X-Internal-Key lone | not carried UnicodeEncodeError | not carried UnicodeEncodeError | the client cannot encode it
-checkin X-Internal-Key lonebytes | 403 forbidden | 403 forbidden | arrives as three letters outside ASCII; the key compare (M:7018)
-checkin X-Internal-Key long | 403 forbidden | 403 forbidden | the internal paths' key compare (M:7018)
+checkin X-Internal-Key lonebytes | 403 forbidden | 403 forbidden | arrives as three letters outside ASCII; the key compare (M:7035)
+checkin X-Internal-Key long | 403 forbidden | 403 forbidden | the internal paths' key compare (M:7035)
 checkin answer nul | 400 Invalid check-in answer | 400 Invalid check-in answer | the answer map
 checkin answer lone | 400 Invalid check-in answer | 400 Invalid check-in answer | the answer map
 checkin answer long | 400 Invalid check-in answer | 400 Invalid check-in answer | the answer map
@@ -1569,10 +1569,10 @@ checkin steam_id long | 200 match_closed | 200 match_closed | no player has it (
 """
 # OTHER 5XX, held under their own heading (RULING-BAN-RECORD-R1 section 2's last point; the integrator's entry of
 # 02:14:42Z, point 2 (a)): the session check every write route calls answers 503 when its ban read of the claimed
-# id does not complete (M:17414). No statement of the route's own handler binds the id, in either mode of the
+# id does not complete (M:18134). No statement of the route's own handler binds the id, in either mode of the
 # check (test_n3_the_eight_held_rows_...). Not repaired here: they join the filed class item.
 SWEEP_HELD = ("signup", "unsignup", "force_vote", "forfeit")
-SWEEP_5XX = {(label, "steam_id", probe): "main.py:17414 session_check_unavailable"
+SWEEP_5XX = {(label, "steam_id", probe): "main.py:18134 session_check_unavailable"
              for label in SWEEP_HELD for probe in ("nul", "lone")}
 
 
@@ -1858,12 +1858,12 @@ def test_n3_the_eight_held_rows_bind_the_id_in_no_statement_of_the_route_in_eith
     of each request and whether it ran inside the session check. In either mode of the check (log-only, as the
     case runs; enforcing: STEAM_AUTH_ENFORCE on, the key set, the client's version past STEAM_AUTH_MIN_VERSION)
     no statement outside the check binds the id, so the answer is the check's own, given before the handler's
-    code: log-only, 503 from the check's ban read (M:17414); enforcing, 401 session_required (M:17399) with no
+    code: log-only, 503 from the check's ban read (M:18134); enforcing, 401 session_required (M:18119) with no
     statement that binds the id."""
     with open(os.path.join(API, "main.py"), encoding="utf-8") as fh:
         lines = fh.read().splitlines()
-    assert 'raise HTTPException(status_code=503, detail="session_check_unavailable")' in lines[17414 - 1]
-    assert 'raise HTTPException(status_code=401, detail="session_required")' in lines[17399 - 1]
+    assert 'raise HTTPException(status_code=503, detail="session_check_unavailable")' in lines[18134 - 1]
+    assert 'raise HTTPException(status_code=401, detail="session_required")' in lines[18119 - 1]
     keys = {label: key for key, label in SWEEP_TOURNAMENT.items()}
     rows = []
 
@@ -1982,7 +1982,7 @@ def test_fx1_an_id_outside_the_domain_answers_as_one_with_no_session_and_sends_n
 
 def test_fx1_unarmed_a_deleted_accounts_row_key_answers_not_found(monkeypatch):
     """FX1's declared point (the integrator's entry of 01:24:29Z, point 1): unarmed, a deleted account's row key
-    (deleted_<hex>, outside the domain) answers 200 not_found where it answered already_deleted (M:47313); armed,
+    (deleted_<hex>, outside the domain) answers 200 not_found where it answered already_deleted (M:48040); armed,
     401 session_required_update_mod, before the change and after it."""
     out = {}
 

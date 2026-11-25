@@ -138,7 +138,12 @@ def _census_line(rows):
 # list, main.admin_list_bans (GET /api/v1/admin/banned-users), reads its count and its page in ONE statement
 # (_BAN_LIST_SQL.format, bounded) where it sent an expanded count and a bounded page. tournaments._player_id_banned's
 # one statement (73bc3072) stays read. J03 read the same line at 73edff39; the fix moved no value.
-CENSUS_LINE = {"bounded": 27, "expanded": 121, "judged": 4, "read": 107, "remaining": 11}
+# ALT-BAN-1 with main e2b485d9 merged in (2026-11-25), measured by _measure on main (270 rows, the line above) and
+# on the merged tree (280 rows): read 107 -> 117 by ten new places, each read and each the stack's own, none of
+# main's moved: main._alt_retention_batch's three DELETEs and main._alt_retention_left's count (427), and
+# main._ban_retention_batch's two DELETEs, main._ban_retention_left's count, main._ban_ticket_seen's ban read and
+# main.alt_relations' two _alt_relation_sql texts (431). Judged failures 0.
+CENSUS_LINE = {"bounded": 27, "expanded": 121, "judged": 4, "read": 117, "remaining": 11}
 
 
 def test_the_census_line_is_as_measured(base):
@@ -267,9 +272,13 @@ def test_every_open_place_is_judged_with_its_pin_holding(base):
 
 
 # ---- J10: main.read, the triage handle's method, judged by its callers --------------------------------
-READ_RECEIVERS = {"_pc_face_cache": 3, "f": 3, "h": 22, "os": 1, "resp": 1, "self": 1}
+# ALT-BAN-1 on main e2b485d9 (2026-11-25), measured by this module's walk on the merged tree: "_rgn_os": 1 is new,
+# geo_region._rgn_read's os.read under the reader's private name of the os module (the lane's tip af4693d6 reads
+# the same table; main reads none).
+READ_RECEIVERS = {"_pc_face_cache": 3, "_rgn_os": 1, "f": 3, "h": 22, "os": 1, "resp": 1, "self": 1}
 READ_RECEIVER_REASONS = {
     "_pc_face_cache": "the face cache object: reads stored bytes by key",
+    "_rgn_os": "os.read on the region file's descriptor (geo_region, the os module under its private name)",
     "f": "an open file: reads its bytes or text",
     "self": "pc_portrait's cache class reading its own entry by key",
     "resp": "an HTTP response: reads its body",
