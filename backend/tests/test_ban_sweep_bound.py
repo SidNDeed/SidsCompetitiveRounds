@@ -129,10 +129,12 @@ def _census_line(rows):
 
 # ---- the census line --------------------------------------------------------------------------------
 # At the stack lane's merge of the counting tool (2026-11-23), measured: bounded 25 -> 26 by the helper's SET LOCAL
-# lock_timeout statement, main._player_deletion_key_shared_bounded:88115 (named _identity_key_shared_bounded until
+# lock_timeout statement, main._player_deletion_key_shared_bounded:88843 (named _identity_key_shared_bounded until
 # round mdplg-r2, which measured the line unchanged); "bounded": every text the statement can send is known, a word
 # about its text and nothing about a wait; remaining 8 -> 11 by the counting program's three places (J13 to J15).
-CENSUS_LINE = {"bounded": 26, "expanded": 122, "judged": 4, "read": 107, "remaining": 11}
+# At the alternate-account lane's merge of main f1460a11 (2026-11-24), measured: read 107 -> 109 by the lane's two
+# statements in main.alt_relations, _alt_relation_sql('addr_mark') and _alt_relation_sql('block_mark').
+CENSUS_LINE = {"bounded": 26, "expanded": 122, "judged": 4, "read": 109, "remaining": 11}
 
 
 def test_the_census_line_is_as_measured(base):
@@ -148,17 +150,17 @@ JUDGED = {
     "admin_evidence._aer_rows:1588": {
         "reading": "VALUE", "values": {"admin_evidence|GAME_ROWS_SQL": "e0db82c239a691c3"},
         "reason": "the place runs the statement its caller passes; GAME_ROWS_SQL is built at import"},
-    "main._discord_fix_probe:35221": {
+    "main._discord_fix_probe:35941": {
         "reading": "VALUE", "values": {"main|_DISCORD_FIX_PROBE": "5fdd7743d8c5d886"},
         "reason": "the probe is taken at import from the constants of the function whose statement it probes"},
-    "main._ffa_finishing_count_probe:72547": {
+    "main._ffa_finishing_count_probe:73275": {
         "reading": "VALUE", "values": {"main|_FFA_FINISHING_COUNT_LOBBY_COLUMNS": "bba789f6bf1d525a",
                                        "main|_FFA_FINISHING_COUNT_PLAYER_COLUMNS": "0f0ed910ba151a80"},
         "reason": "each probe selects harvested column names"},
-    "main._team_dc_fallback_probe:56484": {
+    "main._team_dc_fallback_probe:57212": {
         "reading": "VALUE", "values": {"main|_TEAM_DC_FALLBACK_COLUMNS": "b672923b95330f4b"},
         "reason": "as J3: the harvested value is (dc_fallback_at, dc_fallback_player_id)"},
-    "main._janitor_check_statement:3508": {
+    "main._janitor_check_statement:3513": {
         "reading": "BLANK", "expression": "'EXPLAIN ' + s['sql'] if cls == 'explain' else s['sql']",
         "explain_words": ["DELETE", "INSERT", "MERGE", "SELECT", "UPDATE", "VALUES", "WITH"],
         "session_words": ["ABORT", "BEGIN", "COMMIT", "END", "RELEASE", "RESET", "ROLLBACK", "SAVEPOINT", "SET",
@@ -174,10 +176,10 @@ JUDGED = {
     "admin_evidence._section_rows:2127": {
         "reading": "WIDEST", "reach": "e4a6001b33b5087e", "tables": ['card_contrib', 'card_evidence', 'card_games', 'card_player_daily', 'combat_contrib', 'combat_evidence', 'combat_games', 'combat_player_daily', 'identity_clock_evidence', 'identity_clock_games', 'runtime_settings'],
         "reason": "the place runs what a caller passes; the widest reading is the union of what any call can run"},
-    "main._report_rows:83234": {
+    "main._report_rows:83962": {
         "reading": "WIDEST", "reach": "ccee7a528106f0f2", "tables": ['ffa_lobbies', 'ffa_match_cards', 'ffa_match_players', 'ffa_matches', 'gold_transactions', 'match_cards', 'matches', 'ovt_match_cards', 'ovt_matches', 'ovt_series', 'players', 'ranked_series', 'rating_history', 'spectate_games', 'spectate_watch_grants', 'team_match_cards', 'team_match_telemetry', 'team_matches', 'team_series', 'tournament_matches'],
         "reason": "as J8"},
-    "main.read:77875": {
+    "main.read:78603": {
         "reading": "CALLERS", "reason": "judged by its callers: the union of the 22 handle calls' statements"},
     "admin_evidence.read_baseline:748": {
         "reading": "VALUE", "requested": True,
@@ -554,17 +556,17 @@ def test_j11_control_renaming_the_loop_variable_leaves_the_check_green(base):
 
 
 # ---- one mutant per form, and a control per family ----------------------------------------------------
-_BAN_LOCK = ["main._ban_void_lock:51415", "main._ban_void_lock:51419", "main._ban_void_lock:51422",
-             "main._ban_void_lock:51425"]
+_BAN_LOCK = ["main._ban_void_lock:52143", "main._ban_void_lock:52147", "main._ban_void_lock:52150",
+             "main._ban_void_lock:52153"]
 _RANKED = '"ranked_series": {"active": "live", "completed": "terminal", "abandoned": "terminal"},'
 _CHECKS = '    checks = {\n'
 _SETS = '        sets.append("present_at = CAST(:now AS timestamptz)")\n'
 _PC_RETURN = '    return _PC_PRINT_FACE_SELECT.replace(frag, cols, 1) + _pc_motion_servable_joins("s")\n'
-_PC_PLACES = ["main._pc_bot_face_row:35687", "main._pc_motion_atlas_job:37657", "main.pc_face_motion_atlas:37735",
-              "main.pc_face_motion_read:37701"]
+_PC_PLACES = ["main._pc_bot_face_row:36407", "main._pc_motion_atlas_job:38377", "main.pc_face_motion_atlas:38455",
+              "main.pc_face_motion_read:38421"]
 _FLAG_PLACE = "flag_evidence.fetch_flag_context_rows:324"
-_ASM_PLACE = "main._asm_census_write:66627"
-_AUDIT_PLACE = "main._run_service_policy_audit:80167"
+_ASM_PLACE = "main._asm_census_write:67355"
+_AUDIT_PLACE = "main._run_service_policy_audit:80895"
 
 
 FORMS = ("DICT_PARTS", "EXPANSION", "PARAM", "MUTATION", "VALUE")
@@ -742,7 +744,7 @@ def test_value_control_a_name_with_a_second_binding_is_not_read_and_its_place_fa
     ns0, vals, _rows = base
     ns = _run(_sources(append="\n\n_PC_PRINT_MOTION_SELECT = _PC_PRINT_MOTION_SELECT\n"), values=vals)
     a, b = _rows_by_key(ns0["rows"]), _rows_by_key(ns["rows"])
-    readers = [k for k in _PC_PLACES if k != "main._pc_motion_atlas_job:37657"]   # the three that name it
+    readers = [k for k in _PC_PLACES if k != "main._pc_motion_atlas_job:38377"]   # the three that name it
     assert all(a[k]["verdict"] in ("read", "expanded") for k in readers), {k: a[k]["verdict"] for k in readers}
     assert all(b[k]["verdict"] not in ("read", "expanded") for k in readers), {k: b[k]["verdict"] for k in readers}
 
@@ -755,10 +757,10 @@ def test_value_a_name_the_closure_reads_changed_after_import_is_not_read_and_the
     module can change the text the place runs, so VALUE does not read it, the DICT_PARTS split ends, and the
     stored key's lock word reaches the place (MUTATION)."""
     ns0, vals, _rows = base
-    a = _rows_by_key(ns0["rows"])["main._ban_void_lock:51419"]
+    a = _rows_by_key(ns0["rows"])["main._ban_void_lock:52147"]
     assert a["verdict"] == "read" and not _locked(a), a
     ns = _run(_sources(append=_LOCK_KEY_STORE), values=vals)
-    b = _rows_by_key(ns["rows"])["main._ban_void_lock:51419"]
+    b = _rows_by_key(ns["rows"])["main._ban_void_lock:52147"]
     assert b["verdict"] != "read" and _locked(b), b
     why = [w for k, w in ns["VALUE_WHY"].items() if "BAN_RECORD_STATUSES" in str(w)]
     assert why and all("changed after import" in str(w) for w in why), why
@@ -1004,7 +1006,7 @@ def test_the_judged_pins_refuse_an_empty_value_an_empty_word_table_and_no_table(
             r["widest_tables"] = []
     bad = judged_table_failures(rows2, v2)
     assert any(b.startswith("admin_evidence._aer_rows:1588: the values' digests") for b in bad), bad
-    assert any(b.startswith("main._janitor_check_statement:3508: _JANITOR_EXPLAIN_WORDS is []") for b in bad), bad
+    assert any(b.startswith("main._janitor_check_statement:3513: _JANITOR_EXPLAIN_WORDS is []") for b in bad), bad
     assert any(b.startswith("admin_evidence.rebuild_game_population:1079: the reach") for b in bad), bad
     # J13 to J15: one character of each pinned text, and one table name of a pinned mapping, names the row;
     # the unchanged copy names none (the control).
@@ -1030,9 +1032,9 @@ def test_the_judged_pins_refuse_an_empty_value_an_empty_word_table_and_no_table(
 # "bounded": every text the statement can send is known and none names a table (main:19225, main:19233 and
 # main:88843, SET LOCAL lock_timeout statements whose one hole is a number of milliseconds); the word is about
 # the text, not a wait.
-NO_TABLE_PLACES = {"main._identity_lock_many:18505": "bounded", "main._identity_lock_many:18513": "bounded",
-                   "main._publish_pair_sitting:1383": "read", "main._report_disconnect_once:22984": "read",
-                   "main._player_deletion_key_shared_bounded:88115": "bounded"}
+NO_TABLE_PLACES = {"main._identity_lock_many:19225": "bounded", "main._identity_lock_many:19233": "bounded",
+                   "main._publish_pair_sitting:1384": "read", "main._report_disconnect_once:23704": "read",
+                   "main._player_deletion_key_shared_bounded:88843": "bounded"}
 
 
 def test_the_places_whose_verdicts_hold_no_table_are_the_named(base):
@@ -1194,8 +1196,8 @@ def test_j6_j7_the_registry_check_refuses_a_string_outside_and_a_column_unscanne
 
 
 # ---- RULING-CENSUS-9 section 2: R1 POSITIONAL RETURN, R2 STAR ARGUMENT ------------------------------------
-_MODLOG = "main._modlog_answer:27193"
-_PROBE = "main._session_report_probe:84068"
+_MODLOG = "main._modlog_answer:27913"
+_PROBE = "main._session_report_probe:84796"
 _R1_WHERE = '    return (" AND ".join(where) or "TRUE"), params\n'
 _R1_AFTER = '    if not f.get("after"):\n        return "TRUE", {}\n'
 _R1_BIND = '        params["msince"] = f["since"]\n'
