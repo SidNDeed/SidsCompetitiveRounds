@@ -284,13 +284,29 @@ async def _guard(coro):
 @pytest.fixture(scope="module")
 def got():
     from inv_pg import case
-    out = {"helper": {}, "spy": {}, "e2e": {}, "statements": []}
+    out = {"helper": {}, "spy": {}, "e2e": {}, "statements": [], "calls": [], "helper_calls": {}}
+    inside = [False]
 
     def seen(conn, cursor, statement, parameters, context, executemany):
-        if " AS removed" in statement and "player_bans" in statement:
+        # N9 (RULING-BAN-RECORD-R1): EVERY statement sent between the helper's entry and its return, whatever
+        # it holds, is recorded for that call (the helper is marked on both sides below)
+        if inside[0]:
+            out["calls"][-1]["statements"].append(statement)
             out["statements"].append(statement)
 
     async def body(env):
+        real = tournaments._player_id_banned
+
+        async def marked(db, player_id):
+            out["calls"].append({"id": None if player_id is None else str(player_id), "statements": []})
+            inside[0] = True
+            try:
+                return await real(db, player_id)
+            finally:
+                inside[0] = False
+        # every caller reads the helper by its module name at the call, so the mark covers the direct calls
+        # and the scans; _spy's own patch puts the mark back when it ends
+        env.mp.setattr(tournaments, "_player_id_banned", marked)
         event.listen(env.engine.sync_engine, "before_cursor_execute", seen)
         try:
             admin = (await env.player("R7T Admin")).sid
@@ -310,9 +326,11 @@ def got():
             for step, pid in kept.items():
                 async with env.sm() as db:
                     out["helper"][step] = await _guard(tournaments._player_id_banned(db, pid))
+                    out["helper_calls"][step] = out["calls"][-1]
                     await db.rollback()
             async with env.sm() as db:
                 out["helper"]["None"] = await _guard(tournaments._player_id_banned(db, None))
+                out["helper_calls"]["None"] = out["calls"][-1]
                 await db.rollback()
 
             for name, fn in ROUTES.items():
@@ -352,20 +370,30 @@ HELPER_WANT = {"a": "removed", "b": "removed", "c": "banned", "d": "", "none": "
 
 @pytest.mark.parametrize("step", HELPER_CASES)
 def test_the_helper_answers_each_case_from_one_statement(got, step):
-    # the message carries the statement as sent: a mutant's red line shows the text it changed
-    assert got["helper"][step] == HELPER_WANT[step], (step, got["helper"][step], got["statements"][:1])
+    """Each case's answer, and N9: the call sent exactly ONE statement between the helper's entry and its
+    return (every statement, whatever it holds); the call with None sends none. The message carries the
+    statements as sent: a mutant's red line shows the text it changed."""
+    call = got["helper_calls"][step]
+    assert got["helper"][step] == HELPER_WANT[step], (step, got["helper"][step], call["statements"])
+    assert len(call["statements"]) == 1, (step, call["statements"])
     if step == "none":
         assert got["helper"]["None"] == "", got["helper"]["None"]
+        assert got["helper_calls"]["None"]["statements"] == [], got["helper_calls"]["None"]
 
 
 def test_the_helper_statement_reached_the_database(got):
-    """The mutant's reached proof: the helper's one statement was sent for
-    each real call with an id (the five cases) and for each seat the three
-    end-to-end scans ask about (2 + 2 + 1); printed as sent, so a mutant
-    run shows the statement it changed."""
-    sent = got["statements"]
-    print("[R7T] helper statements sent: %d; the first: %s" % (len(sent), sent[0] if sent else None))
-    assert len(sent) == 5 + 2 + 2 + 1, len(sent)
+    """The reach, end to end: the helper was called with an id for each of the five cases and for each seat
+    the three end-to-end scans ask about (2 + 2 + 1). N9: EVERY statement sent between the helper's entry
+    and its return is recorded per call, and each call with an id sent exactly ONE (printed as sent, so a
+    mutant run shows the statements it changed). Mutant: the deletion read first and the ban second, the
+    second statement carrying the first's answer: red here by the count."""
+    calls = [c for c in got["calls"] if c["id"] is not None]
+    for c in got["calls"]:
+        print("[N9] call %s: %d statement(s): %s" % (
+            c["id"], len(c["statements"]), [" ".join(s.split())[:100] for s in c["statements"]]))
+    assert len(calls) == 5 + 2 + 2 + 1, [c["id"] for c in got["calls"]]
+    assert [len(c["statements"]) for c in calls] == [1] * len(calls), [
+        (c["id"], c["statements"]) for c in calls if len(c["statements"]) != 1]
 
 
 def _refused(status, detail):
