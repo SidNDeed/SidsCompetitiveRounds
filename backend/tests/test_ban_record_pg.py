@@ -193,6 +193,9 @@ def _by_sid(r):
 # -- R2: the name a new ban keeps -------------------------------------------------------------------
 
 def test_r2_a_new_ban_keeps_the_live_name_and_a_repeat_or_a_length_change_writes_none(monkeypatch):
+    """R2, and N7 of RULING-BAN-RECORD-R1: the repeat and the length change run on a ban whose three
+    columns all hold a value (the details and their time seeded through the details route first), and each
+    leaves the three exactly as they were, the time included."""
     async def body(env):
         _open(env)
         admin = await _admin(env)
@@ -205,23 +208,33 @@ def test_r2_a_new_ban_keeps_the_live_name_and_a_repeat_or_a_length_change_writes
             await _ban(c, admin, self_named.sid)
             await _ban(c, admin, raw)
             first = await _row(env, live.sid)
+            seeded = await _details(c, admin, live.sid, details="seeded before the repeat")
+            assert seeded.status_code == 200, seeded.text
+            seeded = await _row(env, live.sid)
             await env.conn.execute("UPDATE players SET display_name = 'Renamed Later' WHERE id = $1", live.id)
             again = await _ban(c, admin, live.sid)
+            after_repeat = await _row(env, live.sid)
             longer = await _ban(c, admin, live.sid, duration_minutes=90)
         after = await _row(env, live.sid)
         n = await env.conn.fetchval("SELECT count(*) FROM player_bans WHERE steam_id = $1", live.sid)
-        return (first, again, longer, after, n, await _row(env, self_named.sid), await _row(env, raw))
+        return (first, seeded, again, after_repeat, longer, after, n, await _row(env, self_named.sid),
+                await _row(env, raw))
     out = {}
 
     async def run(env):
         out["v"] = await body(env)
     case(monkeypatch, run, prefix="banrec")
-    first, again, longer, after, n, self_named, raw = out["v"]
+    first, seeded, again, after_repeat, longer, after, n, self_named, raw = out["v"]
+    three = ("display_name_at_ban", "details", "details_at")
     # one line, the tab out, trimmed
     assert (first["display_name_at_ban"], first["details"], first["details_at"]) == ("KeptName Two", None, None)
+    # the reach: all three hold a value before the repeat and the length change run
+    assert (seeded["display_name_at_ban"], seeded["details"]) == ("KeptName Two", "seeded before the repeat")
+    assert seeded["details_at"] is not None, seeded
     assert again["status"] == "already_banned" and longer["status"] == "length_changed", (again, longer)
     assert n == 1 and after["id"] == first["id"], (n, after["id"], first["id"])
-    assert (after["display_name_at_ban"], after["details"], after["details_at"]) == ("KeptName Two", None, None)
+    for label, row in (("the repeat", after_repeat), ("the length change", after)):
+        assert [row[k] for k in three] == [seeded[k] for k in three], (label, {k: (seeded[k], row[k]) for k in three})
     assert after["expires_at"] != first["expires_at"], "the length change did not run"
     # the display-name rule: an account named by its own id keeps no name; no row keeps none
     assert self_named["display_name_at_ban"] is None and raw["display_name_at_ban"] is None
