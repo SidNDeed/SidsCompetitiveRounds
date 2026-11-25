@@ -27,7 +27,8 @@
 -- anything. FAQ message 1 must be exactly one row holding 427's text (it is
 -- set back) or exactly one row holding 338's text (nothing to do); anything
 -- else raises, so a later revision of message 1 is never overwritten. The
--- file is therefore valid while 427 is the newest file carrying message 1.
+-- file is therefore valid while 427 is the newest file carrying message 1:
+-- with 431 applied, rollback_431 runs first.
 --
 -- RE-RUNS. A second run finds the tables absent and message 1 at 338's text:
 -- it drops nothing and writes nothing.

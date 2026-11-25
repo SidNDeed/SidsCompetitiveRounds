@@ -36,7 +36,9 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # and mail_messages' kind check, every step inside a guard) likewise.
 # 421 (OCT3-B, a data migration with no code change) likewise. 427 (alt
 # signals: three tables and their indexes, and FAQ message 1's revision,
-# every step inside a guard) likewise.
+# every step inside a guard) likewise. 431 (records kept for an account
+# under an active ban: two tables and their indexes, and FAQ message 1's
+# next revision, every step inside a guard) likewise.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
@@ -48,7 +50,8 @@ OWNED = ("331_animal_title_ladders.sql",
          "419_quarantine_digest_posted.sql",
          "421_oct3b_credit_held_ffa_games.sql",
          "426_ffa_game_claims.sql",
-         "427_alt_signals.sql")
+         "427_alt_signals.sql",
+         "431_ban_links.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 
@@ -796,6 +799,16 @@ _EVERY_STATEMENT_GUARDED = {
         "unless exactly one such row or one already revised row stands, and a "
         "read-only post-check of the three marks, between BEGIN, the four SET "
         "LOCAL settings and COMMIT; a re-run issues no DDL and writes no row",
+    "431_ban_links.sql":
+        "one block that puts the session's temporary schema last in "
+        "search_path for the transaction, "
+        "one catalog-guarded block that creates ban_regions, ban_link_notices "
+        "and their indexes and marks both, or else refuses unless both carry "
+        "the mark, one block that revises FAQ message 1 only while it holds "
+        "427's text and refuses unless exactly one such row or one already "
+        "revised row stands, and a read-only post-check of the two marks, "
+        "between BEGIN, the four SET LOCAL settings and COMMIT; a re-run "
+        "issues no DDL and writes no row",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 

@@ -3010,7 +3010,7 @@ def test_f67_a_deletion_meets_the_r15_ruling_clause_by_clause(env):
 def test_the_orm_build_leaves_out_the_tables_a_file_above_353_creates():
     """The reading behind _build's left-out set (_create_or_refuse_tables), on
     the real files and on planted ones. The real files above 353 give 416's
-    two tables and 427's three and nothing else (the words CREATE TABLE in
+    two tables, 427's three and 431's two and nothing else (the words CREATE TABLE in
     comments of 361, 384 and 397 give nothing). Planted: a CREATE TABLE in a line comment, a
     nested block comment, a string, an escape string or a data literal gives
     nothing, and so does IF NOT EXISTS; one in a DO body gives its table; a
@@ -3022,7 +3022,9 @@ def test_the_orm_build_leaves_out_the_tables_a_file_above_353_creates():
                                           "invite_receipts": "416_lobby_invites.sql",
                                           "steam_signin_facts": "427_alt_signals.sql",
                                           "steam_family_shares": "427_alt_signals.sql",
-                                          "conn_markers": "427_alt_signals.sql"}
+                                          "conn_markers": "427_alt_signals.sql",
+                                          "ban_regions": "431_ban_links.sql",
+                                          "ban_link_notices": "431_ban_links.sql"}
     planted = (
         "-- CREATE TABLE players (x int);\n"
         "/* CREATE TABLE players ( /* nested */ x int); */\n"

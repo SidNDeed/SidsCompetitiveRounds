@@ -1996,3 +1996,54 @@ class ConnMarker(Base):
         Index("ix_conn_markers_block", "key_id", "block_mark", "day", "steam_id"),
         Index("ix_conn_markers_last_at", "last_at"),
     )
+
+
+# -- Records kept for an account under an active ban (migration 431) ---------
+# Declared to match 431_ban_links.sql column for column, constraints and
+# indexes included (test_alt_ban_migration_pg.py holds the columns equal).
+# The api reads and writes these tables with SQL text only; no foreign key,
+# for 427's reasons.
+
+class BanRegion(Base):
+    """One row per account, region and connection class: the region of a
+    verified connection in plain words (a country, or a country and its
+    first subdivision; never a city, a postcode or a coordinate), the class
+    word, and the first and last sign-in that read it. Written only for an
+    account under an active ban."""
+    __tablename__ = "ban_regions"
+
+    steam_id = Column(Text, primary_key=True)
+    region = Column(Text, primary_key=True)
+    conn_class = Column(String(8), primary_key=True, server_default=text("'unknown'"))
+    first_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    last_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("steam_id ~ '^[0-9]{1,20}$'", name="ck_ban_regions_steam_id"),
+        CheckConstraint("char_length(region) BETWEEN 1 AND 130 AND region !~ '[\\x01-\\x1f\\x7f-\\x9f]'",
+                        name="ck_ban_regions_region"),
+        CheckConstraint("conn_class IN ('none', 'hosting', 'vpn', 'relay', 'tor', 'unknown')",
+                        name="ck_ban_regions_conn_class"),
+        CheckConstraint("last_at >= first_at", name="ck_ban_regions_seen"),
+        Index("ix_ban_regions_last_at", "last_at"),
+    )
+
+
+class BanLinkNotice(Base):
+    """One row per pair of a banned account and another account that
+    recorded the same address code: when the pair was found, and when its
+    admin notice was posted (NULL until then). No connection fact."""
+    __tablename__ = "ban_link_notices"
+
+    banned_steam_id = Column(Text, primary_key=True)
+    other_steam_id = Column(Text, primary_key=True)
+    noticed_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    posted_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("banned_steam_id ~ '^[0-9]{1,20}$'", name="ck_ban_link_notices_banned_steam_id"),
+        CheckConstraint("other_steam_id ~ '^[0-9]{1,20}$'", name="ck_ban_link_notices_other_steam_id"),
+        CheckConstraint("banned_steam_id <> other_steam_id", name="ck_ban_link_notices_two"),
+        Index("ix_ban_link_notices_other", "other_steam_id"),
+        Index("ix_ban_link_notices_unposted", "noticed_at", postgresql_where=text("posted_at IS NULL")),
+    )

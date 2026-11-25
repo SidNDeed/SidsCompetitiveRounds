@@ -123,7 +123,9 @@
 -- the ordinary read lock (ACCESS SHARE) that every SELECT takes. It reads
 -- the catalogue and the one row. The only statements outside a
 -- guard are BEGIN, the four SET LOCAL lines, the guard blocks themselves and
--- COMMIT.
+-- COMMIT. Run again after 431, which revises message 1 once more, the table
+-- step passes and the FAQ step raises: the file rolls back whole and changes
+-- nothing, but the run ends in an error, not as a quiet re-run.
 --
 -- POST-CHECK. The FAQ block reads the row back after its step, and a last
 -- block reads back the three tables' comments: exactly one message 1 row
