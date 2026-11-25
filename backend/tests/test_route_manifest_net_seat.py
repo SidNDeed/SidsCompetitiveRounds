@@ -1958,7 +1958,13 @@ def test_the_helper_closure_stays_affordable():
     # which the health route reads in both arms; that closure is otherwise
     # equal by name. The bound moves to 606, the measured value, for that
     # reason and no other.
-    assert code_worst <= 606, f"worst code closure {code_worst} of {total}"
+    # The ban record (BAN-RECORD-1) on main f1460a11 (2026-11-24): 607
+    # measured at GET /api/v1/health of 6051 indexed bindings (606 of 6034 at
+    # f1460a11): +1 by name, main._BAN_RECORD_BUILD, the build marker, which
+    # the health route reads in both arms; that closure is otherwise equal by
+    # name. The bound moves to 607, the measured value, for that reason and no
+    # other.
+    assert code_worst <= 607, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
