@@ -258,14 +258,11 @@ def _sentence(word: str, details, ended=None) -> str:
         return (f"Ban refused: {n} bans already in 5 minutes." if n is not None
                 else "Ban refused by the rate limit.")
     if word == "ban_details":
-        # Which texts changed and how (main.admin_ban_details); never the texts.
+        # Which texts changed and how (main.admin_ban_details); the record holds no text (RULING-BAN-RECORD-R1 N1).
         said = [f"{what} {d.get(key)}" for key, what in (("details_change", "details"),
                                                          ("name_change", "kept name"))
                 if d.get(key) in ("added", "changed", "cleared")]
-        out = ("Ban " + " and ".join(said) + ".") if said else "Ban details changed (what changed not recorded)."
-        if d.get("texts_removed") is True:
-            out += " Its texts were removed when the account was deleted."
-        return out
+        return ("Ban " + " and ".join(said) + ".") if said else "Ban details changed (what changed not recorded)."
     if word == "unban":
         rows = _num(d.get("rows"))
         if rows == 0:

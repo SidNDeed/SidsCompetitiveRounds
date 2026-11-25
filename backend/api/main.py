@@ -88348,8 +88348,10 @@ async def admin_ban_details(req: _AdminBanDetailsReq, _slot=Depends(_pc_writer_s
     ban is 404 no_active_ban, nothing written. A text that changes is written
     to the ban row (details_at: the clock read now, NULL when the details are
     cleared) with ONE moderator-log record (ban_details) in the same
-    transaction, holding the old and the new value of each text that changed;
-    a call that changes nothing writes neither and answers the same.
+    transaction, holding the ban's id and, for each text that changed, the
+    word of its change (added, changed, cleared), never a text: the texts
+    stand in the three columns alone (RULING-BAN-RECORD-R1 N1). A call that
+    changes nothing writes neither and answers the same.
 
     Answers {status: "details_saved", steam_id, details ("" when none),
     details_at (UTC ISO 8601 with Z, or null), display_name (what the list
@@ -88382,13 +88384,11 @@ async def admin_ban_details(req: _AdminBanDetailsReq, _slot=Depends(_pc_writer_s
         sets += ["details = CAST(:d AS text)",
                  "details_at = " + ("NULL" if want_details is None else "clock_timestamp()")]
         params["d"] = want_details
-        record.update(details_change=_ban_text_change(row["details"], want_details),
-                      old_details=row["details"], new_details=want_details)
+        record.update(details_change=_ban_text_change(row["details"], want_details))
     if req.name is not None and want_name != row["display_name_at_ban"]:
         sets.append("display_name_at_ban = CAST(:n AS text)")
         params["n"] = want_name
-        record.update(name_change=_ban_text_change(row["display_name_at_ban"], want_name),
-                      old_name=row["display_name_at_ban"], new_name=want_name)
+        record.update(name_change=_ban_text_change(row["display_name_at_ban"], want_name))
     details, details_at, kept = row["details"], row["details_at"], row["display_name_at_ban"]
     if not sets:
         await db.rollback()   # nothing changed: no write and no record; the locks end here
@@ -88408,30 +88408,18 @@ async def admin_ban_details(req: _AdminBanDetailsReq, _slot=Depends(_pc_writer_s
 async def _ban_record_forget(db: AsyncSession, steam_id: str) -> None:
     """R5, in an account deletion's own transaction (delete_player_data calls
     it in phase A, under the account's identity lock, right after the
-    moderator log's scrub; each statement is a plain db.execute of a literal,
-    which the deletion's deadline arms like every other): every ban row of the
-    account loses its kept name, its details and their time; and every
-    ban_details record of those bans loses the texts it holds (old_details,
-    new_details, old_name, new_name), keeping its words of which texts
-    changed, with texts_removed. The scrub rewrites only the whole-token ids
-    inside those texts and leaves the rest of each text as written, so without
-    the second statement the moderator log would still serve a deleted
-    account's details and name. The account has no active ban here (the
-    deletion refuses one, BAN-FIRST-1); its ban rows stay, with their reasons
-    and times."""
+    moderator log's scrub; its one statement is a plain db.execute of a
+    literal, which the deletion's deadline arms like every other): every ban
+    row of the account loses its kept name, its details and their time. No
+    record of the moderator log holds either text (admin_ban_details writes
+    the ban's id and the words of which texts changed, RULING-BAN-RECORD-R1
+    N1), so the three columns are the one place they stood. The account has
+    no active ban here (the deletion refuses one, BAN-FIRST-1); its ban rows
+    stay, with their reasons and times."""
     await db.execute(text(
         "UPDATE player_bans SET display_name_at_ban = NULL, details = NULL, details_at = NULL"
         " WHERE steam_id = :sid"
         "   AND (display_name_at_ban IS NOT NULL OR details IS NOT NULL OR details_at IS NOT NULL)"
-    ), {"sid": steam_id})
-    await db.execute(text(
-        "UPDATE admin_actions"
-        "   SET details = (details - 'old_details' - 'new_details' - 'old_name' - 'new_name')"
-        "                 || jsonb_build_object('texts_removed', true)"
-        " WHERE action = 'ban_details'"
-        "   AND details->>'ban_id' IN (SELECT CAST(pb.id AS text) FROM player_bans pb WHERE pb.steam_id = :sid)"
-        "   AND (details->'old_details' IS NOT NULL OR details->'new_details' IS NOT NULL"
-        "        OR details->'old_name' IS NOT NULL OR details->'new_name' IS NOT NULL)"
     ), {"sid": steam_id})
 
 

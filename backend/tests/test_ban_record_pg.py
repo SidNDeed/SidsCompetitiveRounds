@@ -32,11 +32,12 @@ V5  No answer to the banned account holds either text: the readers of the
     (over the source), and every route of the ban census's lists that a
     banned account calls, with /mod/check, the deletion's refusal, a gated
     route's refusal, the sign-in and the bot's feed, answers without them.
-V6  The deletion after an ended ban: the three columns NULL and the
-    ban_details records without their texts, in the deletion's own
-    transaction (a failure after the statement leaves everything set); the
-    moderator log's own scrub, measured alone, leaves the texts with only the
-    whole-token ids replaced.
+V6  The deletion after an ended ban: the three columns NULL, in the
+    deletion's own transaction (a failure after the statement leaves
+    everything set).
+N1  RULING-BAN-RECORD-R1 with N6: a ban_details record holds the ban's id and
+    the words of which texts changed, never a text (T1 the table's rows, T2
+    the log's three reads, T3 a key inside its ban's id, T4 three ban rows).
 
 CF_TEST_PG_DSN names the lane database (cf_pg.require_live_pg).
 """
@@ -51,6 +52,7 @@ import os
 import re
 import sys
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -546,16 +548,13 @@ def test_v4_save_change_clear_a_name_alone_and_no_change(monkeypatch):
     recs = got["records"]
     assert [r["d"].get("details_change") for r in recs] == ["added", "changed", "cleared", None, "added", None]
     assert [r["d"].get("name_change") for r in recs] == [None, None, None, "changed", "cleared", "added"]
-    assert recs[0]["d"] == {"ban_id": ban_id, "details_change": "added", "old_details": None,
-                            "new_details": "first text"}, recs[0]
-    assert recs[3]["d"] == {"ban_id": ban_id, "name_change": "changed", "old_name": "Details Live",
-                            "new_name": "Typed Name"}, recs[3]
+    # N1 (RULING-BAN-RECORD-R1 section 1 (a)): a record holds the ban's id and the words of which texts changed
+    assert recs[0]["d"] == {"ban_id": ban_id, "details_change": "added"}, recs[0]
+    assert recs[3]["d"] == {"ban_id": ban_id, "name_change": "changed"}, recs[3]
     for r in recs:
         assert (r["admin_steam_id"], r["target_steam_id"], r["affected_steam_ids"], r["reason"]) == (
             admin, sid, [sid], None), r
-        said = modlog.sentence("ban_details", r["d"])
-        for k in ("old_details", "new_details", "old_name", "new_name"):
-            assert not r["d"].get(k) or r["d"][k] not in said, (said, r["d"])
+        assert set(r["d"]) <= {"ban_id", "details_change", "name_change"}, r["d"]
     assert [modlog.sentence("ban_details", r["d"]) for r in recs[:5]] == [
         "Ban details added.", "Ban details changed.", "Ban details cleared.", "Ban kept name changed.",
         "Ban details added and kept name cleared."]
@@ -725,9 +724,9 @@ def test_v4_a_lone_surrogate_is_refused_past_the_bound_and_taken_out_inside_it(m
         got["name accepted"]   # the live row's name is what the list shows; the kept name is the row's
     assert got["name accepted"][2:] == ("st", "Abc", 2), got["name accepted"]
     assert got["name sent again"][0] == 200 and got["name sent again"][2:] == ("st", "Abc", 2), got["name sent again"]
-    first, second = got["records"]
-    assert (first["d"]["details_change"], first["d"]["new_details"]) == ("added", "st"), first["d"]
-    assert (second["d"]["name_change"], second["d"]["new_name"]) == ("changed", "Abc"), second["d"]
+    first, second = got["records"]   # N1: the words alone, no text
+    assert sorted(first["d"]) == ["ban_id", "details_change"] and first["d"]["details_change"] == "added", first["d"]
+    assert sorted(second["d"]) == ["ban_id", "name_change"] and second["d"]["name_change"] == "changed", second["d"]
 
 
 async def _last_record(env, sid):
@@ -867,8 +866,8 @@ def test_v4_two_writers_on_one_ban_interleaved(monkeypatch):
     assert a[0] == b[0] == 200, (a, b)
     assert row["details"] in ("from writer one", "from writer two"), row
     assert len(recs) == 2, recs
-    chain = [(r["d"]["old_details"], r["d"]["new_details"]) for r in recs]
-    assert chain[0][0] is None and chain[1][0] == chain[0][1] and chain[1][1] == row["details"], chain
+    # N1: a record holds the words alone; one text was added, then changed by the second writer
+    assert [r["d"]["details_change"] for r in recs] == ["added", "changed"], recs
 
 
 @pytest.mark.parametrize("first", ["unban", "writer"])
@@ -1172,11 +1171,10 @@ def test_v6_the_deletion_after_an_ended_ban_clears_the_record(monkeypatch):
     assert (row["reason"], row["banned_at"], row["expires_at"]) == (row0["reason"], row0["banned_at"],
                                                                     row0["expires_at"]), row
     assert len(recs) == 1 and recs[0]["target_steam_id"] == ans["placeholder"], recs
-    assert recs0[0]["d"]["old_name"] == "Ban Answers P", recs0   # the name R2 kept at the ban
-    assert recs[0]["d"] == {"ban_id": str(row["id"]), "details_change": "added", "name_change": "changed",
-                            "texts_removed": True}, recs[0]["d"]
-    assert modlog.sentence("ban_details", recs[0]["d"]) == (
-        "Ban details added and kept name changed. Its texts were removed when the account was deleted.")
+    # N1 with N6: the record held the words alone before the deletion and holds the same after it
+    assert recs[0]["d"] == recs0[0]["d"] == {"ban_id": str(row["id"]), "details_change": "added",
+                                              "name_change": "changed"}, (recs0, recs)
+    assert modlog.sentence("ban_details", recs[0]["d"]) == "Ban details added and kept name changed."
     assert listed["bans"] == [], listed
 
 
@@ -1205,33 +1203,172 @@ def test_v6_a_failure_after_the_statement_leaves_the_texts(monkeypatch):
     assert after == before, (before, after)
 
 
-def test_v6_the_scrub_alone_leaves_the_texts(monkeypatch):
-    """The measurement R5 asks for: the deletion with the records' clearing
-    made to match nothing. The moderator log's own scrub rewrites the account's
-    id inside each text to the tombstone and leaves the rest as written; the
-    ban row's columns are cleared by the first statement all the same."""
-    async def body(env):
-        _armed(env)
-        env.mp.setattr(main, "ADMIN_HMAC_SECRET", ADMIN_SECRET)
-        admin = await _admin(env)
-        p = await _account(env)
-        async with _client(env) as c:
-            ban_id = await _texted_ended_ban(env, c, admin, p)
-            await _session(env, p.sid)   # after the ban: the ban writer ends the account's sessions
-            with env.rewriting(" WHERE action = 'ban_details'", " WHERE FALSE AND action = 'ban_details'",
-                               where="'texts_removed'") as hits:
-                r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
-        return r.status_code, r.json(), len(hits), await _row(env, p.sid), await _records(env, ban_id), p.sid
+# -- N1 with N6 (RULING-BAN-RECORD-R1 section 1): no record of the moderator log holds a ban's text ------------
+
+N1_MARKS = ("Zq8DetailsMark", "Zq8NameMark")
+N1_DISCORD = "870000000000000001"
+N1_SAVES = [   # (the save, its fields, the words its record holds); every old and new text carries a mark
+    ("details added", {"details": "Zq8DetailsMark one"}, {"details_change": "added"}),
+    ("details changed", {"details": "Zq8DetailsMark two"}, {"details_change": "changed"}),
+    ("details cleared", {"details": ""}, {"details_change": "cleared"}),
+    ("name changed", {"name": "Zq8NameMark One"}, {"name_change": "changed"}),
+    ("name cleared", {"name": ""}, {"name_change": "cleared"}),
+    ("name added", {"name": "Zq8NameMark Two"}, {"name_change": "added"}),
+    ("both in one call", {"details": "Zq8DetailsMark three", "name": "Zq8NameMark Three"},
+     {"details_change": "added", "name_change": "changed"}),
+]
+
+
+async def _n1_saves(env, c, admin, p):
+    """p banned with its kept name holding the name's mark, then the seven saves of N1_SAVES; the ban's id."""
+    await env.conn.execute("UPDATE players SET display_name = 'Zq8NameMark Live' WHERE id = $1", p.id)
+    await _ban(c, admin, p.sid)
+    ban_id = str((await _row(env, p.sid))["id"])
+    for label, fields, _words in N1_SAVES:
+        r = await _details(c, admin, p.sid, **fields)
+        assert r.status_code == 200, (label, r.status_code, r.text)
+    return ban_id
+
+
+async def _n1_marks_held(env):
+    """Each mark that stands in any row of player_bans and of admin_actions, the row cast to text."""
+    return {table: [m for m in N1_MARKS if await env.conn.fetchval(
+        "SELECT count(*) FROM " + table + " t WHERE strpos(CAST(t AS text), $1) > 0", m)]
+        for table in ("player_bans", "admin_actions")}
+
+
+def test_n1_t1_each_save_writes_a_record_of_the_words_alone(monkeypatch):
+    """T1: after each kind of save (details added, changed, cleared; name added, changed, cleared; both in one
+    call) the written admin_actions row is read from the table. The reach first: one record per save, in
+    order. Its details hold exactly the ban's id and the words of which texts changed, and neither mark stands
+    anywhere in the row cast to text. Mutants: new_details back into the record; old_name back."""
     out = {}
 
-    async def run(env):
-        out["v"] = await body(env)
-    case(monkeypatch, run, prefix="banrec")
-    st, ans, hits, row, recs, sid = out["v"]
-    assert st == 200 and hits == 1, (st, hits)
-    tomb = ans["placeholder"]
-    assert (row["details"], row["display_name_at_ban"]) == (None, None), row
-    (rec,) = recs
-    assert (rec["d"]["new_details"], rec["d"]["new_name"]) == ("alt of %s, seen twice" % tomb, "Alias %s x" % tomb), rec
-    assert sid not in json.dumps(rec["d"]), rec
-    print("V6 the scrub alone leaves:", {k: rec["d"][k] for k in ("new_details", "new_name")})
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        p = await env.player("N1 Account")
+        async with _client(env) as c:
+            out["ban_id"] = await _n1_saves(env, c, admin, p)
+        out["rows"] = [dict(r) for r in await env.conn.fetch(
+            "SELECT CAST(a.details AS text) AS d, CAST(a AS text) AS whole FROM admin_actions a"
+            " WHERE a.action = 'ban_details' AND a.details->>'ban_id' = $1 ORDER BY a.created_at, a.id",
+            out["ban_id"])]
+    case(monkeypatch, body, prefix="banrec")
+    rows = out["rows"]
+    for (label, _f, _w), r in zip(N1_SAVES, rows):
+        print("[T1] %-18s %s" % (label, r["d"]))
+    assert len(rows) == len(N1_SAVES), [r["d"] for r in rows]
+    keys = [(label, json.loads(r["d"])) for (label, _f, _w), r in zip(N1_SAVES, rows)]
+    assert keys == [(label, {"ban_id": out["ban_id"], **words}) for label, _f, words in N1_SAVES], keys
+    held = [(label, m) for (label, _f, _w), r in zip(N1_SAVES, rows) for m in N1_MARKS if m in r["whole"]]
+    assert held == [], held
+
+
+def test_n1_t2_the_logs_three_reads_hold_the_record_and_no_text(monkeypatch):
+    """T2: after T1's saves, the moderator log's three reads, each with its own credentials: the admin list
+    of actions and the moderator log (each with its admin signature), and the bot's twin (the internal key and
+    the admin's linked Discord id). Each answers 200 and holds the ban's ban_details record, its id (asserted
+    first), and no mark. Mutant: new_details back into the record (red on all three)."""
+    out = {}
+
+    async def body(env):
+        _open(env)
+        admin = await _admin(env)
+        await env.conn.execute("UPDATE players SET discord_id = $1 WHERE steam_id = $2", N1_DISCORD, admin)
+        p = await env.player("N1 Account")
+        async with _client(env) as c:
+            out["ban_id"] = await _n1_saves(env, c, admin, p)
+            reads = {
+                "/api/v1/admin/actions": ({"admin_steam_id": admin, "action": "ban_details", "target_steam_id": p.sid,
+                                           "hmac_signature": _sig(admin, "admin_actions_list", "")}, {}),
+                "/api/v1/admin/modlog": ({"admin_steam_id": admin, "action": "ban_details", "player": p.sid,
+                                          "hmac_signature": _sig(admin, "modlog_list", "")}, {}),
+                "/api/v1/internal/modlog": ({"action": "ban_details", "player": p.sid},
+                                            {"X-Internal-Key": INTERNAL_KEY, "X-Actor-Discord-Id": N1_DISCORD}),
+            }
+            out["reads"] = {}
+            for path, (params, headers) in reads.items():
+                r = await c.get(path, params=params, headers=headers)
+                out["reads"][path] = (r.status_code, r.text)
+    case(monkeypatch, body, prefix="banrec")
+    for path, (st, t) in out["reads"].items():
+        print("[T2] %-26s %s %s" % (path, st, t[:160]))
+    reached = {path: (st, out["ban_id"] in t) for path, (st, t) in out["reads"].items()}
+    assert reached == {path: (200, True) for path in reached}, reached
+    held = {path: [m for m in N1_MARKS if m in t] for path, (_st, t) in out["reads"].items()}
+    assert held == {path: [] for path in held}, held
+
+
+def test_n1_t3_a_key_inside_its_bans_id_leaves_no_mark_after_the_deletion(monkeypatch):
+    """T3, the review's state: an account whose key stands as a whole token inside its ban's id (key 1234, ban
+    id aaaaaaaa-1234-4aaa-8aaa-aaaaaaaaaaaa, a details record), the ban ended, then the account deleted. The
+    reach first: both marks stood in player_bans before, and the deletion answered anonymized. After it no row
+    of player_bans and none of admin_actions holds a mark."""
+    key, ban_id = "1234", uuid.UUID("aaaaaaaa-1234-4aaa-8aaa-aaaaaaaaaaaa")
+    out = {}
+
+    async def body(env):
+        _open(env)
+        _armed(env)
+        admin = await _admin(env)
+        p = await env.player("N1 Key Account")
+        await env.conn.execute("UPDATE players SET steam_id = $1 WHERE id = $2", key, p.id)
+        await env.conn.execute(
+            "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+            " VALUES ($1, $2, 'n1 t3', $3, NOW() - INTERVAL '10 minutes', NOW() + INTERVAL '1 day')", ban_id, key, admin)
+        async with _client(env) as c:
+            r = await _details(c, admin, key, details="Zq8DetailsMark t3", name="Zq8NameMark T3")
+            assert r.status_code == 200, r.text
+            out["record"] = [x["d"] for x in await _records(env, ban_id)]
+            out["before"] = await _n1_marks_held(env)
+            await _end(env, ban_id)
+            await _session(env, key)
+            r = await asyncio.wait_for(_delete(c, SimpleNamespace(sid=key, id=p.id), token=TOKEN), BOUND)
+            out["deleted"] = (r.status_code, r.json())
+        out["after"] = await _n1_marks_held(env)
+    case(monkeypatch, body, prefix="banrec")
+    print("[T3]", out)
+    assert out["before"]["player_bans"] == list(N1_MARKS), out["before"]
+    assert out["deleted"][0] == 200 and out["deleted"][1]["status"] == "anonymized", out["deleted"]
+    assert out["after"] == {"player_bans": [], "admin_actions": []}, out["after"]
+
+
+def test_n1_t4_the_deletion_clears_the_three_columns_on_every_ban_row(monkeypatch):
+    """T4: an account with three ban rows, the two ended ones holding details and a kept name, the newest lifted
+    holding its kept name. The reach first: the rows held them, and the deletion answered anonymized. After it
+    all three hold null in the three columns. Mutant: the first statement of _ban_record_forget limited to the
+    newest row."""
+    three = ("display_name_at_ban", "details", "details_at")
+    read = "SELECT id, " + ", ".join(three) + " FROM player_bans WHERE id = ANY($1::uuid[])"
+    out = {}
+
+    async def body(env):
+        _open(env)
+        _armed(env)
+        admin = await _admin(env)
+        p = await _account(env)
+        ids = []
+        async with _client(env) as c:
+            for n in (1, 2):
+                await _ban(c, admin, p.sid)
+                ids.append((await _row(env, p.sid))["id"])
+                r = await _details(c, admin, p.sid, details="Zq8DetailsMark %d" % n, name="Zq8NameMark %d" % n)
+                assert r.status_code == 200, r.text
+                await _end(env, ids[-1])
+            await _ban(c, admin, p.sid)
+            ids.append((await _row(env, p.sid))["id"])
+            await _end(env, ids[-1], lifted=True)
+            await _session(env, p.sid)   # after the bans: the ban writer ends the account's sessions
+            out["before"] = {str(r["id"]): [r[k] for k in three] for r in await env.conn.fetch(read, ids)}
+            r = await asyncio.wait_for(_delete(c, p, token=TOKEN), BOUND)
+            out["deleted"] = (r.status_code, r.json())
+        out["after"] = {str(r["id"]): [r[k] for k in three] for r in await env.conn.fetch(read, ids)}
+        out["ids"] = [str(i) for i in ids]
+    case(monkeypatch, body, prefix="banrec")
+    print("[T4]", out)
+    first, second, newest = out["ids"]
+    assert len(out["before"]) == 3 and all(all(out["before"][i]) for i in (first, second)), out["before"]
+    assert out["before"][newest][0] == "Ban Answers P" and out["before"][newest][1:] == [None, None], out["before"]
+    assert out["deleted"][0] == 200 and out["deleted"][1]["status"] == "anonymized", out["deleted"]
+    assert out["after"] == {i: [None, None, None] for i in out["ids"]}, out["after"]
