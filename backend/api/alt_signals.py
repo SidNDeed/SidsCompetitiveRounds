@@ -66,8 +66,8 @@ RELATION_LIST_CAP = 25
 STORED_CLASSES = ("none", "hosting", "vpn", "relay", "tor", "unknown")
 
 # The one constant every disclosure surface is pinned to (ruling R6): the
-# last paragraph of FAQ message 1 (docs/FAQ.md and migration 427), the bot's
-# answer, and the notice check the recording runs.
+# opening of the last paragraph of FAQ message 1 (docs/FAQ.md and migrations
+# 427 and 431), the bot's answer, and the notice check the recording runs.
 DISCLOSURE = (
     "**What the server may record at sign-in, for fair-play review:** what Steam reports about "
     "your account, namely whether your copy of ROUNDS is owned or borrowed through Steam Family "
@@ -78,6 +78,17 @@ DISCLOSURE = (
     "times each was first and last seen, and on how many days a storage limit was reached. Each "
     "record is deleted no later than 90 days after it was last seen, and at once if you delete "
     "your account.")
+
+# The sentence added for an account under an active ban (ALT-BAN-1, F2), word
+# for word as Sid approved it, and FAQ message 1's closing paragraph once
+# migration 431 has run: the paragraph above, one space, the sentence. The
+# recording for a banned account runs only while the posted message holds
+# NOTICE_BAN; the lane's own recording still checks DISCLOSURE, which
+# NOTICE_BAN holds.
+BAN_DISCLOSURE = (
+    "For a banned account the server also records the rough region of its connection "
+    "(country and state) and keeps these records until the ban has ended.")
+NOTICE_BAN = DISCLOSURE + " " + BAN_DISCLOSURE
 
 _ASCII_SPACE = " \t\n\r\x0b\x0c"
 _ASG_HEX = _asg_re.compile(r"[0-9a-fA-F]+")

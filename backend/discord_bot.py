@@ -2451,7 +2451,8 @@ FAQ_ENTRIES = [
             "it is IPv4 or IPv6, and its connection class, such as VPN or hosting. With these go the "
             "times each was first and last seen, and on how many days a storage limit was reached. "
             "Each record is deleted no later than 90 days after it was last seen, and at once if you delete "
-            "your account.\n"
+            "your account. For a banned account the server also records the rough region of its connection "
+            "(country and state) and keeps these records until the ban has ended.\n"
             f"The same text closes the first FAQ message in {FAQ_INFO_CHANNEL}."),
         # KEEP UNDER ~460 CHARS: _post_ingame_chat hard-cuts at 490.
         "short": ("At sign-in the server may record what Steam reports about your account (an owned or "

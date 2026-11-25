@@ -75,5 +75,41 @@
   "steam_family_shares.key_id",
   "conn_markers.steam_id",
   "conn_markers.key_id"
- ]
+ ],
+ "ban_links": {
+  "_README": [
+   "ALT-BAN-1. Every column of the two tables migration 431 creates, mapped the",
+   "same way against FAQ message 1's closing paragraph once 431 has run",
+   "(alt_signals.NOTICE_BAN). Bookkeeping is 431's closed list: steam_id,",
+   "banned_steam_id and other_steam_id (the row keys). The pair table holds only",
+   "what the two accounts' disclosed records already say (ruling ALT-BAN-T0,",
+   "doubt 10); its two times are the notice's own and are kept while the ban stands."
+  ],
+  "categories": {
+   "region": {
+    "words": ["For a banned account", "rough region of its connection", "(country and state)"],
+    "columns": ["ban_regions.region"]
+   },
+   "class": {
+    "words": ["connection class"],
+    "columns": ["ban_regions.conn_class"]
+   },
+   "times": {
+    "words": ["first and last seen"],
+    "columns": ["ban_regions.first_at", "ban_regions.last_at"]
+   },
+   "pair": {
+    "words": ["codes of your internet address", "For a banned account", "until the ban has ended"],
+    "columns": ["ban_link_notices.noticed_at", "ban_link_notices.posted_at"]
+   }
+  },
+  "sentence_only": {
+   "kept": ["keeps these records until the ban has ended"]
+  },
+  "bookkeeping": [
+   "ban_regions.steam_id",
+   "ban_link_notices.banned_steam_id",
+   "ban_link_notices.other_steam_id"
+  ]
+ }
 }

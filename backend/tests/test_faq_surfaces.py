@@ -1369,8 +1369,8 @@ def _faq_carriers(files):
 def test_faq_md_matches_the_newest_migration_carrying_each_message():
     """docs/FAQ.md's six sections are the text the bot edits into #scr-faq,
     and migrations carry it there: 338 wrote all six, and a later migration
-    that revises one message carries that message's new text (427 revises
-    message 1). For each section N, the NEWEST numbered migration carrying a
+    that revises one message carries that message's new text (427 and then
+    431 revise message 1). For each section N, the NEWEST numbered migration carrying a
     $faqN$ literal carries docs/FAQ.md's section N verbatim, at Discord's
     2,000 characters or fewer. Before 338 the only way to correct a posted
     message was to append a new one under the wrong text (134's Part C), and

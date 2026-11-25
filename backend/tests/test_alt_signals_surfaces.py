@@ -232,14 +232,16 @@ def _ddl_outside(text):
     return found
 
 
-def _disclosure_problems(sql, fixture, sentence):
-    """Everything wrong between 427's DDL, the table and the sentence."""
+def _disclosure_problems(sql, fixture, sentence, want_tables=TABLES, bookkeeping=BOOKKEEPING, number="427"):
+    """Everything wrong between 427's DDL (or 431's, with its tables, its
+    closed bookkeeping list and its number), the table and the sentence."""
+    BOOKKEEPING = bookkeeping  # noqa: N806 - the closed list this reading holds
     problems = ["a CREATE TABLE line the reader does not know: %s" % u for u in _ddl_unknown(sql)]
     problems += ["a statement the closed table of heads does not read: %s" % u
                  for u in _ddl_outside(sql)]
     tables = _ddl_columns(sql)
-    if set(tables) != set(TABLES):
-        problems.append("the DDL creates %s, not the three tables" % sorted(tables))
+    if set(tables) != set(want_tables):
+        problems.append("the DDL creates %s, not the %d tables" % (sorted(tables), len(want_tables)))
     ddl = {"%s.%s" % (t, c) for t, cols in tables.items() for c in cols}
     mapped = {}
     for cat, spec in fixture["categories"].items():
@@ -252,11 +254,11 @@ def _disclosure_problems(sql, fixture, sentence):
                             % (col, sorted(BOOKKEEPING)))
     for col in sorted(ddl):
         if col not in mapped:
-            problems.append("%s is a column of 427 that the disclosure table does not map" % col)
+            problems.append("%s is a column of %s that the disclosure table does not map" % (col, number))
         elif len(mapped[col]) > 1:
             problems.append("%s is mapped twice: %s" % (col, mapped[col]))
     for col in sorted(set(mapped) - ddl):
-        problems.append("%s is mapped and is no column of 427" % col)
+        problems.append("%s is mapped and is no column of %s" % (col, number))
     for cat, spec in sorted(fixture["categories"].items()):
         if not spec["words"] or not spec["columns"]:
             problems.append("category %s names no words or no columns" % cat)
@@ -279,6 +281,37 @@ def test_every_column_of_the_three_tables_is_disclosed_or_bookkeeping():
     tables = _ddl_columns(sql)
     assert {t: len(c) for t, c in tables.items()} == {
         "steam_signin_facts": 14, "steam_family_shares": 5, "conn_markers": 9}, tables
+
+
+MIGRATION_431 = os.path.join(SQL_DIR, "431_ban_links.sql")
+TABLES_431 = ("ban_regions", "ban_link_notices")
+# 431's closed bookkeeping list: the row keys, the account's own id and the
+# two ids of a pair (ruling ALT-BAN-T0, doubt 10: the pair table holds only
+# what the two accounts' disclosed records already say).
+BOOKKEEPING_431 = frozenset({"steam_id", "banned_steam_id", "other_steam_id"})
+
+
+def test_every_column_of_431s_two_tables_is_disclosed_or_bookkeeping():
+    """The same reading over 431 against the paragraph it closes message 1
+    with (NOTICE_BAN), from the fixture's ban_links part. 5 and 4 columns.
+    Negative control: a column 431 does not map, the region's words gone
+    from the sentence, and a pair column called bookkeeping off the closed
+    list each fail."""
+    sql, part = _read(MIGRATION_431), _fixture()["ban_links"]
+    args = dict(want_tables=TABLES_431, bookkeeping=BOOKKEEPING_431, number="431")
+    assert _disclosure_problems(sql, part, alt_signals.NOTICE_BAN, **args) == []
+    assert {t: len(c) for t, c in _ddl_columns(sql).items()} == {"ban_regions": 5, "ban_link_notices": 4}
+    grown = sql.replace("      last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),\n      CONSTRAINT ban_regions_pkey",
+                        "      last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),\n"
+                        "      city        TEXT        NULL,\n      CONSTRAINT ban_regions_pkey")
+    assert grown != sql
+    assert any("ban_regions.city is a column of 431" in p
+               for p in _disclosure_problems(grown, part, alt_signals.NOTICE_BAN, **args))
+    cut = alt_signals.NOTICE_BAN.replace("(country and state)", "")
+    assert any("country and state" in p for p in _disclosure_problems(sql, part, cut, **args))
+    wide = json.loads(json.dumps(part))
+    wide["bookkeeping"].append("ban_link_notices.noticed_at")
+    assert any("not on the closed list" in p for p in _disclosure_problems(sql, wide, alt_signals.NOTICE_BAN, **args))
 
 
 _TOP_PLANTS = ("IMPORT FOREIGN SCHEMA alt_remote FROM SERVER alt_server INTO public;",
@@ -423,17 +456,19 @@ def _last_paragraph(body):
 
 def test_the_sentence_closes_message_1_in_the_faq_and_in_its_newest_carrier():
     """docs/FAQ.md's message 1 and the newest migration carrying it both end
-    with the sentence, and the two are the same text; the bot's answer holds
-    it. The recording's notice check reads the posted message for the same
-    constant, so this is where a dropped sentence is caught."""
+    with the paragraph (since 431: the lane's sentence, one space, the
+    sentence for a banned account), and the two are the same text; the bot's
+    answer holds it. The recordings' notice checks read the posted message
+    for the same constants, so this is where a dropped sentence is caught."""
     faq = _faq_message(1)
-    assert _last_paragraph(faq) == alt_signals.DISCLOSURE
+    assert _last_paragraph(faq) == alt_signals.NOTICE_BAN
+    assert alt_signals.NOTICE_BAN == alt_signals.DISCLOSURE + " " + alt_signals.BAN_DISCLOSURE
     name, body = _newest_carrier(1, _sql_files())
-    assert name == "427_alt_signals.sql", name
-    assert _last_paragraph(body) == alt_signals.DISCLOSURE
+    assert name == "431_ban_links.sql", name
+    assert _last_paragraph(body) == alt_signals.NOTICE_BAN
     assert body == faq
     assert len(faq) <= 2000, len(faq)
-    assert alt_signals.DISCLOSURE in _bot_entry("recorded", _lift_bot())["answer"]
+    assert alt_signals.NOTICE_BAN in _bot_entry("recorded", _lift_bot())["answer"]
 
 
 def test_the_carrier_rule_can_fail():
@@ -448,8 +483,9 @@ def test_the_carrier_rule_can_fail():
     with pytest.raises(AssertionError, match="carries 2"):
         _newest_carrier(1, {"427_b.sql": new + new})
     faq = _faq_message(1)
-    assert _last_paragraph(faq + "\n\nA paragraph after it.") != alt_signals.DISCLOSURE
-    assert _last_paragraph(faq.replace("delete your account", "close your account")) != alt_signals.DISCLOSURE
+    assert _last_paragraph(faq + "\n\nA paragraph after it.") != alt_signals.NOTICE_BAN
+    assert _last_paragraph(faq.replace("delete your account", "close your account")) != alt_signals.NOTICE_BAN
+    assert _last_paragraph(faq.replace("until the ban has ended", "until the ban ends")) != alt_signals.NOTICE_BAN
 
 
 # -- the bot's `recorded` entry ----------------------------------------------------
