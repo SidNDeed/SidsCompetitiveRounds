@@ -1441,6 +1441,7 @@ def test_census_complete_layer_frozen_whole():
     hand), plus the two coarse forms of QAPPLY-1 (QAPPLY_FROZEN) and the one
     coarse form of the ban sweep (BAN_SWEEP_FROZEN), both frozen by hand at
     the stack, plus the five coarse forms of MDPL's change (MDPL_FROZEN,
+    frozen by hand), plus the two coarse forms of the ban record (BAN_RECORD_FROZEN,
     frozen by hand), plus the complete layer, which also holds the moderator
     log block's two complete forms, the ban sweep block's five and MDPL's
     twenty; the snapshot reader's builder adds one more form to the complete
@@ -1456,13 +1457,15 @@ def test_census_complete_layer_frozen_whole():
     # freeze lists only the files with a coarse form
     assert complete == {k + ro_census.COMPLETE for k in r7.CENSUS_FILES}
     assert coarse <= set(r7.CENSUS_FILES)
-    # The hand-frozen blocks that hold forms of BOTH layers, one row per lane:
-    # (the block, its count, its coarse forms, its complete forms). Each row's
-    # part is a term of its own in the three sums below.
+    # The hand-frozen blocks counted by layer, one row per lane: (the block,
+    # its count, its coarse forms, its complete forms). Each row's part is a
+    # term of its own in the three sums below. The ban record's block holds
+    # coarse forms only (complete 0).
     BOTH_LAYER_BLOCKS = [
         (fz.MODLOG_FROZEN, fz.MODLOG_COUNT, 5, 2),
         (fz.BAN_SWEEP_FROZEN, fz.BAN_SWEEP_COUNT, 1, 5),
         (fz.MDPL_FROZEN, fz.MDPL_COUNT, 5, 20),
+        (fz.BAN_RECORD_FROZEN, fz.BAN_RECORD_COUNT, 2, 0),
     ]
     for block, count, n_coarse, n_complete in BOTH_LAYER_BLOCKS:
         b_coarse = {k: v for k, v in block.items() if not k.endswith(ro_census.COMPLETE)}
