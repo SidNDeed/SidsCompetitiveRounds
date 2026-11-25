@@ -52,6 +52,10 @@ LANE_COUNTED = {
                               "through _identity_lock_many, so the takers rule below does not find it"),
     "_ban_set_length_core": ("the length change's writer of player_bans, which test_every_writer counts by its "
                              "call (its one caller, and the core's lock before that call)"),
+    "_ban_details_identities": ("the ban details route's lock (BAN-RECORD-1) as test_ban_answers_pg's "
+                                "test_every_writer counts it; it locks through _mail_lock_identities"),
+    "_ban_record_forget": ("the account deletion's clear of the ban record (BAN-RECORD-1), which test_every_writer "
+                           "counts by its call (its one caller, after the deletion's identity lock)"),
 }
 
 # (module, enclosing function, name): a call that is not the direct value of an Await, and why.
@@ -115,9 +119,10 @@ def await_failures(sources, names, plain=None, listed=None):
     trees = {m: ast.parse(s) for m, s in sources.items()}
     texts = B.StatementTexts(trees)
     # the takers rule: a coroutine function whose own body executes an advisory lock is a locker too, and its calls
-    # are held like the lists' names. At this writing it adds 32 names beyond the lists, main._pc_lock_blob among
-    # them. A function that locks only through another locker (_mail_lock_identities, through _identity_lock_many)
-    # is not found by it; LANE_COUNTED holds the one a lane test counts.
+    # are held like the lists' names. As measured at a9c1ac01 and again at BAN-RECORD-1's tip, the rule's set holds
+    # 58 names from 60 functions, and 30 of the names, from 32 functions, stand beyond act_names(), main._pc_lock_blob
+    # among them. A function that locks only through another locker (_mail_lock_identities, through
+    # _identity_lock_many) is not found by it; LANE_COUNTED holds the ones a lane test counts.
     takers = {fn.name for m, t in trees.items() for fn in B._functions(t) if isinstance(fn, ast.AsyncFunctionDef)
               and any(isinstance(c, ast.Call) and B._name_of(c) in EXECUTES
                       and ADVISORY.search(texts.call_text(m, c)) for c in B._own_nodes(fn))}
@@ -172,7 +177,8 @@ def test_every_act_the_census_counts_by_its_call_is_awaited():
     names = act_names()
     out, _keys, counts = await_failures(api_sources(), names)
     assert out == [], "\n".join(out)
-    # the walk reads what it is about (act_names() numbers 47 at this writing, the takers rule 32 more)
+    # the walk reads what it is about (act_names() numbers 49 at BAN-RECORD-1's tip, 47 at a9c1ac01; the takers
+    # rule's set 58 names from 60 functions, of them 30 names from 32 functions beyond act_names())
     assert len(names) >= 30 and counts["calls"] >= 250 and counts["advisory"] >= 50, (len(names), counts)
 
 

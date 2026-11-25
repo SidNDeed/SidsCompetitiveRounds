@@ -4089,6 +4089,33 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
                 + BOT_TEXT_ESCAPE_COUNT + QAPPLY_COUNT + BAN_SWEEP_COUNT + MDPL_COUNT)
+
+
+# Hand edit for BAN-RECORD-1 (the integrator's paper ORDER-BAN-RECORD-FX2-ADD1, 25 Nov 2026): two
+# docstrings of api/main.py that name the database engine in prose, the dsntext forms of the lane's
+# first commit, which added both and froze neither. Neither holds an address, a user, a role or any
+# text a connection is built from. Frozen by hand, not by a re-derivation; FROZEN_COUNT is 906 after
+# this block (904 before it).
+BAN_RECORD_FROZEN = {
+    'api/main.py': [
+        # main.py _ban_text_controls_out, its docstring: prose on what the function drops from a ban's
+        #  text, naming PostgreSQL's text type
+        ('dsntext', 's without its control characters (C0, DEL, C1) and lone surrogates (no\n    UTF-8 form, so PostgreSQL text cannot carry one); LF stays when keep_lf.'),
+        # main.py _ban_nul_and_lone_surrogates_out, its docstring: prose on what the function drops from a
+        #  ban route's text, naming PostgreSQL's text type and the database driver
+        ('dsntext', "v with every NUL and every lone surrogate taken out (a str; anything\n    else as it is). PostgreSQL's text holds no NUL, and a lone surrogate has\n    no UTF-8 form, so neither the database driver nor a 422's body can carry\n    one; the ban routes' texts and the sign-up's region drop both, never\n    refuse them (BAN-RECORD-1, RULING-BAN-RECORD-Q5 point 2, RULING-BAN-RECORD-R1\n    N3.2). A new ban's reason is stored so; the moderator log's record of a\n    repeat or a length change keeps the log's own rule (_modlog_text: each\n    such character becomes the replacement character), so the row and the\n    record differ there."),
+    ],
+}
+BAN_RECORD_COUNT = 2
+for _k, _v in BAN_RECORD_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
+                + R11_ID_COUNT + R11_OPEN_COUNT + B10_MERGE_COUNT
+                + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
+                + BOT_TEXT_ESCAPE_COUNT + QAPPLY_COUNT + BAN_SWEEP_COUNT + MDPL_COUNT
+                + BAN_RECORD_COUNT)
+# On the merge of main e2b485d9 into ALT-BAN-1 (25 Nov 2026) the lane's two blocks below stand
+# after BAN_RECORD's, so that their FROZEN_COUNT assignment stays the file's last: 906 + 0 + 0 = 906.
 # CHEAT-ALT-1 (22 Nov 2026, finding R2-7): api/alt_signals.py joins
 # CENSUS_FILES (main.py imports it). Its forms, reviewed by hand: none in
 # either layer (it imports hashlib, hmac, ipaddress, re and

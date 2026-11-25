@@ -8220,7 +8220,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
                               review_calibrate_build=_REVIEW_CALIBRATE_BUILD, qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
-                              ban_sweep_build=_BAN_SWEEP_BUILD, ban_answers_build=_BAN_ANSWERS_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD, ban_answers_build=_BAN_ANSWERS_BUILD, ban_record_build=_BAN_RECORD_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               account_deletion_lock_build=_ACCOUNT_DELETION_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -8301,7 +8301,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               mail_spam_case_lock_build=_MAIL_SPAM_CASE_LOCK_BUILD,
                               modlog_build=_MODLOG_BUILD,
                               review_calibrate_build=_REVIEW_CALIBRATE_BUILD, qapply_build=_QAPPLY_BUILD, lfp_casual_build=_LFP_CASUAL_BUILD,
-                              ban_sweep_build=_BAN_SWEEP_BUILD, ban_answers_build=_BAN_ANSWERS_BUILD,
+                              ban_sweep_build=_BAN_SWEEP_BUILD, ban_answers_build=_BAN_ANSWERS_BUILD, ban_record_build=_BAN_RECORD_BUILD,
                               bot_text_build=_BOT_TEXT_BUILD,
                               account_deletion_lock_build=_ACCOUNT_DELETION_LOCK_BUILD,
                               build_manifest=_build_manifest.health_word(),
@@ -12284,7 +12284,7 @@ def _h2h_cache_clock() -> float:
     return time.monotonic()
 
 
-async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
+async def _h2h_profile_block(db, target_id, target_steam_id) -> H2HProfileBlock | None:
     """The card's header for ONE player, read fresh on every request.
 
     Field matrix (design v2 A-5, pinned by test_h2h_profile_card.py):
@@ -12297,9 +12297,9 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
     presence heartbeat. Gold and Discord identity are NOT in the response.
     Title and tier strings come from the canonical utilities the boards use
     (_display_title_sync with the podium maps, _rank_info), never a
-    re-derivation (A-L). is_banned (B3) says whether the player is under an
-    active ban (models.player_ban_active_sql); the marker in is_online
-    already reads false for one (B1), and last_seen_s is unchanged."""
+    re-derivation (A-L). is_banned (B3): an active ban (player_ban_active_sql)
+    of the row read by its id AND the steam id the request named (BAN-RECORD-1
+    R0): a row that no longer carries that id gives None, as no row does."""
     row = (await db.execute(text(f"""
         SELECT p.steam_id, p.display_name, p.total_xp,
                si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
@@ -12314,8 +12314,8 @@ async def _h2h_profile_block(db, target_id) -> H2HProfileBlock | None:
           FROM players p
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE p.id = :pid
-    """), {"pid": target_id})).mappings().first()
+         WHERE p.id = :pid AND p.steam_id = CAST(:sid AS VARCHAR)
+    """), {"pid": target_id, "sid": target_steam_id})).mappings().first()
     if row is None:
         return None
     rating = float(row["rating"]) if row["rating"] is not None else 1500.0
@@ -12532,7 +12532,7 @@ async def _h2h_card_blocks(db, viewer_steam_id, target_steam_id, viewer_id, targ
     global _h2h_card_last_warn
     try:
         async with db.begin_nested():
-            profile = await _h2h_profile_block(db, target_id)
+            profile = await _h2h_profile_block(db, target_id, target_steam_id)
             modes = await _h2h_modes_cached(db, viewer_steam_id, target_steam_id, viewer_id, target_id)
             return profile, modes
     except Exception as ex:
@@ -46619,8 +46619,8 @@ async def internal_tournament_checkin_response(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    # Bans part 2a (S6): the bot answers for the named player.
-    await _ban_lock_and_gate(db, [body.steam_id])
+    if not _mod_target_ok(body.steam_id): return _checkin_outside_domain(body.answer)  # noqa: E701 (one line: main.py's line keys stay put)
+    await _ban_lock_and_gate(db, [body.steam_id])   # Bans part 2a (S6): the bot answers for the named player.
     from tournaments import handle_tournament_checkin_response
     result = await handle_tournament_checkin_response(
         db, body.match_id, body.steam_id, body.answer)
@@ -47977,9 +47977,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         f"delete:{steam_id}".encode(),
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(sig, expected):
+    if not _signature_matches(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
-
+    if not _mod_target_ok(steam_id): return _ban_deletion_outside_domain(steam_id)  # noqa: E701 (one line: main.py's line keys stay put)
     # MDPL R6a: this attempt's deadline (_deletion_bounded). Every statement
     # of the attempt, waits included, ends by it: the bound re-arms the
     # session's timeouts before each one (_deletion_arm_every_statement).
@@ -48607,7 +48607,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # digit, so a longer digit run holding the id is left as it is (the
     # substring rewrite removed in round 4 is the case this rule excludes).
     # Same table, same lock mode, rows in id order.
-    await _modlog_scrub_records(db, [steam_id, _prior_discord_id], _tomb)
+    await _modlog_scrub_records(db, [steam_id, _prior_discord_id], _tomb); await _ban_record_forget(db, steam_id)  # BAN-RECORD-1 R5
 
     # Anonymize the player row. Keep rating_history / glicko / matches untouched
     # so Glicko recalcs and opponent histories stay consistent.
@@ -51306,7 +51306,7 @@ def _verify_admin_hmac(admin_steam_id: str, action: str, target: str, signature)
         _admin_canonical(admin_steam_id, action, target).encode(),
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return _signature_matches(signature, expected)
 
 
 def _require_internal_key(x_internal_key: str | None) -> None:
@@ -51333,7 +51333,7 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
 async def _is_admin_roster(db: AsyncSession, steam_id: str) -> bool:
     """On the admin roster (admin_users), the ban not read. Only _is_admin, _require_admin_roster and
     _mail_lock_admin(roster=True) call it; see _require_admin_roster for the one route that may."""
-    if not steam_id:
+    if not _mod_target_ok(steam_id):   # outside the one domain: no admin, and never bound (RULING-BAN-RECORD-R1 N3.2)
         return False
     r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
     return r.scalar_one_or_none() is not None
@@ -51895,50 +51895,50 @@ async def admin_list_bans(
     row written before migration 418 gave every ban an end, AFTER banned_at, its last key in 1.41.0: the client cuts each
     row from one `"id":"` to the next and reads its six keys with
     ExtractJsonString, so two trailing keys with other names cannot be read
-    in place of any of them."""
+    in place of any of them; BAN-RECORD-1's ten keys follow them (CONTRACT-BAN-1124 point 1)."""
     await _require_admin(db, admin_steam_id, "list_bans", "", hmac_signature)
-    search_sql = ""
-    params: dict = {}
+    if "\x00" in search: return {"bans": [], "total": 0, "limit": limit, "offset": offset}  # noqa: E701 (one line: main.py's line keys stay put)
+    search_sql, params = "", {}   # a search holding a NUL matches no stored text (PostgreSQL text holds none): the empty page above, no statement
     if search:
-        # Case-insensitive on display_name OR steam_id. Bound parameter, never
-        # interpolated (#188); ILIKE wildcards in user input are escaped so a
-        # '%' typed in the box searches for a literal '%'.
-        search_sql = (" AND (p.display_name ILIKE :q ESCAPE '\\'"
-                      "      OR pb.steam_id   ILIKE :q ESCAPE '\\')")
+        # Case-insensitive on the live name, the kept name, the details (BAN-RECORD-1 R3)
+        # OR steam_id. Bound parameter, never interpolated (#188); ILIKE wildcards in user
+        # input are escaped so a '%' typed in the box searches for a literal '%'.
+        search_sql = (" AND (p.display_name ILIKE :q ESCAPE '\\' OR pb.display_name_at_ban ILIKE :q ESCAPE '\\'"
+                      "      OR pb.details ILIKE :q ESCAPE '\\' OR pb.steam_id   ILIKE :q ESCAPE '\\')")
         _esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params["q"] = f"%{_esc}%"
-    total = (await db.execute(text(
-        "SELECT COUNT(*) FROM player_bans pb "
-        "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        "WHERE " + player_ban_active_sql("pb") + search_sql
-    ), params)).scalar() or 0
     page_sql = ""
     if limit is not None:
         page_sql = " LIMIT :limit OFFSET :offset"
         params = {**params, "limit": limit, "offset": offset}
-    rows = (await db.execute(text(
-        "SELECT pb.id, pb.steam_id, pb.reason, pb.banned_by_steam_id, pb.banned_at, "
-        "       pb.unbanned_at, p.display_name, " + _BAN_END_COLS_SQL.format(a="pb") + " "
-        "FROM player_bans pb "
-        "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        "WHERE " + player_ban_active_sql("pb") + search_sql + " "
-        # id as a stable tiebreak so paging can't repeat or skip a row when
-        # several bans share a banned_at instant.
-        "ORDER BY pb.banned_at DESC, pb.id DESC"
-        + page_sql
-    ), params)).mappings().all()
+    # BAN-RECORD-1 R3: ONE statement reads the count (the same filter), the page and
+    # every name and text of its entries (_BAN_LIST_SQL, at the module's end); no read
+    # per row. id is a stable tiebreak so paging can't repeat or skip a row when
+    # several bans share a banned_at instant; the unpaged default is every active ban.
+    got = (await db.execute(text(_BAN_LIST_SQL.format(
+        search=search_sql, page=page_sql)), params)).mappings().all()
+    rows = [r for r in got if r["id"] is not None]
+    # account (R3 as amended): after the admin check ONE statement, or TWO with the ledger read; with the admin
+    # check's two, THREE or FOUR per call. "live" is the first statement's word; "deleted" needs no live row in
+    # the first statement and the id's hash in the ledger at the second (_purged_steam_ids: one read, for the page's
+    # ids with no live row, only with MATCH_HMAC_SECRET set, never a bind value nor a statement's text); else "none".
+    gone = await _purged_steam_ids(db, sorted({r["steam_id"] for r in rows if r["live_id"] is None}))
     return {"bans": [
         {
-            "id": str(r["id"]),
-            "steam_id": r["steam_id"],
-            "display_name": r["display_name"],
-            "reason": r["reason"],
-            "banned_by_steam_id": r["banned_by_steam_id"],
+            "id": str(r["id"]), "steam_id": r["steam_id"],
+            "display_name": r["live_name"] if r["live_id"] is not None else r["display_name_at_ban"],
+            "reason": r["reason"], "banned_by_steam_id": r["banned_by_steam_id"],
             "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
             "expires_at": _ban_end_iso(r["expires_at"]),
             "seconds_left": None if r["seconds_left"] is None else int(r["seconds_left"]),
+            "account": "live" if r["live_id"] is not None else ("deleted" if r["steam_id"] in gone else "none"),
+            "name_kept": r["live_id"] is None and r["display_name_at_ban"] is not None,
+            "banned_by_name": r["banned_by_name"] or "",
+            "details": r["details"] or "", "details_at": _ban_end_iso(r["details_at"]),
+            "details_by_name": (r["details_by_name"] or "") if r["details"] is not None else "",
+            "region": "", "region_at": None, "regions": None, "links": None,  # ALT-BAN-1's four, unrecorded here
         } for r in rows
-    ], "total": int(total), "limit": limit, "offset": offset}
+    ], "total": int(got[0]["total"]) if got else 0, "limit": limit, "offset": offset}
 
 
 async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_steam_id: str, *,
@@ -52566,17 +52566,17 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # maximum could pass the table's bound by the skew between the two
     # clocks. Every column is named, with the value the ORM class wrote:
     # id a fresh uuid4 (the ORM default; the table's default is
-    # gen_random_uuid()), unbanned_at and unbanned_by_steam_id NULL.
+    # gen_random_uuid()), unbanned_at, unbanned_by_steam_id and both details NULL; the kept name: _ban_kept_name.
     _ban_params = {"id": str(uuid.uuid4()), "sid": target_steam_id, "reason": _ban_reason,
-                   "adm": admin_steam_id}
+                   "adm": admin_steam_id, "kept": await _ban_kept_name(db, target_steam_id)}
     if duration_minutes is not None:
         _ban_params["ban_minutes"] = int(duration_minutes)
     _ban_row = (await db.execute(text(
         "WITH c AS (SELECT clock_timestamp() AS t) "
         "INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, "
-        "unbanned_at, unbanned_by_steam_id, expires_at) "
+        "unbanned_at, unbanned_by_steam_id, expires_at, display_name_at_ban, details, details_at) "
         "SELECT CAST(:id AS uuid), CAST(:sid AS text), CAST(:reason AS text), CAST(:adm AS text), "
-        "c.t, NULL, NULL, " + _ban_end_sql(duration_minutes, "c.t") + " FROM c "
+        "c.t, NULL, NULL, " + _ban_end_sql(duration_minutes, "c.t") + ", CAST(:kept AS text), NULL, NULL FROM c "
         "RETURNING id, banned_at, expires_at"
     ), _ban_params)).mappings().one()
     _ban_end = _ban_row["expires_at"]
@@ -52655,7 +52655,7 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     repeated, one admin_actions "ban_length" row holding the old and the new
     end, and answers "length_changed". Every answer ends with expires_at
     (UTC ISO 8601 with Z) and seconds_left (an integer); both are null only
-    for a ban row written before migration 418, which gives it an end."""
+    for a ban row written before migration 418, which gives it an end. A lone surrogate in the reason of a new ban is taken out before the writer (never refused for it): the ban row, its record and the answer carry the text so stored."""
     _mod_target_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
@@ -52679,7 +52679,7 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w,
                                   reason=req.reason)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
-                                   target_steam_id=req.target_steam_id, reason=req.reason,
+                                   target_steam_id=req.target_steam_id, reason=_ban_nul_and_lone_surrogates_out(req.reason),
                                    duration_minutes=req.duration_minutes,
                                    length_sent="duration_minutes" in req.model_fields_set,
                                    # a repeat's or a length change's record keeps the reason only
@@ -88881,6 +88881,333 @@ _REVIEW_CALIBRATE_BUILD = 1
 # the end of the module, so nothing above it in main.py moves; the health route
 # reads it at request time.
 _BAN_ANSWERS_BUILD = 1
+
+
+# ── what a ban remembers (BAN-RECORD-1) ──────────────────────────────────────
+# Migration 429 gives player_bans three columns: display_name_at_ban (the name
+# the account's live players row carried when the ban was written, or the name
+# an admin gave it later), details (the moderators' own text, at most
+# BAN_DETAILS_MAX characters) and details_at (when the details last changed).
+# Written by _apply_ban_core (the kept name of a NEW ban), by admin_ban_details
+# (POST /api/v1/admin/ban/details, either text) and by the account deletion
+# (all three NULL, _ban_record_forget). Read by the admin list alone
+# (admin_list_bans, through _BAN_LIST_SQL) and by the details route's own
+# answer: no answer to the banned player, no Discord post and no mail holds
+# them. Everything here is defined at the end of the module, so nothing above
+# it in main.py moves; the callers above read these names at call time. The two
+# bounds are imported here, not on the import line above, so no route that
+# reaches that line's names moves its fingerprint for them.
+from models import BAN_DETAILS_MAX, BAN_NAME_MAX  # noqa: E402
+
+
+def _ban_text_controls_out(s: str, *, keep_lf: bool) -> str:
+    """s without its control characters (C0, DEL, C1) and lone surrogates (no
+    UTF-8 form, so PostgreSQL text cannot carry one); LF stays when keep_lf."""
+    return "".join(ch for ch in s if (keep_lf and ch == "\n") or not (
+        ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or 0xD800 <= ord(ch) <= 0xDFFF))
+
+
+def _ban_details_text(raw: str) -> str | None:
+    """The details as stored, by the contract's shared text rules: every line
+    break made LF (CRLF, CR, NEL, U+2028, U+2029), every other control
+    character and lone surrogate out, trimmed. None when nothing is left, so
+    "" clears. 422 details_too_long past BAN_DETAILS_MAX characters."""
+    s = raw.replace("\r\n", "\n")
+    for br in ("\r", "\x85", "\u2028", "\u2029"):
+        s = s.replace(br, "\n")
+    s = _ban_text_controls_out(s, keep_lf=True).strip()
+    if len(s) > BAN_DETAILS_MAX:
+        raise HTTPException(status_code=422, detail="details_too_long")
+    return s or None
+
+
+def _ban_name_line(raw, steam_id: str, *, cut: bool) -> str | None:
+    """A kept name by the display-name rules (ADD1 point 1): one line (each
+    line break a space), control characters and lone surrogates out, trimmed,
+    at most BAN_NAME_MAX characters, then _clean_display_name (empty, the id
+    itself or an account id in the name's place is no name: None). Longer:
+    cut when `cut` (a name read from a players row), else 422 name_too_long
+    (a name an admin typed)."""
+    s = raw if isinstance(raw, str) else ""
+    for br in ("\r\n", "\r", "\n", "\x85", "\u2028", "\u2029"):
+        s = s.replace(br, " ")
+    s = _ban_text_controls_out(s, keep_lf=False).strip()
+    if len(s) > BAN_NAME_MAX:
+        if not cut:
+            raise HTTPException(status_code=422, detail="name_too_long")
+        s = s[:BAN_NAME_MAX].strip()
+    return _clean_display_name(s, steam_id)
+
+
+async def _ban_kept_name(db: AsyncSession, steam_id: str) -> str | None:
+    """R2: the name a NEW ban keeps: the live players row's name under the id,
+    by _ban_name_line, or None when no live row stands under it. Called by
+    _apply_ban_core in its INSERT's parameters, so after the target's identity
+    lock (a deletion that held it has committed and its row is no longer
+    live) and after the repeat and the length change returned: neither writes
+    any of the three columns."""
+    raw = (await db.execute(text(
+        "SELECT display_name FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": steam_id})).scalar()
+    return None if raw is None else _ban_name_line(raw, steam_id, cut=True)
+
+
+# R3: the admin list's ONE statement, the one active-ban definition built in
+# (player_ban_active_sql, so the definition's census sees it), formatted by
+# admin_list_bans with its search ({search}, bound :q) and its page ({page},
+# bound :limit and :offset; empty for the unpaged default). f is
+# the filtered set (the count reads it whole), pr the page in the list's
+# order; w the newest ban_details record that changed each page ban's details
+# (who wrote them: the order keeps no identity column for it). The players
+# joins are live rows only. (SELECT 1) LEFT JOIN pr gives one row even for an
+# empty page, to carry the count.
+_BAN_LIST_SQL = (
+    "WITH f AS ("
+    "  SELECT pb.id, pb.steam_id, pb.reason, pb.banned_by_steam_id, pb.banned_at, pb.expires_at,"
+    "         pb.display_name_at_ban, pb.details, pb.details_at,"
+    "         p.id AS live_id, p.display_name AS live_name"
+    "    FROM player_bans pb"
+    "    LEFT JOIN players p ON p.steam_id = pb.steam_id AND p.deleted_at IS NULL"
+    "   WHERE " + player_ban_active_sql("pb") + "{search}),"
+    " pr AS (SELECT f.* FROM f ORDER BY f.banned_at DESC, f.id DESC{page}),"
+    " w AS (SELECT DISTINCT ON (aa.details->>'ban_id') aa.details->>'ban_id' AS ban_id, aa.admin_steam_id"
+    "         FROM admin_actions aa"
+    "        WHERE aa.action = 'ban_details' AND aa.details->>'details_change' IS NOT NULL"
+    "          AND aa.details->>'ban_id' IN (SELECT CAST(pr.id AS text) FROM pr)"
+    "        ORDER BY aa.details->>'ban_id', aa.created_at DESC, aa.id DESC)"
+    " SELECT (SELECT COUNT(*) FROM f) AS total,"
+    "        pr.id, pr.steam_id, pr.reason, pr.banned_by_steam_id, pr.banned_at,"
+    "        pr.display_name_at_ban, pr.details, pr.details_at, pr.live_id, pr.live_name,"
+    "        " + _BAN_END_COLS_SQL.format(a="pr") + ","
+    "        ab.display_name AS banned_by_name, wp.display_name AS details_by_name"
+    "   FROM (SELECT 1) one"
+    "   LEFT JOIN pr ON TRUE"
+    "   LEFT JOIN players ab ON ab.steam_id = pr.banned_by_steam_id AND ab.deleted_at IS NULL"
+    "   LEFT JOIN w ON w.ban_id = CAST(pr.id AS text)"
+    "   LEFT JOIN players wp ON wp.steam_id = w.admin_steam_id AND wp.deleted_at IS NULL"
+    "  ORDER BY pr.banned_at DESC, pr.id DESC")
+
+
+# R4: the details route.
+_BAN_DETAILS_GONE = "ban_details_target_deleted"
+
+
+async def _ban_details_identities(db: AsyncSession, admin_steam_id: str, target_steam_id: str):
+    """The details route's identity lattice: _mail_lock_identities over both
+    ids, both optional (an admin acts on admin_users membership; a ban may
+    stand under an id with no players row), so its advisory locks are the
+    ban's and the unban's, in the one canonical order, taken before the
+    active-ban read. One difference: a TARGET with no players row whose hash
+    the deletion ledger holds is not refused (ADD1: an admin names the ban of
+    an account deleted before any name was kept). The lattice refuses it after
+    every lock is taken, with the word _BAN_DETAILS_GONE; the admin alone is
+    then re-read under its lock, already held, with every check of the
+    lattice. Returns (rows, gone); gone is True for that target, whose raw id
+    the route then writes nowhere (the lattice's rule, review r3: no route
+    writes the raw id a deletion's scrub removed)."""
+    try:
+        return await _mail_lock_identities(
+            db, admin_steam_id, target_steam_id, optional=(admin_steam_id, target_steam_id),
+            missing={str(target_steam_id): (403, _BAN_DETAILS_GONE)}), False
+    except HTTPException as exc:
+        if exc.detail != _BAN_DETAILS_GONE:
+            raise
+    return await _mail_lock_identities(db, admin_steam_id, optional=(admin_steam_id,)), True
+
+
+def _ban_text_change(old, new) -> str:
+    """How one text of a ban changed, for its moderator-log record: added,
+    cleared or changed (the record says which texts changed; the sentence
+    never repeats them)."""
+    return "added" if old is None else ("cleared" if new is None else "changed")
+
+
+def _ban_nul_and_lone_surrogates_out(v):
+    """v with every NUL and every lone surrogate taken out (a str; anything
+    else as it is). PostgreSQL's text holds no NUL, and a lone surrogate has
+    no UTF-8 form, so neither the database driver nor a 422's body can carry
+    one; the ban routes' texts and the sign-up's region drop both, never
+    refuse them (BAN-RECORD-1, RULING-BAN-RECORD-Q5 point 2, RULING-BAN-RECORD-R1
+    N3.2). A new ban's reason is stored so; the moderator log's record of a
+    repeat or a length change keeps the log's own rule (_modlog_text: each
+    such character becomes the replacement character), so the row and the
+    record differ there."""
+    return _re.sub(r"[\x00\ud800-\udfff]", "", v) if isinstance(v, str) else v
+
+
+class _AdminBanDetailsReq(BaseModel):
+    admin_steam_id: str
+    target_steam_id: str
+    # Absent or null: that text stays. "" clears it. A string is stored after
+    # the rules (_ban_details_text, _ban_name_line). Not in the signature's
+    # canonical string, which is admin:{admin}:ban_details:{target}. Bounded
+    # here first (eight times each limit), so a body far past either is a 422
+    # before any rule runs.
+    details: str | None = Field(default=None, max_length=8 * BAN_DETAILS_MAX)
+    name: str | None = Field(default=None, max_length=8 * BAN_NAME_MAX)
+    hmac_signature: str | None = None
+
+    @field_validator("details", "name", mode="before")
+    @classmethod
+    def _nul_and_lone_surrogates_out(cls, v):
+        """A lone surrogate has no UTF-8 form: the bound above cannot measure a
+        text that holds one (pydantic refuses it as string_unicode) and the 422
+        that refusal makes cannot be written out (the error body echoes the
+        input, so the answer is a 500). The shared text rules take it out, and
+        a NUL with it (_ban_text_controls_out); both go out here first, before
+        the bound, by the ban routes' one helper."""
+        return _ban_nul_and_lone_surrogates_out(v)
+
+
+@app.post("/api/v1/admin/ban/details", tags=["Admin"])
+async def admin_ban_details(req: _AdminBanDetailsReq, _slot=Depends(_pc_writer_slot),
+                            db: AsyncSession = Depends(get_db)):
+    """Set the details of an account's ACTIVE ban, its kept name, or both
+    (admin HMAC over admin:{admin}:ban_details:{target}; CONTRACT-BAN-1124
+    point 2 with its ADD1). details: absent or null keeps it, "" clears it,
+    a text is stored after the shared rules (line breaks kept as LF, other
+    control characters out, trimmed), at most 2000 characters, else 422
+    details_too_long. name: absent or null keeps the kept name, "" clears it,
+    a text becomes it after the display-name rules (one line, control
+    characters out, trimmed, at most 64 characters, else 422 name_too_long;
+    an id in the name's place is no name). Both absent: 422
+    details_or_name_required. Setting a name touches no players row. A NUL or
+    a lone surrogate in either text is taken out by the request model before
+    its bound (never refused for it), and the text so stored is the one the
+    log record counts as changed.
+
+    The target's identity lock first (the ban's and the unban's lattice,
+    _ban_details_identities), THEN the active-ban read, by the one definition
+    and then by the wall clock as the ban's length change reads it: no active
+    ban is 404 no_active_ban, nothing written. A text that changes is written
+    to the ban row (details_at: the clock read now, NULL when the details are
+    cleared) with ONE moderator-log record (ban_details) in the same
+    transaction, holding the ban's id and, for each text that changed, the
+    word of its change (added, changed, cleared), never a text: the texts
+    stand in the three columns alone (RULING-BAN-RECORD-R1 N1). A call that
+    changes nothing writes neither and answers the same.
+
+    Answers {status: "details_saved", steam_id, details ("" when none),
+    details_at (UTC ISO 8601 with Z, or null), display_name (what the list
+    shows now: the live row's name, else the kept name, else null)}. Nothing
+    is posted to Discord and nothing reaches the banned player."""
+    _mod_bindable_or_422(req.target_steam_id)   # before the signature, the locks and the reads, as the unban
+    await _require_admin(db, req.admin_steam_id, "ban_details", req.target_steam_id, req.hmac_signature)
+    if req.details is None and req.name is None:
+        raise HTTPException(status_code=422, detail="details_or_name_required")
+    want_details = None if req.details is None else _ban_details_text(req.details)
+    want_name = None if req.name is None else _ban_name_line(req.name, req.target_steam_id, cut=False)
+    rows, gone = await _ban_details_identities(db, req.admin_steam_id, req.target_steam_id)
+    _mail_actor_live_or_raise(rows, req.admin_steam_id)
+    admin_w = _mail_identity_to_write(rows, req.admin_steam_id)
+    target_w = None if gone else _mail_identity_to_write(rows, req.target_steam_id)
+    active = await _active_ban_details(db, req.target_steam_id)
+    if active is not None and not await _ban_active_by_wall_clock(db, active["id"]):
+        active = None   # ended between this transaction's start and the lock (BAN-R20)
+    if active is None:
+        raise HTTPException(status_code=404, detail="no_active_ban")
+    # The ban row BY ID (the definition chose it just above, under the lock), with the live name.
+    row = (await db.execute(text(
+        "SELECT pb.details, pb.details_at, pb.display_name_at_ban,"
+        "       p.id AS live_id, p.display_name AS live_name"
+        "  FROM player_bans pb"
+        "  LEFT JOIN players p ON p.steam_id = pb.steam_id AND p.deleted_at IS NULL"
+        " WHERE pb.id = :id"), {"id": active["id"]})).mappings().one()
+    sets, params, record = [], {"id": active["id"]}, {"ban_id": str(active["id"])}
+    if req.details is not None and want_details != row["details"]:
+        sets += ["details = CAST(:d AS text)",
+                 "details_at = " + ("NULL" if want_details is None else "clock_timestamp()")]
+        params["d"] = want_details
+        record.update(details_change=_ban_text_change(row["details"], want_details))
+    if req.name is not None and want_name != row["display_name_at_ban"]:
+        sets.append("display_name_at_ban = CAST(:n AS text)")
+        params["n"] = want_name
+        record.update(name_change=_ban_text_change(row["display_name_at_ban"], want_name))
+    details, details_at, kept = row["details"], row["details_at"], row["display_name_at_ban"]
+    if not sets:
+        await db.rollback()   # nothing changed: no write and no record; the locks end here
+    else:
+        # Built from the literals above alone; every value is bound.
+        details, details_at, kept = (await db.execute(text(
+            "UPDATE player_bans SET " + ", ".join(sets) + " WHERE id = :id"
+            " RETURNING details, details_at, display_name_at_ban"), params)).one()
+        await _modlog_write(db, actor=admin_w, action="ban_details", target_steam_id=target_w,
+                            affected=[target_w] if target_w else [], details=record)
+        await db.commit()
+    return {"status": "details_saved", "steam_id": req.target_steam_id,
+            "details": details or "", "details_at": _ban_end_iso(details_at),
+            "display_name": row["live_name"] if row["live_id"] is not None else kept}
+
+
+async def _ban_record_forget(db: AsyncSession, steam_id: str) -> None:
+    """R5, in an account deletion's own transaction (delete_player_data calls
+    it in phase A, under the account's identity lock, right after the
+    moderator log's scrub; its one statement is a plain db.execute of a
+    literal, which the deletion's deadline arms like every other): every ban
+    row of the account loses its kept name, its details and their time. No
+    record of the moderator log holds either text (admin_ban_details writes
+    the ban's id and the words of which texts changed, RULING-BAN-RECORD-R1
+    N1), so the three columns are the one place they stood. The account has
+    no active ban here (the deletion refuses one, BAN-FIRST-1); its ban rows
+    stay, with their reasons and times."""
+    await db.execute(text(
+        "UPDATE player_bans SET display_name_at_ban = NULL, details = NULL, details_at = NULL"
+        " WHERE steam_id = :sid"
+        "   AND (display_name_at_ban IS NOT NULL OR details IS NOT NULL OR details_at IS NOT NULL)"
+    ), {"sid": steam_id})
+
+
+def _signature_matches(given, expected: str) -> bool:
+    """The one comparison of a given signature (RULING-BAN-RECORD-R1 N3.2):
+    a signature that is not a text of ASCII characters is a wrong signature;
+    every other is compared by hmac.compare_digest, in constant time.
+    compare_digest refuses a text with a letter outside ASCII by a TypeError
+    (an answer of 500); here that text is a False, so the route answers its
+    own wrong-signature answer. _verify_admin_hmac and the account deletion's
+    compare call it; the other compare calls on a signature in backend/api
+    are the filed class item (E6)."""
+    return isinstance(given, str) and given.isascii() and hmac.compare_digest(given, expected)
+
+
+def _ban_deletion_outside_domain(steam_id: str) -> dict:
+    """The account deletion's answer for an id outside the one domain
+    (_mod_target_ok), right after its signature check and before its first
+    bind (RULING-BAN-RECORD-R1 N3.2, RULING-BAN-RECORD-FX1): such an id names
+    no account and no ban (an active ban's key is in the domain, migration
+    319), so the route answers what it answers for an id with no account.
+    Armed (STEAM_WEB_API_KEY set): the session refusal, 401
+    session_required_update_mod, since no verified session names such an id;
+    unarmed: not_found, with the id as it arrived."""
+    if os.getenv("STEAM_WEB_API_KEY"):
+        raise HTTPException(status_code=401, detail="session_required_update_mod")
+    return {"status": "not_found", "steam_id": steam_id}
+
+
+def _checkin_outside_domain(answer) -> dict:
+    """The deadline check-in's answer for an id outside the one domain
+    (_mod_target_ok), before its first bind (RULING-BAN-RECORD-R1 N3.2): such
+    an id names no player, so the route answers what
+    tournaments.handle_tournament_checkin_response answers for an id with no
+    player, without its statements: an answer outside _CHECKIN_ANSWER_MAP is
+    400 (tournaments.py:3922 to 3924), every other is match_closed
+    (tournaments.py:3953 to 3954)."""
+    from tournaments import _CHECKIN_ANSWER_MAP  # noqa: PLC0415 — file convention
+    if _CHECKIN_ANSWER_MAP.get(answer) is None:
+        raise HTTPException(status_code=400, detail="Invalid check-in answer")
+    return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
+
+
+# ── the ban record's build marker (BAN-RECORD-1) ─────────────────────────────
+# Release-train verification plumbing, not a design mechanism: 1 = in this build
+# a ban keeps the account's name and the moderators' details (migration 429),
+# the admin list answers them with the account's state, POST
+# /api/v1/admin/ban/details writes them, and the account deletion clears them,
+# reported on /health as `ban_record_build`. It names build identity only. A
+# code constant, equal on both boxes by construction, probed by the release
+# train and read by nothing else (#306). Absent on any build before it. Defined
+# at the end of the module, so nothing above it in main.py moves; the health
+# route reads it at request time.
+_BAN_RECORD_BUILD = 1
 
 
 # ── ALT-BAN-1: the region reader and the build marker ────────────────────────

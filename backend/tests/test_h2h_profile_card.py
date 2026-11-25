@@ -74,6 +74,7 @@ PROFILE_PREDICATES = (
     "LEFT JOIN glicko_ratings gr ON gr.player_id = p.id",
     "LEFT JOIN shop_items si ON si.id = p.active_title_id",
     "WHERE p.id = :pid",
+    "AND p.steam_id = CAST(:sid AS VARCHAR)",   # the id the request named (BAN-RECORD-1 R0)
 )
 MODES_PREDICATES = (
     "WITH team_games AS (",
@@ -254,7 +255,8 @@ class FakeSession:
             if self.fail_profile:
                 self.aborted = True
                 raise RuntimeError("profile statement refused by the fake")
-            p = next((x for x in self.players if x["id"] == params["pid"]), None)
+            p = next((x for x in self.players
+                      if x["id"] == params["pid"] and x["steam_id"] == params["sid"]), None)
             if p is None:
                 return _Rows([])
             off = bool(p.get("appear_offline", False))
@@ -763,7 +765,7 @@ def test_the_fake_models_an_aborted_transaction_until_a_savepoint_exits():
 
     async def bare():
         with pytest.raises(RuntimeError, match="refused by the fake"):
-            await main._h2h_profile_block(s, OPP)
+            await main._h2h_profile_block(s, OPP, OPP_SID)
         assert s.aborted
         with pytest.raises(RuntimeError, match="transaction is aborted"):
             await s.execute("SELECT 1 FROM rank_role_colors")
@@ -774,7 +776,7 @@ def test_the_fake_models_an_aborted_transaction_until_a_savepoint_exits():
     async def guarded():
         try:
             async with s2.begin_nested():
-                await main._h2h_profile_block(s2, OPP)
+                await main._h2h_profile_block(s2, OPP, OPP_SID)
         except RuntimeError:
             pass
         assert not s2.aborted
@@ -827,3 +829,114 @@ def test_a_the_profile_card_reads_the_podium_maps_without_refreshing_or_granting
     finally:
         for c, v in zip((main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache), saved):
             c.clear(); c.update(v)
+
+
+# ── BAN-RECORD-1 R0 (bar V9): the card answers for the id the request named ──
+# On PostgreSQL (a case schema of inv_pg, CF_TEST_PG_DSN), through main.app,
+# the route's session gate stood in (it is another suite's). Between the
+# route's first statement (both rows by steam id) and the card, the opponent's
+# row is anonymised in the deletion's own shape (_tombstone, held to the
+# deletion's source) and committed on another connection, (b) with a ban under
+# the requested id beside it. "Today" is the card's read as it stood before R0
+# (the added condition taken out of the real source), for (c) and (d).
+
+V9_KEY_SQL = "SELECT pg_advisory_xact_lock(hashtext($1))"
+V9_BAN_SQL = ("INSERT INTO player_bans (steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+              " VALUES ($1, 'v9', $2, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 day')")
+
+
+def _v9_today():
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(main._h2h_profile_block))
+    for old, new in ((" AND p.steam_id = CAST(:sid AS VARCHAR)", ""),
+                     ('{"pid": target_id, "sid": target_steam_id}', '{"pid": target_id}')):
+        assert src.count(old) == 1, old
+        src = src.replace(old, new)
+    ns = dict(vars(main))
+    exec(compile(src, "<_h2h_profile_block before R0>", "exec"), ns)
+    return ns["_h2h_profile_block"]
+
+
+def _v9(monkeypatch, step):
+    import httpx
+    from inv_pg import FLOOR, case
+    from test_mdpl_gate_reread_pg import _tombstone
+    got = {}
+
+    async def body(env):
+        async def _gate_ok(request, steam_id, db):
+            return True
+        env.mp.setattr(main, "_strict_steam_session_ok", _gate_ok)
+        me = await env.player("V9 Viewer")
+        opp = await env.player("V9 Opponent")
+        admin = (await env.player("V9 Admin")).sid
+        await env.conn.execute("INSERT INTO admin_users (steam_id) VALUES ($1)", admin)
+        # last_seen ahead of the clock and no heartbeat: last_seen_s 0 and is_online false on every read
+        await env.conn.execute("UPDATE players SET last_seen = NOW() + INTERVAL '1 day', presence_seen_at = NULL"
+                               " WHERE id = ANY($1::uuid[])", [me.id, opp.id])
+
+        async def get():
+            main._h2h_last_read.clear()
+            main._h2h_modes_cache.clear()
+
+            async def override():
+                async with env.sm() as db:
+                    yield db
+            main.app.dependency_overrides[main.get_db] = override
+            try:
+                async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=main.app, raise_app_exceptions=False),
+                        base_url="http://v9", headers={"X-Session-Token": "tok", "X-Mod-Version": FLOOR}) as c:
+                    r = await c.get("/api/v1/h2h/%s/%s" % (me.sid, opp.sid))
+            finally:
+                main.app.dependency_overrides.pop(main.get_db, None)
+            assert r.status_code == 200, (r.status_code, r.text)
+            return r.json()
+
+        if step in ("c", "d"):
+            if step == "c":
+                await env.conn.execute(V9_BAN_SQL, opp.sid, admin)
+            got["route"] = await get()
+            async with env.sm() as db:
+                blk = await _v9_today()(db, opp.id, None)
+            got["today"] = None if blk is None else json.loads(blk.model_dump_json())
+            return
+        got["before"] = await get()
+        real = main._h2h_card_blocks
+
+        async def between(db, viewer_steam_id, target_steam_id, viewer_id, target_id):
+            side = await env.side()
+            await side.execute("BEGIN")
+            await side.execute(V9_KEY_SQL, opp.sid)
+            await _tombstone(side, opp)
+            if step == "b":
+                await side.execute(V9_BAN_SQL, opp.sid, admin)
+            await side.execute("COMMIT")
+            got["reached"] = True
+            return await real(db, viewer_steam_id, target_steam_id, viewer_id, target_id)
+        env.mp.setattr(main, "_h2h_card_blocks", between)
+        got["route"] = await get()
+        got["row"] = dict(await env.conn.fetchrow("SELECT steam_id, deleted_at FROM players WHERE id = $1", opp.id))
+        got["sid"] = opp.sid
+    case(monkeypatch, body, prefix="v9card")
+    return got
+
+
+@pytest.mark.parametrize("step", ["a", "b"])
+def test_v9_ab_a_row_anonymised_before_the_card_gives_no_block_and_the_flat_line_stands(monkeypatch, step):
+    got = _v9(monkeypatch, step)
+    assert got["reached"] and got["row"]["deleted_at"] is not None and got["row"]["steam_id"] != got["sid"], got
+    assert got["before"]["profile"] is not None and got["before"]["profile"]["display_name"] == "V9 Opponent"
+    assert got["route"]["profile"] is None, got["route"]["profile"]
+    assert {k: got["route"][k] for k in FLAT_FIELDS} == {k: got["before"][k] for k in FLAT_FIELDS}, got
+    assert got["route"]["opponent_display_name"] == "V9 Opponent", got["route"]
+
+
+@pytest.mark.parametrize("step", ["c", "d"])
+def test_v9_cd_an_unchanged_row_gives_the_block_of_today(monkeypatch, step):
+    got = _v9(monkeypatch, step)
+    route, today = got["route"]["profile"], got["today"]
+    assert route is not None and today is not None, got
+    assert route["is_banned"] is (step == "c"), route
+    assert json.dumps(route, separators=(",", ":"), ensure_ascii=False) == \
+        json.dumps(today, separators=(",", ":"), ensure_ascii=False), (route, today)

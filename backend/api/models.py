@@ -877,7 +877,17 @@ class PlayerBan(Base):
     it was written with. Migration 417 adds a unique index on steam_id over the
     rows with unbanned_at NULL: one open row per key, so the ban writer closes
     an ended row (unbanned_at = expires_at, unbanned_by_steam_id =
-    main.BAN_CLOSED_BY_EXPIRY) in the transaction that inserts the next ban."""
+    main.BAN_CLOSED_BY_EXPIRY) in the transaction that inserts the next ban.
+
+    What a ban remembers (BAN-RECORD-1, migration 429): display_name_at_ban,
+    the name the account's live players row carried when the ban was written
+    (after the display-name rule; NULL when there was no usable one), or the
+    name an admin gave it later (POST /api/v1/admin/ban/details); details,
+    the moderators' own text (at most 2000 characters, CHECK
+    ck_player_bans_details_len), and details_at, when that text last
+    changed. Only the ban writer (main._apply_ban_core, the name) and the
+    details route write them; account deletion sets all three NULL on every
+    ban row of the account, in its own transaction."""
     __tablename__ = "player_bans"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -888,6 +898,19 @@ class PlayerBan(Base):
     unbanned_at = Column(DateTime(timezone=True), nullable=True)
     unbanned_by_steam_id = Column(String(20), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
+    display_name_at_ban = Column(Text, nullable=True)
+    details = Column(Text, nullable=True)
+    details_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# The longest text of player_bans.details, in characters (code points, as
+# PostgreSQL's char_length counts them): migration 429's CHECK
+# ck_player_bans_details_len holds the same bound in the table, and the details
+# route refuses a longer text with 422 (main._ban_details_text).
+BAN_DETAILS_MAX = 2000
+# The longest name kept with a ban, in characters: the display-name rule's
+# bound (the registration route's display_name, max_length 64).
+BAN_NAME_MAX = 64
 
 
 # The longest a ban can last, measured from its row's start (banned_at): 8760

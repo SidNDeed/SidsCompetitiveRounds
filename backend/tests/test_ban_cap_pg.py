@@ -568,28 +568,41 @@ def test_the_new_row_carries_every_column_the_orm_row_carried(case, admin_open):
     """The INSERT names every column of player_bans, and its row matches,
     column by column, a row written by the ORM constructor the base used
     (with an end given, which the CHECK requires): same columns, same
-    nullness, same Python types, a version-4 uuid id, the request's values."""
+    nullness, same Python types, a version-4 uuid id, the request's values.
+    BAN-RECORD-1 R2: the INSERT keeps the account's live name in
+    display_name_at_ban, so the ORM reference row is given its own player's
+    name (N14 of RULING-BAN-RECORD-R1); the details and their time are null
+    in both rows. Mutant: the INSERT writing NULL for the kept name."""
     async def body(sm):
         admin, (via_sql, via_orm) = await _world(sm, 2)
         await _ban(sm, admin, via_sql)
+        name_sql = "SELECT display_name FROM players WHERE steam_id = :s"
         async with sm() as db:
+            orm_name = (await db.execute(text(name_sql), {"s": via_orm})).scalar_one()
             db.add(models.PlayerBan(steam_id=via_orm, reason="cap-test", banned_by_steam_id=admin,
-                                    expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
+                                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                                    display_name_at_ban=orm_name))
             await db.commit()
         async with sm() as db:
             cols = (await db.execute(text(
                 "SELECT column_name FROM information_schema.columns"
                 " WHERE table_schema = current_schema() AND table_name = 'player_bans'"))).scalars().all()
-            return admin, dict(await _row(db, via_sql)), dict(await _row(db, via_orm)), set(cols)
-    admin, a, b, cols = _with_sm(case, body)
+            sql_name = (await db.execute(text(name_sql), {"s": via_sql})).scalar_one()
+            return (admin, dict(await _row(db, via_sql)), dict(await _row(db, via_orm)), set(cols),
+                    sql_name, orm_name)
+    admin, a, b, cols, sql_name, orm_name = _with_sm(case, body)
     src = inspect.getsource(main._apply_ban_core)
     m = re.search(r'INSERT INTO player_bans \(([^)]*)\)', src.replace('"\n        "', ""))
     named = {c.strip() for c in m.group(1).split(",")}
     assert named == cols == set(models.PlayerBan.__table__.columns.keys()), (named, cols)
     assert list(a) == list(b), (list(a), list(b))
     for col in a:
-        assert (a[col] is None) == (b[col] is None), (col, a[col], b[col])
+        assert (a[col] is None) == (b[col] is None), (
+            "R2: the INSERT keeps the live name, the reference row its player's name", col, a[col], b[col])
         assert type(a[col]) is type(b[col]), (col, type(a[col]), type(b[col]))
+    assert (a["display_name_at_ban"], b["display_name_at_ban"]) == (sql_name, orm_name), (
+        "R2: each row keeps its own player's live name", a["display_name_at_ban"], b["display_name_at_ban"])
+    assert (a["details"], a["details_at"], b["details"], b["details_at"]) == (None, None, None, None), (a, b)
     assert a["id"].version == b["id"].version == 4
     assert (a["reason"], a["banned_by_steam_id"], a["unbanned_at"], a["unbanned_by_steam_id"]) == \
         ("cap-test", admin, None, None)
