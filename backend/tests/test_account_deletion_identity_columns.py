@@ -68,7 +68,7 @@ COSMETICS = {
 }
 CLASSES = (IDENTITY, STATS, TIMES, SETTINGS, COSMETICS)
 
-STEAM = "dc413census"
+STEAM = "413000000001"   # digits: the deletion acts only on ids main._mod_target_ok admits
 FILL = {
     "display_name": "dc413 display",
     "discord_id": "dc413discordid",

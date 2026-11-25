@@ -49,7 +49,7 @@ FACE = "title_mr413_other"
 SKUS = (ROUND, CLAVAR)
 # Synthetic ids: no SteamID64 shape.
 ARTIST = "mr413artist"
-B1 = "mr413buyer1"          # bought both albums, and a title
+B1 = "413000000011"         # bought both albums, and a title; digits: the deletion acts only on ids of digits
 B2 = "mr413buyer2"          # bought the first album
 B3 = "mr413buyer3"          # bought the second album
 B4 = "mr413buyer4"          # a free (gifted) copy of the first album
@@ -186,7 +186,7 @@ VALUES ('music_album_another_round', 'music_album', 'Another Round', 'd', 1, 'ra
         NULL, NULL, now() - interval '40 days');
 INSERT INTO players (steam_id, display_name, gold_earned, gold_spent) VALUES
        ('mr413artist', 'a', 5000, 0),
-       ('mr413buyer1', 'b1', 3000, 1051),
+       ('413000000011', 'b1', 3000, 1051),
        ('mr413buyer2', 'b2', 100, 1),
        ('mr413buyer3', 'b3', 1500, 1000),
        ('mr413buyer4', 'b4', 10, 0),
