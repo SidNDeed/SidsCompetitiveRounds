@@ -37,12 +37,16 @@ B. DELETE /api/v1/players/{id}/data refuses an account under an active ban
 
    Why the second read is the guarantee, over the source text (no database):
    every statement of backend/api that writes player_bans stands in one of
-   three functions of main.py, each of them takes the target's identity
-   lock in the same transaction before it writes, and the table's class
-   (models.PlayerBan) is named by main.py's import alone, so nothing writes
-   the table through it. A lock counts only when it is awaited as one of its
-   function's own top-level statements; test_ban_await_net.py holds the
-   await for every lock, gate and ban read the census counts by its call.
+   five functions of main.py (_apply_ban_core, _ban_set_length_core,
+   admin_unban, admin_ban_details and _ban_record_forget); each write stands
+   after the target's identity lock, taken in the same transaction by its
+   own function or by its one caller (_apply_ban_core for
+   _ban_set_length_core, delete_player_data for _ban_record_forget); and
+   the table's class (models.PlayerBan) is named by main.py's import alone,
+   so nothing writes the table through it. A lock counts only when it is
+   awaited as one of its function's own top-level statements;
+   test_ban_await_net.py holds the await for every lock, gate and ban read
+   the census counts by its call.
 
 CF_TEST_PG_DSN names the lane database (cf_pg.require_live_pg).
 """

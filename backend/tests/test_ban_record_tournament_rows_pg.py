@@ -15,13 +15,15 @@ On PostgreSQL (a case schema of inv_pg, CF_TEST_PG_DSN; the data invented):
   - the helper's five cases: (a) a removed row without a ban, (b) a removed
     row with an active ban under its former steam id, (c) a live row under an
     active ban, (d) a live row without one, and an id with no row (and None);
-  - each of the seven callers once with the helper's answer handed in by a
-    spy that records the id it was asked about: "removed" takes the caller
-    its refused or left-out way with the ruling's words (signup and
-    force_vote: 404 "Player not found"; the check-in and forfeit_match: their
-    closed answers; the activation, the overdue sweep and the leaving
-    handler: the seat forfeited or the candidate passed over), and "banned"
-    reads as at the base;
+  - each of the seven callers twice, once per word ("removed", then
+    "banned"), with the helper's answer handed in by a spy that records the
+    id it was asked about, and the overdue sweep twice more over a pair of
+    seats (one banned and one removed; both banned), each a double forfeit:
+    "removed" takes the caller its refused or left-out way with the ruling's
+    words (signup and force_vote: 404 "Player not found"; the check-in and
+    forfeit_match: their closed answers; the activation, the overdue sweep
+    and the leaving handler: the seat forfeited or the candidate passed
+    over), and "banned" reads as at the base;
   - the three scans end to end with no spy: a signup whose account was
     removed beforehand in the deletion's own shape.
 The mutant (the mark's arm dropped from the helper's statement, run on a copy
