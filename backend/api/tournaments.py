@@ -4693,7 +4693,7 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest,
         player_id=player.id,
         penalty_at_signup=penalty,
         is_speculative=False,  # recompute sets the real value
-        region_at_signup=(req.region or None),
+        region_at_signup=_signup_region(req.region),
     ))
     await db.flush()
     await _recompute_speculation(db, tournament_id)
@@ -5837,3 +5837,19 @@ async def player_penalty(steam_id: str, request: Request, db: AsyncSession = Dep
 #
 #     from tournaments import router as tournaments_router
 #     app.include_router(tournaments_router)
+
+
+# ── the sign-up's region as stored (BAN-RECORD-1 FIX) ────────────────────────
+# At the end of the module, so no line above it moves.
+def _signup_region(region):
+    """region_at_signup as the sign-up stores it (RULING-BAN-RECORD-R1 N3.2,
+    RULING-BAN-RECORD-FX3). No refusal: ROUNDS_REGIONS is a filter in every
+    place that reads it, so a code outside it is stored and skipped there as
+    before. The characters the store refuses, NUL and a lone surrogate, are
+    taken out by main's one helper; a region empty after that is None, and so
+    is one longer than the column (String(16), migration 048), never cut."""
+    from main import _ban_nul_and_lone_surrogates_out  # noqa: PLC0415 — file convention
+    v = _ban_nul_and_lone_surrogates_out(region) if isinstance(region, str) else None
+    if not v or len(v) > TournamentSignup.__table__.c.region_at_signup.type.length:
+        return None
+    return v

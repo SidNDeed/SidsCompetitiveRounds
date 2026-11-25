@@ -38,6 +38,7 @@ V6  The deletion after an ended ban: the three columns NULL, in the
 N1  RULING-BAN-RECORD-R1 with N6: a ban_details record holds the ban's id and
     the words of which texts changed, never a text (T1 the table's rows, T2
     the log's three reads, T3 a key inside its ban's id, T4 three ban rows).
+N3  The item's routes swept: every declared text input, by code.
 
 CF_TEST_PG_DSN names the lane database (cf_pg.require_live_pg).
 """
@@ -47,12 +48,16 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import re
 import sys
+import textwrap
+import typing
 import uuid
 from types import SimpleNamespace
+from urllib.parse import quote, unquote
 
 import httpx
 import pytest
@@ -69,9 +74,13 @@ import main  # noqa: E402
 import modlog  # noqa: E402
 import ban_sweep_census as BSC  # noqa: E402
 import test_ban_record_tournament_rows_pg as TR  # noqa: E402
+from fastapi.dependencies.utils import get_flat_dependant  # noqa: E402
+from httpx._urlparse import MAX_URL_LENGTH  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+from sqlalchemy import event  # noqa: E402
 from test_ban_answers_pg import TOKEN, _account, _armed, _delete, _session  # noqa: E402
 from test_ban_expiry_live import _parse_banned_users_1410  # noqa: E402
-from test_mail_case_scrub_pg import BOUND  # noqa: E402
+from test_mail_case_scrub_pg import BOUND, SECRET  # noqa: E402
 from test_mdpl_gate_reread_pg import _tombstone  # noqa: E402
 
 ADMIN_SECRET = "ban-record-admin-secret"
@@ -1372,3 +1381,682 @@ def test_n1_t4_the_deletion_clears_the_three_columns_on_every_ban_row(monkeypatc
     assert out["before"][newest][0] == "Ban Answers P" and out["before"][newest][1:] == [None, None], out["before"]
     assert out["deleted"][0] == 200 and out["deleted"][1]["status"] == "anonymized", out["deleted"]
     assert out["after"] == {i: [None, None, None] for i in out["ids"]}, out["after"]
+
+
+# -- N3: every declared text input of the item's routes, swept (RULING-BAN-RECORD-R1 section 2) ------------
+
+# THE ROUTES: the ruling's six by name, and every route with "/tournaments" in its path whose handler reaches
+# tournaments._player_id_banned through tournaments.py's own functions (derived by the test, held equal to these).
+SWEEP_NAMED = {("GET", "/api/v1/admin/banned-users"): "list", ("POST", "/api/v1/admin/ban"): "ban",
+               ("POST", "/api/v1/admin/unban"): "unban", ("POST", "/api/v1/admin/ban/details"): "details",
+               ("DELETE", "/api/v1/players/{steam_id}/data"): "delete",
+               ("GET", "/api/v1/h2h/{steam_id}/{opponent_steam_id}"): "h2h"}
+SWEEP_TOURNAMENT = {("POST", "/api/v1/tournaments/{tournament_id}/signup"): "signup",
+                    ("POST", "/api/v1/tournaments/{tournament_id}/unsignup"): "unsignup",
+                    ("POST", "/api/v1/tournaments/{tournament_id}/force-start-vote"): "force_vote",
+                    ("POST", "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit"): "forfeit",
+                    ("POST", "/api/v1/internal/tournaments/checkin-response"): "checkin"}
+# THE FIELDS, as the route objects declare them (the test reads them by code and holds them equal to this).
+SWEEP_FIELDS = {
+    "list": [("query", "admin_steam_id"), ("query", "hmac_signature"), ("query", "search")],
+    "ban": [("body", "admin_steam_id"), ("body", "hmac_signature"), ("body", "reason"), ("body", "target_steam_id")],
+    "unban": [("body", "admin_steam_id"), ("body", "hmac_signature"), ("body", "reason"),
+              ("body", "target_steam_id")],
+    "details": [("body", "admin_steam_id"), ("body", "details"), ("body", "hmac_signature"), ("body", "name"),
+                ("body", "target_steam_id")],
+    "delete": [("path", "steam_id"), ("query", "sig")],
+    "h2h": [("path", "opponent_steam_id"), ("path", "steam_id")],
+    "signup": [("body", "discord_id"), ("body", "display_name"), ("body", "region"), ("body", "steam_id")],
+    "unsignup": [("body", "discord_id"), ("body", "display_name"), ("body", "region"), ("body", "steam_id")],
+    "force_vote": [("body", "steam_id")],
+    "forfeit": [("body", "steam_id")],
+    "checkin": [("body", "answer"), ("body", "steam_id"), ("header", "X-Internal-Key")],
+}
+SWEEP_SIGNATURES = ("hmac_signature", "sig")
+# THE PROBES: a NUL inside; a lone surrogate inside (a body's as its JSON escape; a path's or a query's as its
+# three UTF-8 bytes, which arrive as three U+FFFD); for a signature one letter outside ASCII; a text of 100000
+# letters in the field's place (the integrator's entry of 01:24:31Z, point 2). A probe the client cannot carry
+# stays a row that reads "not carried" with the client's own error, and the carried row stands beside it (the
+# integrator's entry of 02:14:42Z, point 2 (b)): "lonebytes", the surrogate's three UTF-8 bytes in a header (read
+# as latin-1, they arrive as three letters outside ASCII); "longest", a path or query field at the longest length
+# the client carries (SWEEP_URL_BOUND less the rest of the URL and 64), its length printed.
+SWEEP_PROBES = {"nul": "\x00", "lone": "\ud800", "nonascii": "é", "long": None, "longest": None,
+                "lonebytes": None}
+SWEEP_URL_BOUND = MAX_URL_LENGTH   # httpx 0.28.1: a URL, or a part of one, longer than this is InvalidURL
+SWEEP_BAN_SQL = ("INSERT INTO player_bans (id, steam_id, reason, banned_by_steam_id, banned_at, expires_at)"
+                 " VALUES (gen_random_uuid(), $1, 'sweep', $2, NOW() - INTERVAL '10 minutes',"
+                 "         NOW() + INTERVAL '1 day')")   # ten minutes back: outside the ban-rate gate's window
+SWEEP_DISCORD = 880000000000000000
+# THE TABLE: route, field, probe | the answer at 73edff39 | the answer after | the rule that answers it. The
+# answers at 73edff39 were measured with the real session check (n31tip at 02:01Z ran with the case's stand-in;
+# its rows of signup, unsignup, force_vote and forfeit steam_id read 500 there). A 5xx other than 500 stands in
+# SWEEP_5XX with its line.
+SWEEP_TABLE_TEXT = """
+list - valid | 200 page | 200 page |
+list admin_steam_id nul | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+list admin_steam_id lone | 403 Not an admin | 403 Not an admin | arrives as three U+FFFD; no row (tip), the domain (after)
+list admin_steam_id long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+list admin_steam_id longest | 403 Not an admin | 403 Not an admin | no row (tip), the domain (after)
+list hmac_signature nul | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+list hmac_signature lone | 500 Internal Server Error | 403 Bad admin signature | arrives as three U+FFFD; the signature helper
+list hmac_signature nonascii | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+list hmac_signature long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+list hmac_signature longest | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+list search nul | 500 Internal Server Error | 200 empty | a search with a NUL matches no text: the empty page
+list search lone | 200 empty | 200 empty | arrives as three U+FFFD; matches no row
+list search long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+list search longest | 422 search string_too_long | 422 search string_too_long | the route's bound (Query max_length=64)
+ban - valid | 200 banned | 200 banned |
+ban admin_steam_id nul | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+ban admin_steam_id lone | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+ban admin_steam_id long | 403 Not an admin | 403 Not an admin | no row (tip), the domain (after)
+ban hmac_signature nul | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+ban hmac_signature lone | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+ban hmac_signature nonascii | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+ban hmac_signature long | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+ban reason nul | 500 Internal Server Error | 200 banned | the reason helper takes NUL out
+ban reason lone | 200 banned | 200 banned | the reason helper takes it out (Q5 point 2)
+ban reason long | 200 banned | 200 banned | the writer keeps 256 characters (M:51823)
+ban target_steam_id nul | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_target_or_422
+ban target_steam_id lone | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_target_or_422
+ban target_steam_id long | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_target_or_422
+unban - valid | 200 unbanned | 200 unbanned |
+unban admin_steam_id nul | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+unban admin_steam_id lone | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+unban admin_steam_id long | 403 Not an admin | 403 Not an admin | no row (tip), the domain (after)
+unban hmac_signature nul | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+unban hmac_signature lone | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+unban hmac_signature nonascii | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+unban hmac_signature long | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+unban reason nul | 200 unbanned | 200 unbanned | the record's rule (_modlog_text)
+unban reason lone | 200 unbanned | 200 unbanned | the record's rule (_modlog_text)
+unban reason long | 200 unbanned | 200 unbanned | the writer keeps 256 characters
+unban target_steam_id nul | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_bindable_or_422
+unban target_steam_id lone | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_bindable_or_422
+unban target_steam_id long | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_release_or_422
+details - valid | 200 details_saved | 200 details_saved |
+details admin_steam_id nul | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+details admin_steam_id lone | 500 Internal Server Error | 403 Not an admin | _is_admin_roster: the domain
+details admin_steam_id long | 403 Not an admin | 403 Not an admin | no row (tip), the domain (after)
+details details nul | 200 details_saved | 200 details_saved | the shared text rules
+details details lone | 200 details_saved | 200 details_saved | the request model's validator
+details details long | 422 details string_too_long | 422 details string_too_long | the request model's bound
+details hmac_signature nul | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+details hmac_signature lone | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+details hmac_signature nonascii | 500 Internal Server Error | 403 Bad admin signature | the signature helper
+details hmac_signature long | 403 Bad admin signature | 403 Bad admin signature | the constant-time compare
+details name nul | 200 details_saved | 200 details_saved | the display-name rules
+details name lone | 200 details_saved | 200 details_saved | the request model's validator
+details name long | 422 name string_too_long | 422 name string_too_long | the request model's bound
+details target_steam_id nul | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_bindable_or_422
+details target_steam_id lone | 422 target_steam_id must be a numeric steam id | 422 target_steam_id must be a numeric steam id | _mod_bindable_or_422
+details target_steam_id long | 404 no_active_ban | 404 no_active_ban | no ban stands under it
+delete - valid | 200 anonymized | 200 anonymized |
+delete sig nul | 403 Invalid signature | 403 Invalid signature | the constant-time compare
+delete sig lone | 500 Internal Server Error | 403 Invalid signature | arrives as three U+FFFD; the signature helper
+delete sig nonascii | 500 Internal Server Error | 403 Invalid signature | the signature helper
+delete sig long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+delete sig longest | 403 Invalid signature | 403 Invalid signature | the constant-time compare
+delete steam_id nul | 500 Internal Server Error | 401 session_required_update_mod | the domain (FX1, the key set)
+delete steam_id lone | 401 session_required_update_mod | 401 session_required_update_mod | arrives as three U+FFFD; the session rule (tip), the domain (after)
+delete steam_id long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+delete steam_id longest | 401 session_required_update_mod | 401 session_required_update_mod | the session rule (tip), the domain (after)
+h2h - valid | 200 ok | 200 ok |
+h2h opponent_steam_id nul | 400 bad_request | 400 bad_request | the route's 17-digit rule
+h2h opponent_steam_id lone | 400 bad_request | 400 bad_request | arrives as three U+FFFD; the 17-digit rule
+h2h opponent_steam_id long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+h2h opponent_steam_id longest | 400 bad_request | 400 bad_request | the 17-digit rule
+h2h steam_id nul | 401 session_required | 401 session_required | the strict session check, before any other statement
+h2h steam_id lone | 401 session_required | 401 session_required | arrives as three U+FFFD; the strict session check
+h2h steam_id long | not carried InvalidURL | not carried InvalidURL | the client's URL bound
+h2h steam_id longest | 401 session_required | 401 session_required | the strict session check
+signup - valid | 200 voting | 200 voting |
+signup discord_id nul | 200 voting | 200 voting | not read by the sign-up
+signup discord_id lone | 200 voting | 200 voting | not read by the sign-up
+signup discord_id long | 200 voting | 200 voting | not read by the sign-up
+signup display_name nul | 200 voting | 200 voting | not read by the sign-up
+signup display_name lone | 200 voting | 200 voting | not read by the sign-up
+signup display_name long | 200 voting | 200 voting | not read by the sign-up
+signup region nul | 500 Internal Server Error | 200 voting | the region rule (FX3): taken out
+signup region lone | 500 Internal Server Error | 200 voting | the region rule (FX3): taken out
+signup region long | 500 Internal Server Error | 200 voting | the region rule (FX3): longer than 16 is None
+signup steam_id nul | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+signup steam_id lone | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+signup steam_id long | 404 Player not found | 404 Player not found | no account has it
+unsignup - valid | 200 voting | 200 voting |
+unsignup discord_id nul | 200 voting | 200 voting | read only on the bot's keyed call (T:4895)
+unsignup discord_id lone | 200 voting | 200 voting | read only on the bot's keyed call (T:4895)
+unsignup discord_id long | 200 voting | 200 voting | read only on the bot's keyed call (T:4895)
+unsignup display_name nul | 200 voting | 200 voting | not read by the unsignup
+unsignup display_name lone | 200 voting | 200 voting | not read by the unsignup
+unsignup display_name long | 200 voting | 200 voting | not read by the unsignup
+unsignup region nul | 200 voting | 200 voting | not read by the unsignup
+unsignup region lone | 200 voting | 200 voting | not read by the unsignup
+unsignup region long | 200 voting | 200 voting | not read by the unsignup
+unsignup steam_id nul | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+unsignup steam_id lone | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+unsignup steam_id long | 404 Player not found | 404 Player not found | no account has it
+force_vote - valid | 200 voting | 200 voting |
+force_vote steam_id nul | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+force_vote steam_id lone | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+force_vote steam_id long | 404 Player not found | 404 Player not found | no account has it
+forfeit - valid | 200 forfeit_recorded | 200 forfeit_recorded |
+forfeit steam_id nul | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+forfeit steam_id lone | 503 session_check_unavailable | 503 session_check_unavailable | held (SWEEP_5XX): the session check's ban read
+forfeit steam_id long | 404 Player not found | 404 Player not found | no account has it
+checkin - valid | 200 recorded | 200 recorded |
+checkin X-Internal-Key nul | 403 forbidden | 403 forbidden | the internal paths' key compare (M:7018)
+checkin X-Internal-Key lone | not carried UnicodeEncodeError | not carried UnicodeEncodeError | the client cannot encode it
+checkin X-Internal-Key lonebytes | 403 forbidden | 403 forbidden | arrives as three letters outside ASCII; the key compare (M:7018)
+checkin X-Internal-Key long | 403 forbidden | 403 forbidden | the internal paths' key compare (M:7018)
+checkin answer nul | 400 Invalid check-in answer | 400 Invalid check-in answer | the answer map
+checkin answer lone | 400 Invalid check-in answer | 400 Invalid check-in answer | the answer map
+checkin answer long | 400 Invalid check-in answer | 400 Invalid check-in answer | the answer map
+checkin steam_id nul | 500 Internal Server Error | 200 match_closed | the domain: the answer for an id with no player
+checkin steam_id lone | 500 Internal Server Error | 200 match_closed | the domain: the answer for an id with no player
+checkin steam_id long | 200 match_closed | 200 match_closed | no player has it (tip), the domain (after)
+"""
+# OTHER 5XX, held under their own heading (RULING-BAN-RECORD-R1 section 2's last point; the integrator's entry of
+# 02:14:42Z, point 2 (a)): the session check every write route calls answers 503 when its ban read of the claimed
+# id does not complete (M:17414). No statement of the route's own handler binds the id, in either mode of the
+# check (test_n3_the_eight_held_rows_...). Not repaired here: they join the filed class item.
+SWEEP_HELD = ("signup", "unsignup", "force_vote", "forfeit")
+SWEEP_5XX = {(label, "steam_id", probe): "main.py:17414 session_check_unavailable"
+             for label in SWEEP_HELD for probe in ("nul", "lone")}
+
+
+def _sweep_answer(text):
+    text = text.strip()
+    if text.startswith("not carried "):
+        return ("not carried", text[len("not carried "):])
+    status, _, word = text.partition(" ")
+    return (int(status), word) if status.isdigit() else (text, "")
+
+
+def _sweep_table():
+    out = {}
+    for line in SWEEP_TABLE_TEXT.strip().splitlines():
+        key, tip, after, rule = (x.strip() for x in line.split("|"))
+        out[tuple(key.split())] = (_sweep_answer(tip), _sweep_answer(after), rule)
+    return out
+
+
+def _sweep_is_text(annotation):
+    if annotation is str:
+        return True
+    args = typing.get_args(annotation)
+    return bool(args) and str in args and all(a in (str, type(None)) for a in args)
+
+
+def _sweep_fields(route):
+    """(place, name) of every declared text input of a route, read from its route object: its path, query and
+    header parameters (its dependencies' included) and each text field of its body model. A header that code
+    reads from the raw request is not declared, so it is not here."""
+    flat = get_flat_dependant(route.dependant, skip_repeats=True)
+    out = set()
+    for where, params in (("path", flat.path_params), ("query", flat.query_params), ("header", flat.header_params)):
+        out |= {(where, f.alias) for f in params if _sweep_is_text(f.field_info.annotation)}
+    for f in flat.body_params:
+        model = f.field_info.annotation
+        if isinstance(model, type) and issubclass(model, BaseModel):
+            out |= {("body", fi.alias or name) for name, fi in model.model_fields.items()
+                    if _sweep_is_text(fi.annotation)}
+        elif _sweep_is_text(model):
+            out.add(("body", f.alias))
+    return sorted(out)
+
+
+def _sweep_routes():
+    return {(m, r.path): r for r in main.app.routes for m in (getattr(r, "methods", None) or ()) if m != "HEAD"}
+
+
+def _sweep_tournament_routes(by):
+    """Every route with "/tournaments" in its path whose handler reaches tournaments._player_id_banned by name,
+    through tournaments.py's own functions."""
+    with open(os.path.join(API, "tournaments.py"), encoding="utf-8") as fh:
+        fns = {n.name: n for n in ast.parse(fh.read()).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    def calls(node):
+        return {c.func.id if isinstance(c.func, ast.Name) else c.func.attr for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))}
+
+    def reaches(node):
+        seen, todo = set(), list(calls(node))
+        while todo:
+            x = todo.pop()
+            if x == "_player_id_banned":
+                return True
+            if x not in seen and x in fns:
+                seen.add(x)
+                todo.extend(calls(fns[x]))
+        return False
+    return {key for key, r in by.items() if "/tournaments" in key[1]
+            and reaches(ast.parse(textwrap.dedent(inspect.getsource(r.endpoint))).body[0])}
+
+
+def _sweep_mac(secret, s):
+    return hmac.new(secret.encode(), s.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
+
+
+def _sweep_arrived(where, v):
+    """What the server reads for v: a path or a query value travels percent-encoded as UTF-8 (a lone
+    surrogate as its three bytes) and is decoded with replacement; header bytes are read as latin-1
+    (starlette's Headers); a body or a header text as sent."""
+    if isinstance(v, bytes):
+        return v.decode("latin-1")
+    return unquote(quote(v, safe="", errors="surrogatepass")) if where in ("path", "query") else v
+
+
+def _sweep_value(base, probe):
+    if probe == "long":
+        return "a" * 100000
+    if probe == "longest":
+        return ""   # sized in the loop against the URL as it then stands
+    v = base if isinstance(base, str) and base else "pq"
+    if probe == "lonebytes":
+        return (v[:1] + "\ud800" + v[1:]).encode("utf-8", "surrogatepass")
+    return v[:1] + SWEEP_PROBES[probe] + v[1:]
+
+
+def _sweep_url(path, req):
+    url = path
+    for k, v in req["path"].items():
+        url = url.replace("{%s}" % k, quote(v, safe="", errors="surrogatepass"))
+    q = [(k, v) for k, v in req["query"].items() if v is not None]
+    if q:
+        url += "?" + "&".join("%s=%s" % (k, quote(v, safe="", errors="surrogatepass")) for k, v in q)
+    return url
+
+
+async def _sweep_base(env, label, n):
+    """One route's valid request on fresh rows (every probe of a route takes the path its valid request
+    takes), and the function that signs it over its own values (None for a route with no signature)."""
+    hdr = {}
+    if label in ("list", "ban", "unban", "details"):
+        admin = await _admin(env, "Sweep Admin %d" % n)   # one admin per request: the ban-rate gate counts five
+        if label == "list":
+            def sign(r):
+                q = r["query"]
+                q["hmac_signature"] = _sweep_mac(ADMIN_SECRET, main._admin_canonical(
+                    _sweep_arrived("query", q["admin_steam_id"]), "list_bans", ""))
+            return {"path": {}, "query": {"admin_steam_id": admin, "search": "Sweep"}, "header": hdr,
+                    "body": None}, sign
+        p = await env.player("Sweep %s %d" % (label, n))
+        if label != "ban":
+            await env.conn.execute(SWEEP_BAN_SQL, p.sid, admin)
+        body = {"admin_steam_id": admin, "target_steam_id": p.sid}
+        body.update({"ban": {"reason": "sweep reason"}, "unban": {"reason": "sweep reason"},
+                     "details": {"details": "sweep details", "name": "Sweep Name"}}[label])
+        action = {"ban": "ban", "unban": "unban", "details": "ban_details"}[label]
+
+        def sign(r, action=action):
+            b = r["body"]
+            b["hmac_signature"] = _sweep_mac(ADMIN_SECRET, main._admin_canonical(
+                b["admin_steam_id"], action, b["target_steam_id"]))
+        return {"path": {}, "query": {}, "header": hdr, "body": body}, sign
+    p = await env.player("Sweep %s %d" % (label, n))
+    tok = "sweep-token-%d" % n
+    await _session(env, p.sid, token=tok)
+    hdr["X-Session-Token"] = tok
+    if label == "delete":
+        def sign(r):
+            r["query"]["sig"] = _sweep_mac(SECRET, "delete:%s" % _sweep_arrived("path", r["path"]["steam_id"]))
+        return {"path": {"steam_id": p.sid}, "query": {}, "header": hdr, "body": None}, sign
+    if label == "h2h":
+        q = await env.player("Sweep h2h opponent %d" % n)
+        return {"path": {"steam_id": p.sid, "opponent_steam_id": q.sid}, "query": {}, "header": hdr,
+                "body": None}, None
+    await env.conn.execute("UPDATE players SET discord_id = $1 WHERE id = $2", str(SWEEP_DISCORD + n), p.id)
+    if label in ("signup", "unsignup", "force_vote"):
+        tid = await TR._tournament(env, "voting")
+        if label != "signup":
+            await TR._signup(env, tid, p)
+        body = {"steam_id": p.sid}
+        if label != "force_vote":
+            body.update(display_name="Sweep Name", region="eu")
+        return {"path": {"tournament_id": str(tid)}, "query": {}, "header": hdr, "body": body}, None
+    q = await env.player("Sweep %s opponent %d" % (label, n))
+    tid = await TR._tournament(env, "running")
+    mid = await TR._match(env, tid, await TR._signup(env, tid, p), await TR._signup(env, tid, q), "ready")
+    if label == "forfeit":
+        return {"path": {"tournament_id": str(tid), "match_id": str(mid)}, "query": {}, "header": hdr,
+                "body": {"steam_id": p.sid}}, None
+    hdr["X-Internal-Key"] = INTERNAL_KEY
+    # "notyet" is recorded on this match (the handler's write); "yes" answers match_closed here, as the match
+    # carries no deadline_at (T:3997), so it would take a path that never reads the player.
+    return {"path": {}, "query": {}, "header": hdr,
+            "body": {"match_id": str(mid), "steam_id": p.sid, "answer": "notyet"}}, None
+
+
+def _sweep_word(r):
+    try:
+        j = r.json()
+    except ValueError:
+        return r.text[:60]
+    if isinstance(j, dict):
+        d = j.get("detail")
+        if isinstance(d, list) and d and isinstance(d[0], dict):
+            return "%s %s" % (".".join(str(x) for x in d[0].get("loc", ())[1:]), d[0].get("type"))
+        if isinstance(d, str):
+            return d[:60]
+        for k in ("status", "result", "error"):
+            if isinstance(j.get(k), str):
+                return j[k]
+        if "total" in j:
+            return "page" if j["total"] else "empty"
+    return "ok"
+
+
+async def _sweep_send(c, method, path, req):
+    url = _sweep_url(path, req)
+    headers, content = dict(req["header"]), None
+    if req["body"] is not None:
+        content = json.dumps(req["body"]).encode("ascii")
+        headers["Content-Type"] = "application/json"
+    try:
+        r = await c.request(method, url, content=content, headers=headers)
+    except Exception as e:   # the client cannot carry the value (a header that holds a lone surrogate)
+        return ("not carried", type(e).__name__)
+    return (r.status_code, _sweep_word(r))
+
+
+def test_n3_every_declared_text_input_of_the_items_routes_answers_its_table_row(monkeypatch):
+    """N3.1 to N3.3 (RULING-BAN-RECORD-R1 section 2; the integrator's entries of 01:24:29Z, 01:24:31Z and
+    02:14:42Z): every declared text input of the item's routes, read from the route objects by code, probed
+    one at a time with every other field valid (each probe on fresh rows; a signature that covers the probed
+    field is computed over the probe's own values, so the request passes the signature check; a probed
+    signature is a known admin's), with the real session check. The rule: no answer is a 500, a 5xx other
+    than 500 is held in SWEEP_5XX with its line, and each answer is the one SWEEP_TABLE names. A probe the
+    client cannot carry reads "not carried" beside its carried row. Every row is printed with what arrived,
+    and each answer that differs from the table's answer at 73edff39 is printed as [N3-TIP]."""
+    by = _sweep_routes()
+    derived = _sweep_tournament_routes(by)
+    routes = {**SWEEP_NAMED, **{k: SWEEP_TOURNAMENT.get(k, "underived:" + k[1]) for k in derived}}
+    fields = {label: _sweep_fields(by[key]) if key in by else [] for key, label in routes.items()}
+    table = _sweep_table()
+    rows = []
+
+    async def body(env):
+        _open(env)
+        _armed(env)
+        env.mp.setattr(main, "_check_steam_session", _REAL_SESSION_CHECK)
+        n = 0
+        async with _client(env) as c:
+            for (method, path), label in sorted(routes.items(), key=lambda kv: (kv[1] == "list", kv[1])):
+                if label.startswith("underived:"):
+                    continue
+                n += 1
+                req, sign = await _sweep_base(env, label, n)
+                if sign:
+                    sign(req)
+                rows.append((label, "-", "valid", "", await _sweep_send(c, method, path, req)))
+                for where, name in fields[label]:
+                    for probe in SWEEP_PROBES:
+                        if ((probe == "nonascii" and name not in SWEEP_SIGNATURES)
+                                or (probe == "longest" and where not in ("path", "query"))
+                                or (probe == "lonebytes" and where != "header")):
+                            continue
+                        n += 1
+                        req, sign = await _sweep_base(env, label, n)
+                        place = req[where]
+                        if name in SWEEP_SIGNATURES:
+                            sign(req)
+                            place[name] = _sweep_value(place[name], probe)
+                        else:
+                            place[name] = _sweep_value(place.get(name), probe)
+                            if sign:
+                                sign(req)
+                        if probe == "longest":   # the signature, if any, already stands in the URL measured
+                            place[name] = "a" * (SWEEP_URL_BOUND - len(_sweep_url(path, req)) - 64)
+                            if sign and name not in SWEEP_SIGNATURES:
+                                sign(req)
+                        got = await _sweep_send(c, method, path, req)
+                        a = _sweep_arrived(where, place[name])
+                        rows.append((label, name, probe, ascii(a) if len(a) < 40 else "%d letters" % len(a), got))
+    case(monkeypatch, body, prefix="banrec")
+    for label, name, probe, arrived, got in rows:
+        print("[N3] %-10s %-16s %-8s %-24s %s" % (label, name, probe, arrived, got))
+    seen = {(label, name, probe): got for label, name, probe, _a, got in rows}
+    for k in sorted(k for k in seen if k in table and table[k][0] != seen[k]):
+        print("[N3-TIP] %s answered %s; the table's answer at 73edff39 is %s" % (k, seen[k], table[k][0]))
+    red = sorted(k for k, got in seen.items() if got[0] == 500)
+    other = sorted(k for k, got in seen.items() if isinstance(got[0], int) and got[0] >= 500 and got[0] != 500
+                   and k not in SWEEP_5XX)
+    differ = sorted((k, seen[k], table[k][1] if k in table else None) for k in seen
+                    if k not in table or table[k][1] != seen[k])
+    unseen = sorted(set(table) - set(seen))
+    assert set(derived) == set(SWEEP_TOURNAMENT), set(derived) ^ set(SWEEP_TOURNAMENT)
+    assert fields == {label: SWEEP_FIELDS.get(label) for label in fields}, fields
+    assert not red and not other and not differ and not unseen, (
+        "RED (500): %s; OTHER 5XX: %s; ROWS THAT DIFFER FROM THE TABLE: %s; ROWS NOT SEEN: %s"
+        % (red, other, differ, unseen))
+
+
+def _n3_binds(parameters, v):
+    """Whether a statement's parameters carry the text v, alone or inside a longer text."""
+    vals = parameters.values() if isinstance(parameters, dict) else (parameters or ())
+    flat = []
+    for x in vals:
+        flat.extend(x if isinstance(x, (list, tuple)) else [x])
+    return any(isinstance(x, str) and v in x for x in flat)
+
+
+def test_n3_the_eight_held_rows_bind_the_id_in_no_statement_of_the_route_in_either_mode(monkeypatch):
+    """The integrator's entry of 02:14:42Z, point 2 (a): the 8 rows SWEEP_5XX holds (signup, unsignup,
+    force_vote and forfeit; steam_id with a NUL, with a lone surrogate). The observer records every statement
+    of each request and whether it ran inside the session check. In either mode of the check (log-only, as the
+    case runs; enforcing: STEAM_AUTH_ENFORCE on, the key set, the client's version past STEAM_AUTH_MIN_VERSION)
+    no statement outside the check binds the id, so the answer is the check's own, given before the handler's
+    code: log-only, 503 from the check's ban read (M:17414); enforcing, 401 session_required (M:17399) with no
+    statement that binds the id."""
+    with open(os.path.join(API, "main.py"), encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    assert 'raise HTTPException(status_code=503, detail="session_check_unavailable")' in lines[17414 - 1]
+    assert 'raise HTTPException(status_code=401, detail="session_required")' in lines[17399 - 1]
+    keys = {label: key for key, label in SWEEP_TOURNAMENT.items()}
+    rows = []
+
+    async def body(env):
+        _open(env)
+        _armed(env)
+        inside, seen = [False], []
+
+        async def check(*a, **k):
+            inside[0] = True
+            try:
+                return await _REAL_SESSION_CHECK(*a, **k)
+            finally:
+                inside[0] = False
+        env.mp.setattr(main, "_check_steam_session", check)
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            seen.append((inside[0], statement, parameters))
+        n = 0
+        async with _client(env) as c:
+            event.listen(env.engine.sync_engine, "before_cursor_execute", listen)
+            try:
+                for mode in ("log-only", "enforcing"):
+                    if mode == "enforcing":
+                        env.mp.setenv("STEAM_AUTH_ENFORCE", "1")
+                    for label in SWEEP_HELD:
+                        method, path = keys[label]
+                        for probe in ("nul", "lone"):
+                            n += 1
+                            req, _sign = await _sweep_base(env, label, n)
+                            v = req["body"]["steam_id"] = _sweep_value(req["body"]["steam_id"], probe)
+                            seen.clear()
+                            got = await _sweep_send(c, method, path, req)
+                            binds = [(i, re.sub(r"\s+", " ", s)[:70]) for i, s, p in seen if _n3_binds(p, v)]
+                            rows.append((mode, label, probe, got, binds, sum(1 for i, _s, _p in seen if not i)))
+            finally:
+                event.remove(env.engine.sync_engine, "before_cursor_execute", listen)
+    case(monkeypatch, body, prefix="banrec")
+    for row in rows:
+        print("[N3-HELD] %-9s %-10s %-4s %s binds %s; statements outside the check %d" % row)
+    assert len(rows) == 2 * len(SWEEP_HELD) * 2, rows
+    for mode, label, probe, got, binds, _outside in rows:
+        assert not [s for i, s in binds if not i], ("a statement outside the check binds the id", mode, label,
+                                                    probe, binds)
+        if mode == "log-only":
+            assert got == (503, "session_check_unavailable") and binds and "player_bans" in binds[-1][1], (
+                mode, label, probe, got, binds)
+        else:
+            assert got == (401, "session_required") and not binds, (mode, label, probe, got, binds)
+
+
+# -- N3.2's answers for an id outside the domain, and the sign-up's region (FX1, FX3, the check-in) -----------
+
+FX_DELETE = "/api/v1/players/{steam_id}/data"
+FX_CHECKIN = "/api/v1/internal/tournaments/checkin-response"
+FX_INSIDE = "76561190040699990"          # inside the domain; no account has it
+FX_OUTSIDE = ("7\x006561190040699991", "7\ud8006561190040699992", "zq outside", "1" * 21, "deleted_0a1b2c3d")
+
+
+async def _fx_send(c, method, path, req):
+    """As _sweep_send, with the whole answer: (status, body)."""
+    headers, content = dict(req["header"]), None
+    if req["body"] is not None:
+        content = json.dumps(req["body"]).encode("ascii")
+        headers["Content-Type"] = "application/json"
+    r = await c.request(method, _sweep_url(path, req), content=content, headers=headers)
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, r.text
+
+
+def _fx_delete(sid):
+    """The deletion's request for sid, signed over the id as it arrives (a path value travels percent-encoded)."""
+    return {"path": {"steam_id": sid}, "query": {"sig": _sweep_mac(SECRET, "delete:%s" % _sweep_arrived("path", sid))},
+            "header": {}, "body": None}
+
+
+def test_fx1_an_id_outside_the_domain_answers_as_one_with_no_session_and_sends_no_statement(monkeypatch):
+    """FX1 (the integrator's entry of 01:24:29Z, point 1): right after the signature check, before the first
+    statement that binds the id, an id outside the domain (main._mod_target_ok) gets the answer an id with no
+    session gets. Armed (STEAM_WEB_API_KEY set): the session check's own refusal, held EQUAL to the answer for an
+    id inside the domain with no session (401 session_required_update_mod). Unarmed: 200 not_found with the id as
+    it arrived. The observer of every statement counts zero for each id outside, in both modes."""
+    out = {}
+
+    async def body(env):
+        _open(env)
+        seen = []
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            seen.append(statement)
+        async with _client(env) as c:
+            event.listen(env.engine.sync_engine, "before_cursor_execute", listen)
+            try:
+                for mode in ("armed", "unarmed"):
+                    _armed(env, key=(mode == "armed"))
+                    for sid in (FX_INSIDE,) + FX_OUTSIDE:
+                        seen.clear()
+                        got = await _fx_send(c, "DELETE", FX_DELETE, _fx_delete(sid))
+                        out[(mode, sid)] = (got, len(seen), _sweep_arrived("path", sid))
+            finally:
+                event.remove(env.engine.sync_engine, "before_cursor_execute", listen)
+    case(monkeypatch, body, prefix="banrec")
+    for k, v in out.items():
+        print("[FX1]", ascii(k), ascii(v))
+    inside, n_inside, _a = out[("armed", FX_INSIDE)]
+    assert inside == (401, {"detail": "session_required_update_mod"}) and n_inside > 0, out[("armed", FX_INSIDE)]
+    assert out[("unarmed", FX_INSIDE)][0] == (200, {"status": "not_found", "steam_id": FX_INSIDE}), out
+    for sid in FX_OUTSIDE:
+        got, n, _arrived = out[("armed", sid)]
+        assert (got, n) == (inside, 0), ("armed", ascii(sid), out[("armed", sid)])
+        got, n, arrived = out[("unarmed", sid)]
+        assert (got, n) == ((200, {"status": "not_found", "steam_id": arrived}), 0), ("unarmed", ascii(sid), got, n)
+
+
+def test_fx1_unarmed_a_deleted_accounts_row_key_answers_not_found(monkeypatch):
+    """FX1's declared point (the integrator's entry of 01:24:29Z, point 1): unarmed, a deleted account's row key
+    (deleted_<hex>, outside the domain) answers 200 not_found where it answered already_deleted (M:47313); armed,
+    401 session_required_update_mod, before the change and after it."""
+    out = {}
+
+    async def body(env):
+        _open(env)
+        _armed(env, key=False)
+        p = await env.player("FX1 Deleted")
+        async with _client(env) as c:
+            out["first"] = await _fx_send(c, "DELETE", FX_DELETE, _fx_delete(p.sid))
+            out["key"] = key = await env.conn.fetchval("SELECT steam_id FROM players WHERE id = $1", p.id)
+            out["unarmed"] = await _fx_send(c, "DELETE", FX_DELETE, _fx_delete(key))
+            _armed(env)
+            out["armed"] = await _fx_send(c, "DELETE", FX_DELETE, _fx_delete(key))
+    case(monkeypatch, body, prefix="banrec")
+    print("[FX1-DECLARED]", out)
+    assert out["first"][0] == 200 and out["first"][1]["status"] == "anonymized", out
+    assert re.fullmatch(r"deleted_[0-9a-f]+", out["key"]), out
+    assert out["unarmed"] == (200, {"status": "not_found", "steam_id": out["key"]}), out
+    assert out["armed"] == (401, {"detail": "session_required_update_mod"}), out
+
+
+FX3_ROWS = (("a NUL inside", "e\x00u", "eu"), ("refused characters alone", "\x00\ud800", None),
+            ("seventeen letters", "abcdefghijklmnopq", None), ("sixteen letters", "abcdefghijklmnop", "abcdefghijklmnop"),
+            ("a code outside the set", "xx9", "xx9"), ("a code of the set", "eu", "eu"))
+
+
+def test_fx3_the_signups_region_is_stored_by_the_region_rule(monkeypatch):
+    """FX3 (the integrator's entry of 01:24:31Z, point 1): the characters the store refuses are taken out before
+    region_at_signup is built; a region empty after that is None; one longer than the column (sixteen) is None,
+    never cut, and the sign-up is accepted; any other value is stored as sent (a code outside the set is skipped
+    where the region is read). Each row signs up on a tournament of its own and reads the stored value back."""
+    out = []
+
+    async def body(env):
+        _open(env)
+        async with _client(env) as c:
+            for n, (label, sent, _want) in enumerate(FX3_ROWS):
+                req, _sign = await _sweep_base(env, "signup", 300 + n)
+                req["body"]["region"] = sent
+                got = await _fx_send(c, "POST", "/api/v1/tournaments/{tournament_id}/signup", req)
+                stored = await env.conn.fetch(
+                    "SELECT ts.region_at_signup FROM tournament_signups ts JOIN players p ON p.id = ts.player_id"
+                    " WHERE ts.tournament_id = $1 AND p.steam_id = $2",
+                    uuid.UUID(req["path"]["tournament_id"]), req["body"]["steam_id"])
+                out.append((label, got[0], [s["region_at_signup"] for s in stored]))
+    case(monkeypatch, body, prefix="banrec")
+    for row in out:
+        print("[FX3]", ascii(row))
+    assert out == [(label, 200, [want]) for label, _sent, want in FX3_ROWS], out
+
+
+def test_checkin_an_id_outside_the_domain_answers_as_an_id_with_no_player(monkeypatch):
+    """The check-in's two rows of N3.1 (the integrator's entry of 02:14:42Z, point 2 (a)): repaired where the value
+    is first read (_ban_lock_and_gate, its first bind), by the domain's own function, with the answer the route
+    gives for an id that has no player: 400 Invalid check-in answer for an answer outside the map (T:3922-3924),
+    else 200 match_closed (T:3953-3954). Held EQUAL on a live match, for a good answer and a bad one, against an
+    id inside the domain with no player; no statement binds an id outside."""
+    out = {}
+
+    async def body(env):
+        _open(env)
+        seen = []
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            seen.append(parameters)
+        n = 400
+        async with _client(env) as c:
+            event.listen(env.engine.sync_engine, "before_cursor_execute", listen)
+            try:
+                for answer in ("notyet", "bogus"):
+                    for sid in (FX_INSIDE,) + FX_OUTSIDE:
+                        n += 1
+                        req, _sign = await _sweep_base(env, "checkin", n)
+                        req["body"].update(steam_id=sid, answer=answer)
+                        seen.clear()
+                        got = await _fx_send(c, "POST", FX_CHECKIN, req)
+                        out[(answer, sid)] = (got, sum(1 for p in seen if _n3_binds(p, sid)))
+            finally:
+                event.remove(env.engine.sync_engine, "before_cursor_execute", listen)
+    case(monkeypatch, body, prefix="banrec")
+    for k, v in out.items():
+        print("[CHECKIN]", ascii(k), ascii(v))
+    want = {"notyet": (200, {"ok": True, "result": "match_closed", "new_deadline_epoch": None}),
+            "bogus": (400, {"detail": "Invalid check-in answer"})}
+    for answer in ("notyet", "bogus"):
+        assert out[(answer, FX_INSIDE)][0] == want[answer], (answer, out[(answer, FX_INSIDE)])
+        for sid in FX_OUTSIDE:
+            assert out[(answer, sid)] == (want[answer], 0), (answer, ascii(sid), out[(answer, sid)])

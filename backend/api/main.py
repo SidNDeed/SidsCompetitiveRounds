@@ -45899,8 +45899,8 @@ async def internal_tournament_checkin_response(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    # Bans part 2a (S6): the bot answers for the named player.
-    await _ban_lock_and_gate(db, [body.steam_id])
+    if not _mod_target_ok(body.steam_id): return _checkin_outside_domain(body.answer)  # noqa: E701 (one line: main.py's line keys stay put)
+    await _ban_lock_and_gate(db, [body.steam_id])   # Bans part 2a (S6): the bot answers for the named player.
     from tournaments import handle_tournament_checkin_response
     result = await handle_tournament_checkin_response(
         db, body.match_id, body.steam_id, body.answer)
@@ -47254,9 +47254,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         f"delete:{steam_id}".encode(),
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(sig, expected):
+    if not _signature_matches(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
-
+    if not _mod_target_ok(steam_id): return _ban_deletion_outside_domain(steam_id)  # noqa: E701 (one line: main.py's line keys stay put)
     # MDPL R6a: this attempt's deadline (_deletion_bounded). Every statement
     # of the attempt, waits included, ends by it: the bound re-arms the
     # session's timeouts before each one (_deletion_arm_every_statement).
@@ -50578,7 +50578,7 @@ def _verify_admin_hmac(admin_steam_id: str, action: str, target: str, signature)
         _admin_canonical(admin_steam_id, action, target).encode(),
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    return _signature_matches(signature, expected)
 
 
 def _require_internal_key(x_internal_key: str | None) -> None:
@@ -50605,7 +50605,7 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
 async def _is_admin_roster(db: AsyncSession, steam_id: str) -> bool:
     """On the admin roster (admin_users), the ban not read. Only _is_admin, _require_admin_roster and
     _mail_lock_admin(roster=True) call it; see _require_admin_roster for the one route that may."""
-    if not steam_id:
+    if not _mod_target_ok(steam_id):   # outside the one domain: no admin, and never bound (RULING-BAN-RECORD-R1 N3.2)
         return False
     r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
     return r.scalar_one_or_none() is not None
@@ -51169,8 +51169,8 @@ async def admin_list_bans(
     ExtractJsonString, so two trailing keys with other names cannot be read
     in place of any of them; BAN-RECORD-1's ten keys follow them (CONTRACT-BAN-1124 point 1)."""
     await _require_admin(db, admin_steam_id, "list_bans", "", hmac_signature)
-    search_sql = ""
-    params: dict = {}
+    if "\x00" in search: return {"bans": [], "total": 0, "limit": limit, "offset": offset}  # noqa: E701 (one line: main.py's line keys stay put)
+    search_sql, params = "", {}   # a search holding a NUL matches no stored text (PostgreSQL text holds none): the empty page above, no statement
     if search:
         # Case-insensitive on the live name, the kept name, the details (BAN-RECORD-1 R3)
         # OR steam_id. Bound parameter, never interpolated (#188); ILIKE wildcards in user
@@ -51951,7 +51951,7 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w,
                                   reason=req.reason)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
-                                   target_steam_id=req.target_steam_id, reason=_ban_lone_surrogates_out(req.reason),
+                                   target_steam_id=req.target_steam_id, reason=_ban_nul_and_lone_surrogates_out(req.reason),
                                    duration_minutes=req.duration_minutes,
                                    length_sent="duration_minutes" in req.model_fields_set,
                                    # a repeat's or a length change's record keeps the reason only
@@ -88294,12 +88294,17 @@ def _ban_text_change(old, new) -> str:
     return "added" if old is None else ("cleared" if new is None else "changed")
 
 
-def _ban_lone_surrogates_out(v):
-    """v with every lone surrogate taken out (a str; anything else as it is).
-    A lone surrogate has no UTF-8 form, so neither the database driver nor a
-    422's body can carry one; the ban routes' texts drop it, never refuse it
-    (BAN-RECORD-1, RULING-BAN-RECORD-Q5 point 2)."""
-    return _re.sub(r"[\ud800-\udfff]", "", v) if isinstance(v, str) else v
+def _ban_nul_and_lone_surrogates_out(v):
+    """v with every NUL and every lone surrogate taken out (a str; anything
+    else as it is). PostgreSQL's text holds no NUL, and a lone surrogate has
+    no UTF-8 form, so neither the database driver nor a 422's body can carry
+    one; the ban routes' texts and the sign-up's region drop both, never
+    refuse them (BAN-RECORD-1, RULING-BAN-RECORD-Q5 point 2, RULING-BAN-RECORD-R1
+    N3.2). A new ban's reason is stored so; the moderator log's record of a
+    repeat or a length change keeps the log's own rule (_modlog_text: each
+    such character becomes the replacement character), so the row and the
+    record differ there."""
+    return _re.sub(r"[\x00\ud800-\udfff]", "", v) if isinstance(v, str) else v
 
 
 class _AdminBanDetailsReq(BaseModel):
@@ -88316,13 +88321,14 @@ class _AdminBanDetailsReq(BaseModel):
 
     @field_validator("details", "name", mode="before")
     @classmethod
-    def _lone_surrogates_out(cls, v):
+    def _nul_and_lone_surrogates_out(cls, v):
         """A lone surrogate has no UTF-8 form: the bound above cannot measure a
         text that holds one (pydantic refuses it as string_unicode) and the 422
         that refusal makes cannot be written out (the error body echoes the
-        input, so the answer is a 500). The shared text rules take it out
-        (_ban_text_controls_out); it goes out here first, before the bound."""
-        return _ban_lone_surrogates_out(v)
+        input, so the answer is a 500). The shared text rules take it out, and
+        a NUL with it (_ban_text_controls_out); both go out here first, before
+        the bound, by the ban routes' one helper."""
+        return _ban_nul_and_lone_surrogates_out(v)
 
 
 @app.post("/api/v1/admin/ban/details", tags=["Admin"])
@@ -88337,10 +88343,10 @@ async def admin_ban_details(req: _AdminBanDetailsReq, _slot=Depends(_pc_writer_s
     a text becomes it after the display-name rules (one line, control
     characters out, trimmed, at most 64 characters, else 422 name_too_long;
     an id in the name's place is no name). Both absent: 422
-    details_or_name_required. Setting a name touches no players row. A lone
-    surrogate in either text is taken out by the request model before its
-    bound (never refused for it), and the text so stored is the one the log
-    record counts as changed.
+    details_or_name_required. Setting a name touches no players row. A NUL or
+    a lone surrogate in either text is taken out by the request model before
+    its bound (never refused for it), and the text so stored is the one the
+    log record counts as changed.
 
     The target's identity lock first (the ban's and the unban's lattice,
     _ban_details_identities), THEN the active-ban read, by the one definition
@@ -88421,6 +88427,46 @@ async def _ban_record_forget(db: AsyncSession, steam_id: str) -> None:
         " WHERE steam_id = :sid"
         "   AND (display_name_at_ban IS NOT NULL OR details IS NOT NULL OR details_at IS NOT NULL)"
     ), {"sid": steam_id})
+
+
+def _signature_matches(given, expected: str) -> bool:
+    """The one comparison of a given signature (RULING-BAN-RECORD-R1 N3.2):
+    a signature that is not a text of ASCII characters is a wrong signature;
+    every other is compared by hmac.compare_digest, in constant time.
+    compare_digest refuses a text with a letter outside ASCII by a TypeError
+    (an answer of 500); here that text is a False, so the route answers its
+    own wrong-signature answer. _verify_admin_hmac and the account deletion's
+    compare call it; the other compare calls on a signature in backend/api
+    are the filed class item (E6)."""
+    return isinstance(given, str) and given.isascii() and hmac.compare_digest(given, expected)
+
+
+def _ban_deletion_outside_domain(steam_id: str) -> dict:
+    """The account deletion's answer for an id outside the one domain
+    (_mod_target_ok), right after its signature check and before its first
+    bind (RULING-BAN-RECORD-R1 N3.2, RULING-BAN-RECORD-FX1): such an id names
+    no account and no ban (an active ban's key is in the domain, migration
+    319), so the route answers what it answers for an id with no account.
+    Armed (STEAM_WEB_API_KEY set): the session refusal, 401
+    session_required_update_mod, since no verified session names such an id;
+    unarmed: not_found, with the id as it arrived."""
+    if os.getenv("STEAM_WEB_API_KEY"):
+        raise HTTPException(status_code=401, detail="session_required_update_mod")
+    return {"status": "not_found", "steam_id": steam_id}
+
+
+def _checkin_outside_domain(answer) -> dict:
+    """The deadline check-in's answer for an id outside the one domain
+    (_mod_target_ok), before its first bind (RULING-BAN-RECORD-R1 N3.2): such
+    an id names no player, so the route answers what
+    tournaments.handle_tournament_checkin_response answers for an id with no
+    player, without its statements: an answer outside _CHECKIN_ANSWER_MAP is
+    400 (tournaments.py:3922 to 3924), every other is match_closed
+    (tournaments.py:3953 to 3954)."""
+    from tournaments import _CHECKIN_ANSWER_MAP  # noqa: PLC0415 — file convention
+    if _CHECKIN_ANSWER_MAP.get(answer) is None:
+        raise HTTPException(status_code=400, detail="Invalid check-in answer")
+    return {"ok": True, "result": "match_closed", "new_deadline_epoch": None}
 
 
 # ── the ban record's build marker (BAN-RECORD-1) ─────────────────────────────
