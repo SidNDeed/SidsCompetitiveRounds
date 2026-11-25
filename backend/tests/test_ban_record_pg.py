@@ -1285,7 +1285,10 @@ def test_n1_t2_the_logs_three_reads_hold_the_record_and_no_text(monkeypatch):
     """T2: after T1's saves, the moderator log's three reads, each with its own credentials: the admin list
     of actions and the moderator log (each with its admin signature), and the bot's twin (the internal key and
     the admin's linked Discord id). Each answers 200 and holds the ban's ban_details record, its id (asserted
-    first), and no mark. Mutant: new_details back into the record (red on all three)."""
+    first), and no mark. Each read also answers the live name of every account its rows name (the list's
+    target_name, the log's players), and _n1_saves gave the account's live name the name's mark (the kept name
+    the ban starts with); so the account is renamed without a mark before the reads, and a mark in a read can
+    come only from a record. Mutant: new_details back into the record (red on all three)."""
     out = {}
 
     async def body(env):
@@ -1295,6 +1298,7 @@ def test_n1_t2_the_logs_three_reads_hold_the_record_and_no_text(monkeypatch):
         p = await env.player("N1 Account")
         async with _client(env) as c:
             out["ban_id"] = await _n1_saves(env, c, admin, p)
+            await env.conn.execute("UPDATE players SET display_name = 'N1 Account' WHERE id = $1", p.id)
             reads = {
                 "/api/v1/admin/actions": ({"admin_steam_id": admin, "action": "ban_details", "target_steam_id": p.sid,
                                            "hmac_signature": _sig(admin, "admin_actions_list", "")}, {}),
