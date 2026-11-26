@@ -46,6 +46,9 @@ FILL = {
     "/api/v1/i18n/history": ({}, {"lang": "ru", "key_id": "1"}),
     "/api/v1/i18n/approved": ({}, {"lang": "ru"}),
     "/api/v1/i18n/proposals": ({}, {"lang": "ru"}),
+    # ALT-BAN-1: the links route declares target_steam_id required (Query(...)), as pc/trades
+    # declares steam_id; without it the request is refused 422 before the handler's check runs.
+    "/api/v1/admin/bans/links": ({}, {"target_steam_id": PLAYER_ID}),
 }
 
 # Measured: the handler's answer after a passed check, for a row the schema
@@ -60,6 +63,8 @@ NON_AUTH_ANSWER = {
     "/api/v1/admin/card-evidence": 400,
     "/api/v1/admin/combat-evidence": 400,
     "/api/v1/admin/identity-clock-evidence": 400,
+    # ALT-BAN-1: signed for an account with no ban, the links route answers no_active_ban
+    "/api/v1/admin/bans/links": 404,
 }
 
 
@@ -184,10 +189,11 @@ def test_portal_class_requires_token(client, route):
 
 
 def test_every_class_member_was_exercised():
-    """The parametrisation is the class list: 27 + 7, none dropped."""
+    """The parametrisation is the class list: 28 + 7, none dropped."""
     # admin evidence report re-land (2026-10-29): the four admin evidence views
     # (seat, card, combat, identity-clock) join ADMIN_SIGNED; 22 before.
     # MODLOG-1: the moderator log read (/api/v1/admin/modlog) joins; 26 before.
-    assert len(ADMIN_ROUTES) == len(read_gate.ADMIN_SIGNED) == 27
+    # ALT-BAN-1: the links read (/api/v1/admin/bans/links, main.py admin_ban_links) joins; 27 before.
+    assert len(ADMIN_ROUTES) == len(read_gate.ADMIN_SIGNED) == 28
     assert len(PORTAL_ROUTES) == len(read_gate.PORTAL) == 7
     assert set(NON_AUTH_ANSWER) <= set(read_gate.ADMIN_SIGNED) | set(read_gate.PORTAL)
