@@ -773,3 +773,42 @@ def test_a_slot_held_past_the_lock_limit_makes_the_pair_busy_with_nothing_writte
     assert out["took"] < main._BAN_NOTICE_STATEMENT_MS / 1000.0, out["took"]
     assert out["day_held"] == 2 and out["rows_held"] == {out["pair"]: None} and out["posts_held"] == [], out
     assert out["free"]["posted"] == 1 and out["day"] == 3 and out["rows"][out["pair"]] is not None, out
+
+
+def test_a_slot_error_ends_that_pair_alone_and_the_next_due_pair_is_posted(monkeypatch):
+    """Fix 2, ruling Q2: an error on the first pair's slot statement (the
+    statement rewritten to name a table that does not stand, for that one
+    statement only) ends that pair alone as "busy", with a rollback and no
+    post; nothing leaves the pass, and the pass goes on to the next due pair,
+    which is posted. Only "full" stops the posting."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b, others = await _pair_world(env, c, admin, others=2)
+            await _stored(env)
+        hits = []
+
+        def first_slot_fails(sql):
+            if "INSERT INTO ban_notice_days" in sql and not hits:
+                hits.append(sql)
+                return sql.replace("INSERT INTO ban_notice_days", "INSERT INTO ban_notice_days_not_there", 1)
+            return sql
+        env._rewrites.append(first_slot_fails)
+        try:
+            got, err, _took = await _pass_caught(env.sm)
+        finally:
+            env._rewrites.remove(first_slot_fails)
+        rows = await _notices(env)
+        out.update(got=got, err=err, hits=len(hits), day=await _day_posts(env), posts=await _posts(env),
+                   posted=sorted(k[1] for k, v in rows.items() if v is not None), n=len(rows))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["err"] is None and out["hits"] == 1, (out["err"], out["hits"])
+    assert (out["got"]["busy"], out["got"]["posted"], out["got"]["full"]) == (1, 1, 0), out["got"]
+    assert out["day"] == 1 and len(out["posts"]) == 1 and len(out["posted"]) == 1 and out["n"] == 2, out
