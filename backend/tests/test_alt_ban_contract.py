@@ -59,7 +59,7 @@ def test_the_links_route_its_method_and_its_parameters():
     assert src.count("_require_admin(db, admin_steam_id, 'ban_links', target_steam_id, hmac_signature)") == 1, src[:400]
 
 
-def test_the_five_words_the_caps_and_the_windows():
+def test_the_five_words_their_order_the_caps_and_the_own_window():
     assert main._ALT_BAN_HOW == ("address", "block", "family_shared", "family_lender", "family_borrower")
     assert (main._ALT_BAN_LINKS_SHOWN, main._ALT_BAN_REGIONS_SHOWN) == (50, 20)
     assert main._ALT_BAN_OWN_DAYS >= 36500
@@ -89,7 +89,7 @@ def test_the_lists_four_keys_and_their_unrecorded_values():
     assert fill.count("db.execute(") == 1, "the page's four keys come from ONE statement"
 
 
-def test_the_notice_settings_and_its_caps():
+def test_the_notice_channel_setting_and_the_day_cap():
     assert main._BAN_NOTICE_CHANNEL_ENV == "SCR_BAN_NOTICE_CHANNEL"
     assert main._BAN_NOTICE_DAY_CAP == 20
     compose = open(os.path.join(HERE, "..", "docker-compose.yml"), encoding="utf-8").read()

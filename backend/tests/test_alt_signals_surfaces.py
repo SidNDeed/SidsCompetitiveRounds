@@ -380,7 +380,10 @@ def test_the_disclosure_check_refuses_a_statement_its_closed_table_of_heads_does
     assert any(p.startswith("the DDL creates") for p in got), got
 
 
-def test_the_disclosure_check_fails_on_each_of_its_classes():
+def test_the_disclosure_check_fails_on_five_of_its_classes():
+    """An unmapped column, a column of a type the reader does not know, a
+    column called bookkeeping outside the closed list, a sentence that lacks
+    a category's words, and a mapped column the tables do not have."""
     sql, fixture = _read(MIGRATION_427), _fixture()
     sentence = alt_signals.DISCLOSURE
     # A column added to a table and not mapped.

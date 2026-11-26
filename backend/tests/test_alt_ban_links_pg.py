@@ -7,10 +7,10 @@ caps, the banned account's own side without a window and the other side
 with the lane's, a linked account with no live players row never named and
 counted as one account in others, links_total and the list's links (a
 lender that matches no live account neither named nor counted), the route
-ADMIN_SIGNED in the read gate as the list is, no read before the admin
-check on a bad signature, recording on only with a key and the notice
-acknowledged, no mark, key id or
-code in the answer, 404 no_active_ban, 503 links_unavailable on a cancelled
+ADMIN_SIGNED in the read gate as the list is, 403 for a signature made for
+another action, no read before the admin check on a bad signature, recording
+on only with a key and the notice acknowledged, no address or block mark,
+key id or key in the answer, 404 no_active_ban, 503 links_unavailable on a cancelled
 read, at most 13 statements, no moderator-log row. The list (point 1):
 region, region_at, regions and links by ONE more read for the page inside a
 savepoint (four statements with a key loaded, none without), null when the
@@ -193,7 +193,9 @@ def test_each_word_its_numbers_and_the_order(monkeypatch):
     assert len(a["links"]) == 8 and a["links_total"] == 9, (len(a["links"]), a["links_total"])
 
 
-def test_no_mark_key_id_code_or_address_in_the_answer(monkeypatch):
+def test_no_address_or_block_mark_key_id_key_or_address_form_in_the_answer(monkeypatch):
+    """The answer holds none of the planted address and block marks (hex),
+    the key id, the key, or an address form."""
     out = {}
 
     async def body(env):
@@ -241,7 +243,10 @@ def test_no_active_ban_is_404(monkeypatch, state):
     assert (out["status"], out["detail"]) == (404, "no_active_ban"), out
 
 
-def test_a_bad_signature_is_refused_and_nothing_is_read(monkeypatch):
+def test_a_signature_for_another_action_is_refused_403(monkeypatch):
+    """A signature made for another action (list_bans) is refused with 403.
+    That no statement runs before the admin check is shown by
+    test_a_bad_signature_reads_nothing_before_the_admin_check."""
     out = {}
 
     async def body(env):
@@ -291,7 +296,10 @@ def test_a_cancelled_read_answers_503_and_at_most_13_statements_and_no_log_row(m
     assert out["logged"] == 0, out
 
 
-def test_recording_says_off_without_a_key_or_with_the_notice_closed(monkeypatch):
+def test_recording_says_off_with_the_notice_closed_with_or_without_a_key(monkeypatch):
+    """With the notice not acknowledged the word is off, with a key loaded
+    and with none. The key's own condition is shown by
+    test_recording_says_off_with_no_key_and_the_notice_acknowledged."""
     out = {}
 
     async def body(env):

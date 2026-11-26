@@ -74,7 +74,7 @@ def test_both_arms_carry_the_build_marker():
     assert len(stores) == 1 and ast.unparse(binding.value) == "1", ast.unparse(binding)
 
 
-def test_both_arms_read_the_region_files_word_in_a_thread():
+def test_both_arms_await_the_one_bounded_reader_of_the_word():
     """Both arms await the one bounded reader of the word (_ban_region_word:
     the read in a thread of the reads' own pool, at most one in flight, the
     wait cut at _ALT_BAN_WORD_WAIT_S); turn 2 moved it from a bare

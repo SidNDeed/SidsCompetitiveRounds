@@ -363,7 +363,7 @@ def test_the_refusal_is_the_same_whatever_the_recording_does(case, env, name):
 
 def test_the_refusal_raised_is_the_gates_own_object(case, env):
     """The route raises the very exception the gate raised (a bare raise),
-    after the recording ran."""
+    and the recording asked Steam once."""
     sid = R._sid()
     seen = []
     orig = main._ban_gate_or_raise
@@ -637,8 +637,10 @@ def test_after_anything_else_the_account_is_not_asked_again_for_a_minute(case, e
 
 
 @pytest.mark.parametrize("spaced", [True, False])
-def test_two_accounts_are_asked_at_most_once_in_two_seconds(case, env, spaced):
-    """Negative control: with the overall spacing at zero both are asked."""
+def test_two_accounts_signing_in_one_after_the_other_are_asked_once(case, env, spaced):
+    """With the overall spacing on, the second account's sign-in right after
+    the first is not asked. Negative control: with the overall spacing at
+    zero both are asked."""
     one, two = R._sid(), R._sid()
     if not spaced:
         env.setattr(main, "_ALT_BAN_SPACE_ALL_S", 0.0)

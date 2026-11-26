@@ -83,7 +83,7 @@ def test_a_valid_key_loads_with_its_key_id(raw):
     assert re.fullmatch(r"[0-9a-f]{12}", k.key_id)
 
 
-def test_load_key_never_raises_and_the_repr_names_only_the_key_id():
+def test_load_key_never_raises_and_the_repr_names_the_key_id_not_the_key():
     for raw in (object(), b"", {}, "x" * 10000, "\x00" * 64, "%s\x00" % KEY_HEX, float("nan")):
         assert A.load_key(raw)[0] in ("absent", "refused", "loaded")
     assert KEY_HEX not in repr(_key()) and KEY_ID in repr(_key())

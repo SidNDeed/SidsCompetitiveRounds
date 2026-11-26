@@ -73,7 +73,7 @@ def test_431_marks_are_the_digest_of_its_own_ddl():
     """Both of 431's marks and the rollback's are the SHA-256 of 431's DDL
     block. Negative control: a changed type, a changed index, a changed
     check and a dropped partial-index predicate each leave a mark that no
-    longer matches; a comment line or an indent does not."""
+    longer matches; a comment line does not."""
     real = _text(F431)
     assert len(_MARK.findall(real)) == 2
     assert _mark_defects(real) == []
