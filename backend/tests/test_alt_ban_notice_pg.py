@@ -391,3 +391,41 @@ def test_pairs_are_ranked_by_their_qualifying_codes_alone(monkeypatch):
     posted = [k[1] for k, v in out["notices"].items() if v is not None]
     assert out["got"]["posted"] == 1 and posted == [out["o2"]], (posted, out["o1"], out["o2"])
     assert "Accounts seen on that connection: 3." in out["posts"][0], out["posts"]
+
+
+@pytest.mark.parametrize("closed", ["no key", "notice not acknowledged"])
+def test_the_line_says_storing_when_the_posting_gate_is_closed(monkeypatch, closed):
+    """M3: the channel set and the posting gate closed: the pass's line says storing."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env, posted=closed != "notice not acknowledged")
+        admin = await BR._admin(env)
+        said = []
+        env.mp.setattr(main, "_alt_print", said.append)
+        env.mp.setattr(main, "_BAN_NOTICE_FIRST_DELAY_S", 0)
+        async with BR._client(env) as c:
+            await _pair_world(env, c, admin)
+            if closed == "no key":
+                A.install_key(None)
+            task = asyncio.get_running_loop().create_task(main.ban_link_notice_loop(session_factory=env.sm))
+            try:
+                for _n in range(200):
+                    if any("notice pass:" in s for s in said):
+                        break
+                    await asyncio.sleep(0.05)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            out.update(said=said, posts=await _posts(env))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    lines = [s for s in out["said"] if "notice pass:" in s]
+    assert lines and lines[0].startswith("[ALT-BAN] notice pass: storing,"), out["said"]
+    assert out["posts"] == [], out

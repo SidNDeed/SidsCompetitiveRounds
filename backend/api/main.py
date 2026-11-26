@@ -89872,8 +89872,9 @@ def _ban_notice_channel():
 
 def _ban_notice_mode(got: dict) -> str:
     """The pass's word in its log line: "posting" when it ran with the
-    channel set, "storing" when the channel was unset or 0."""
-    return "posting" if got["channel"] else "storing"
+    channel set AND its gate open (a key loaded and the notice with both
+    sentences acknowledged), else "storing"."""
+    return "posting" if got["channel"] and got.get("gate") else "storing"
 
 
 # The shared address codes of one pair, with the other account's newest row on
@@ -89987,13 +89988,15 @@ async def ban_link_notice_pass(session_factory=None) -> dict:
     its own transaction. Returns the counts."""
     if session_factory is None:
         from database import async_session as session_factory
-    out = {"stored": 0, "posted": 0, "busy": 0, "gone": 0, "channel": _ban_notice_channel() is not None}
+    out = {"stored": 0, "posted": 0, "busy": 0, "gone": 0, "channel": _ban_notice_channel() is not None,
+           "gate": False}
     if _alt_signals.loaded_key() is None:
         return out
     async with session_factory() as db:
         if not await _alt_ban_notice_open(db):
             await db.rollback()
             return out
+        out["gate"] = True
         await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
         pairs = (await db.execute(text(_BAN_NOTICE_CANDIDATE_SQL.format(
             active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))),
@@ -90021,8 +90024,9 @@ async def ban_link_notice_loop(clock=None, session_factory=None) -> None:
     """The pass's own loop, started from lifespan on the PRIMARY only. One
     `[ALT-BAN] notice pass armed` line at the start (channel set or unset),
     a `[ALT-BAN] notice pass:` line at the end of its first pass and of every
-    pass that stored or posted (with the channel unset or 0 it says
-    "storing" and posted 0); then a pass every _BAN_NOTICE_PERIOD_S from the
+    pass that stored or posted ("posting" only with the channel set and the
+    gate open, a key loaded and the notice acknowledged; else "storing"
+    and posted 0); then a pass every _BAN_NOTICE_PERIOD_S from the
     start of the one before. A failed pass is caught, counted and said."""
     clock = clock or time.monotonic
     _alt_print("[ALT-BAN] notice pass armed: channel %s" % ("set" if _ban_notice_channel() else "unset"))
