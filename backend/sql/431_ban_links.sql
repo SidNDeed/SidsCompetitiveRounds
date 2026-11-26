@@ -30,11 +30,14 @@
 --   ix_ban_link_notices_unposted   (noticed_at) WHERE posted_at IS NULL: the
 --                                  notice pass's queue.
 --   ban_notice_days                NEW table, one row per UTC day: how many
---                                  notices the pass has posted that day (at
---                                  most 20, the CHECK). It names no account;
---                                  account deletion and the retention pass
---                                  leave it alone, and the notice pass
---                                  removes its days older than two.
+--                                  notice posts committed on that day (at
+--                                  most 20, the CHECK). A post adds one in
+--                                  its own transaction, so a post that does
+--                                  not commit adds none. It names no
+--                                  account; account deletion and the
+--                                  retention pass do not name it, and the
+--                                  notice pass removes its days older than
+--                                  two.
 --   pending_channel_posts          FAQ message 1 (the FAQ channel's row with
 --                                  sort_order 1) gains one closing sentence
 --                                  after the paragraph 427 added, saying what
@@ -51,8 +54,10 @@
 --
 -- DEPLOY ORDER: THIS FILE FIRST, THE API SECOND; 427 BEFORE THIS FILE.
 -- -------------------------------------------------------------------
--- The api build carrying this change writes the three tables, deletes from them
--- in account deletion and in its retention pass, and reads FAQ message 1 for
+-- The api build carrying this change writes the three tables, deletes rows of
+-- ban_regions and ban_link_notices in account deletion and in its retention
+-- pass, removes the days of ban_notice_days older than two in its notice
+-- pass, and reads FAQ message 1 for
 -- both sentences before it records anything for a banned account. So the
 -- file lands first: the migrate verb applies it on the primary, the standby
 -- receives it by streaming replication, and only then does the code deploy.

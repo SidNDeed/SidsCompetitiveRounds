@@ -2073,10 +2073,13 @@ class BanLinkNotice(Base):
 
 
 class BanNoticeDay(Base):
-    """One row per UTC day: how many admin notices of linked accounts the
-    notice pass has posted that day (at most 20). It names no account. A
-    post takes its slot by one statement that adds one only while the
-    count is under 20 (main._BAN_NOTICE_SLOT_SQL)."""
+    """One row per UTC day: how many admin notices of linked accounts
+    committed on that day (at most 20). It names no account; account
+    deletion and the retention pass do not name it, and the notice pass
+    removes its days older than two. A post takes its slot by one statement
+    that adds one only while the count is under 20
+    (main._BAN_NOTICE_SLOT_SQL), in the post's own transaction, so a post
+    that does not commit takes none."""
     __tablename__ = "ban_notice_days"
 
     day = Column(Date, primary_key=True)
