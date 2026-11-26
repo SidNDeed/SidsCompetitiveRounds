@@ -89338,8 +89338,8 @@ async def _alt_ban_refused(db: AsyncSession, req, request) -> None:
     key loaded, STEAM_WEB_API_KEY set, both spacings free); the notice read
     in the route's open read transaction; that transaction rolled back, so
     nothing is held from here on; the spacings checked again and stamped;
-    Steam asked (3 s a socket operation, 4 s in all); the account's stamp
-    set to ten minutes after an OK and to one minute after anything else;
+    the ticket sent to Steam's check (3 s a socket operation, 4 s in all);
+    the stamp of the account set to ten minutes after an OK, else a minute;
     no recording when more than 8 s have passed since this function was
     entered. Lets no Exception out; its lines carry a word only."""
     entered = time.monotonic()
