@@ -335,3 +335,59 @@ def test_a_posted_pair_is_posted_once_over_the_whole_ban(monkeypatch):
     assert out["first"]["posted"] == 1 and out["markers_left"] == 0, out
     assert list(out["kept"]) == [out["pair"]] and out["kept"][out["pair"]] is not None, out["kept"]
     assert out["second"]["posted"] == 0 and len(out["posts"]) == 1, (out["second"], out["posts"])
+
+
+async def _pairs(env, c, admin, n, label):
+    """A banned account and `n` accounts that recorded its code `label` after
+    the ban; returns (banned, others)."""
+    banned = await env.player("Notice Day %s" % label)
+    await L._marker(env, banned.sid, label, "blk-" + label, 3, first_days_ago=5)
+    await BR._ban(c, admin, banned.sid)
+    others = []
+    for i in range(n):
+        o = await env.player("Notice Day %s %02d" % (label, i))
+        await L._marker(env, o.sid, label, "blk-o-" + label, 0)
+        others.append(o)
+    return banned, others
+
+
+async def _stored(env):
+    """One pass with the channel unset (pairs stored, none posted); the channel set again after it."""
+    env.mp.delenv(main._BAN_NOTICE_CHANNEL_ENV)
+    got = await main.ban_link_notice_pass(env.sm)
+    env.mp.setenv(main._BAN_NOTICE_CHANNEL_ENV, CHANNEL)
+    return got
+
+
+def test_pairs_are_ranked_by_their_qualifying_codes_alone(monkeypatch):
+    """M1: a code the two accounts shared only before the ban does not rank the pair."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b = await env.player("Rank Banned")
+            for code in ("rare", "pop", "mid"):
+                await L._marker(env, b.sid, code, "blk-" + code, 3, first_days_ago=5)
+            await BR._ban(c, admin, b.sid)
+            o1, o2 = await env.player("Rank One"), await env.player("Rank Two")
+            await L._marker(env, o1.sid, "rare", "blk-rare-o", 2)      # before the ban: not qualifying
+            await L._marker(env, o1.sid, "pop", "blk-pop-o", 0)
+            await L._marker(env, o2.sid, "mid", "blk-mid-o", 0)
+            for i, code in enumerate(("pop", "pop", "pop", "mid")):
+                f = await env.player("Rank Filler %d" % i)
+                await L._marker(env, f.sid, code, "blk-f-%d" % i, 0)
+                await L._ban_row(env, admin, f.sid)
+            await _stored(env)
+            env.mp.setattr(main, "_BAN_NOTICE_DAY_CAP", 1)
+            got = await main.ban_link_notice_pass(env.sm)
+            out.update(got=got, notices=await _notices(env), o1=o1.sid, o2=o2.sid, posts=await _posts(env))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    posted = [k[1] for k, v in out["notices"].items() if v is not None]
+    assert out["got"]["posted"] == 1 and posted == [out["o2"]], (posted, out["o1"], out["o2"])
+    assert "Accounts seen on that connection: 3." in out["posts"][0], out["posts"]

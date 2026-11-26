@@ -89839,8 +89839,8 @@ async def _ban_list_alt(db: AsyncSession, steam_ids) -> dict:
 # banned account's own first sight of that code; the other account under no
 # active ban. Block codes and family sharing are never noticed (they stand on
 # the links page). Each pair is stored in its own transaction (stored before
-# posted, so posted once), then posted: the pair whose code the fewest
-# accounts share first, then the oldest; at most _BAN_NOTICE_DAY_CAP posts in
+# posted, so posted once), then posted: the pair whose qualifying code the
+# fewest accounts share first, then the oldest; at most _BAN_NOTICE_DAY_CAP posts in
 # one UTC day. Every pair's transaction takes the OTHER account's identity key
 # shared, by a try-lock (busy: the next pass), and reads the ban and the marker
 # again under it. The post names each account by its LIVE players row's name
@@ -89891,12 +89891,19 @@ _BAN_NOTICE_CANDIDATE_SQL = (
     " AND n.other_steam_id = o.steam_id)"
     " LIMIT CAST(:cap AS integer)")
 
+# The due pairs, ranked by the fewest accounts on a QUALIFYING shared code
+# (the codes _BAN_NOTICE_PAIR_FACTS reads and the post names: recorded by the
+# other account after the ban began and after the banned account's first
+# sight of the code), then the oldest. A code shared only before the ban
+# does not rank the pair.
 _BAN_NOTICE_DUE_SQL = (
     "SELECT n.banned_steam_id AS banned, n.other_steam_id AS other,"
     " (SELECT min(x.cnt) FROM (SELECT (SELECT count(DISTINCT a.steam_id) FROM conn_markers a"
     " WHERE a.key_id = o.key_id AND a.addr_mark = o.addr_mark) AS cnt"
     " FROM conn_markers o JOIN conn_markers b ON b.key_id = o.key_id AND b.addr_mark = o.addr_mark"
-    " WHERE o.steam_id = n.other_steam_id AND b.steam_id = n.banned_steam_id) x) AS shared"
+    " JOIN player_bans pb ON pb.steam_id = b.steam_id AND {active}"
+    " WHERE o.steam_id = n.other_steam_id AND b.steam_id = n.banned_steam_id"
+    " AND o.last_at >= pb.banned_at AND o.last_at >= b.first_at) x) AS shared"
     " FROM ban_link_notices n WHERE n.posted_at IS NULL"
     " ORDER BY shared ASC NULLS LAST, n.noticed_at ASC, n.banned_steam_id, n.other_steam_id"
     " LIMIT CAST(:n AS integer)")
@@ -89968,7 +89975,7 @@ async def ban_link_notice_pass(session_factory=None) -> dict:
     open with both sentences: one read), the candidates (one statement, no
     lock, at most _BAN_NOTICE_CANDIDATES), each stored in its own
     transaction; then, with the channel set, the due pairs (fewest accounts
-    on the code first, then the oldest) up to the day's cap, each posted in
+    on a qualifying code first, then the oldest) up to the day's cap, each posted in
     its own transaction. Returns the counts."""
     if session_factory is None:
         from database import async_session as session_factory
@@ -89994,7 +90001,8 @@ async def ban_link_notice_pass(session_factory=None) -> dict:
             "SELECT count(*) FROM ban_link_notices WHERE posted_at >="
             " (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"))).scalar())
         room = max(0, _BAN_NOTICE_DAY_CAP - today)
-        due = (await db.execute(text(_BAN_NOTICE_DUE_SQL), {"n": room})).all() if room else []
+        due = (await db.execute(text(_BAN_NOTICE_DUE_SQL.format(active=player_ban_active_sql("pb"))),
+                                {"n": room})).all() if room else []
         await db.rollback()
         for banned, other, _shared in due:
             out[await _ban_notice_pair_tx(db, banned, other, post_to=channel)] += 1
