@@ -1442,7 +1442,10 @@ def test_census_complete_layer_frozen_whole():
     coarse form of the ban sweep (BAN_SWEEP_FROZEN), both frozen by hand at
     the stack, plus the five coarse forms of MDPL's change (MDPL_FROZEN,
     frozen by hand), plus the two coarse forms of the ban record (BAN_RECORD_FROZEN,
-    frozen by hand), plus the complete layer, which also holds the moderator
+    frozen by hand), plus the one coarse form of ALT-BAN-1's Steam ticket check
+    (ALT_BAN_STEAM_FROZEN, frozen by hand; the two empty blocks of
+    api/alt_signals.py and api/geo_region.py are rows too, with no form), plus
+    the complete layer, which also holds the moderator
     log block's two complete forms, the ban sweep block's five and MDPL's
     twenty; the snapshot reader's builder adds one more form to the complete
     layer and one more of round 10's kinds, both frozen by hand."""
@@ -1466,7 +1469,17 @@ def test_census_complete_layer_frozen_whole():
         (fz.BAN_SWEEP_FROZEN, fz.BAN_SWEEP_COUNT, 1, 5),
         (fz.MDPL_FROZEN, fz.MDPL_COUNT, 5, 20),
         (fz.BAN_RECORD_FROZEN, fz.BAN_RECORD_COUNT, 2, 0),
+        # ALT-BAN-1's three blocks of ro_census_frozen.py, each a row of its own. CHEAT-ALT-1's
+        # api/alt_signals.py and ALT-BAN-1's api/geo_region.py: two empty entries each (no form).
+        # ALT_BAN_STEAM_FROZEN: the one coarse dsntext form of main.py _steam_ticket_url (the Steam
+        # ticket check's https URL text, an outside web service, never a database address), frozen by
+        # 07068d46 with its judgement but without a row here: the coarse layer's 389th form.
+        (fz.ALT_SIGNALS_FROZEN, fz.ALT_SIGNALS_COUNT, 0, 0),
+        (fz.GEO_REGION_FROZEN, fz.GEO_REGION_COUNT, 0, 0),
+        (fz.ALT_BAN_STEAM_FROZEN, fz.ALT_BAN_STEAM_COUNT, 1, 0),
     ]
+    assert {f[0] for v in fz.ALT_BAN_STEAM_FROZEN.values() for f in v} == {"dsntext"}
+    assert set(fz.ALT_BAN_STEAM_FROZEN) == {"api/main.py"}
     for block, count, n_coarse, n_complete in BOTH_LAYER_BLOCKS:
         b_coarse = {k: v for k, v in block.items() if not k.endswith(ro_census.COMPLETE)}
         b_complete = {k: v for k, v in block.items() if k.endswith(ro_census.COMPLETE)}
