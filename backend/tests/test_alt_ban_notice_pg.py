@@ -298,9 +298,64 @@ def test_no_key_or_the_notice_closed_is_no_pass(monkeypatch):
 
 
 def test_the_loop_starts_beside_the_retention_pass_on_the_primary_only():
+    """Fix 1, M9, by behaviour: lifespan's role branch (its `if IS_REPLICA:`
+    statement, the code itself) is RUN with every name it reads stood in
+    for, once as the standby and once as the primary; what it hands to
+    _supervised is recorded. The notice loop is started once on the primary,
+    beside the retention loop, and never on the standby. A start moved
+    outside the branch is started by neither run."""
+    import ast as _ast
+    import inspect as _inspect
+    import textwrap as _textwrap
+
+    tree = _ast.parse(_textwrap.dedent(_inspect.getsource(main.lifespan)))
+    branch = [n for n in _ast.walk(tree) if isinstance(n, _ast.If) and isinstance(n.test, _ast.Name)
+              and n.test.id == "IS_REPLICA"]
+    assert len(branch) == 1, "lifespan has one `if IS_REPLICA:` branch"
+    probe = _ast.Module(body=[_ast.AsyncFunctionDef(
+        name="_probe", args=_ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[branch[0]], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+    code = compile(_ast.fix_missing_locations(probe), "<lifespan role branch>", "exec")
+
+    class Any:
+        """Every other name: callable, awaitable, a context manager, each attribute itself."""
+        def __call__(self, *a, **k):
+            return self
+
+        def __getattr__(self, n):
+            if n.startswith("__"):
+                raise AttributeError(n)
+            return self
+
+        def __await__(self):
+            if False:
+                yield
+            return self
+
+        def __iter__(self):
+            return iter(())
+
+    names = {n.id for n in _ast.walk(branch[0]) if isinstance(n, _ast.Name)}
+
+    def run(replica):
+        started = []
+        loops = {"ban_link_notice_loop": object(), "alt_signals_retention_loop": object()}
+
+        def supervised(name, factory):
+            started.append((name, next((k for k, v in loops.items() if v is factory), None)))
+            return Any()
+        g = {n: Any() for n in names}
+        g.update(loops, IS_REPLICA=replica, _supervised=supervised, tasks=[], print=lambda *a, **k: None,
+                 __builtins__=__builtins__)
+        exec(code, g)
+        asyncio.run(g["_probe"]())
+        return started
+
+    primary, standby = run(False), run(True)
+    assert primary.count(("ban_link_notice", "ban_link_notice_loop")) == 1, primary
+    assert ("alt_signals_retention", "alt_signals_retention_loop") in primary, primary
+    assert not [s for s in standby if s[1] is not None], standby
     src = open(os.path.join(API, "main.py"), encoding="utf-8").read()
-    line = [ln for ln in src.splitlines() if '_supervised("ban_link_notice", ban_link_notice_loop)' in ln]
-    assert len(line) == 1 and '_supervised("alt_signals_retention", alt_signals_retention_loop)' in line[0], line
     assert src.count("ban_link_notice_loop") == 2, "the loop is defined once and started from one place"
 
 
