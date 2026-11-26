@@ -15,7 +15,11 @@ bits, the IPv4 subtree of an IPv6 file, and the data section's types.
 Every call opens the file read-only, takes the fstat of that descriptor,
 does all its reads through it (lseek, then read) and closes it. The parsed
 metadata is kept between calls under the key (device, inode, size,
-mtime_ns) of that fstat and used only when the key is equal.
+mtime_ns) of that fstat and used only when the key is equal. A parse is
+kept only when the file's mtime is at least _rgn_SETTLE_NS (2 s) before
+the parse: a rewrite in place at the same size inside one tick of the file
+system's timestamp clock leaves the whole key as it was, and a file that
+recent is read again at each call until it is older.
 
 Bounds, each checked before the act it guards; a breach answers ""
 ("refused" for file_word) and raises nothing out:
@@ -63,8 +67,16 @@ _rgn_META_WANT = {"node_count": "int", "record_size": "int", "ip_version": "int"
 _rgn_EXACT = {3: 8, 15: 4}
 _rgn_MOST = {5: 2, 6: 4, 8: 4, 9: 8, 10: 16, 14: 1}
 
-# (key, metadata) of the last file read; replaced as one object.
+# (key, metadata) of the last file read whose mtime was settled; replaced as one object.
 _rgn_kept = None
+# A parse is kept only for a file whose mtime is at least this long before it
+# (2 s: past the coarsest timestamp granularity a file system gives, FAT's 2 s).
+_rgn_SETTLE_NS = 2 * 10 ** 9
+
+
+def _rgn_now_ns():
+    """The wall clock in nanoseconds, the clock a file's mtime is taken from."""
+    return int(_rgn_datetime.datetime.now(_rgn_datetime.timezone.utc).timestamp() * 10 ** 9)
 
 
 class _rgn_Breach(Exception):
@@ -278,8 +290,10 @@ def _rgn_metadata(fd, st):
     kept = _rgn_kept
     if kept is not None and kept[0] == key:
         return kept[1]
+    settled = _rgn_now_ns() - st.st_mtime_ns >= _rgn_SETTLE_NS
     m = _rgn_parse(fd, st.st_size)
-    _rgn_kept = (key, m)
+    if settled:
+        _rgn_kept = (key, m)
     return m
 
 

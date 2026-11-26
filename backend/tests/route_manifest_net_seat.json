@@ -1525,7 +1525,7 @@
           ],
           "main",
           "steam_auth",
-          "6b5151008f862ebbd3a591dfe892b418584e6fbb"
+          "f26687de9d0457b52bef6b840e8982b64dbb06fd"
         ],
         [
           "/api/v1/bets",
@@ -1894,7 +1894,7 @@
           ],
           "main",
           "health_check",
-          "9b99a415818094d46665d004c1d01e1af29a8cb5"
+          "00b7c08870f49f1b9dc02ff0a4bbe0e079002cb0"
         ],
         [
           "/api/v1/i18n/approved",

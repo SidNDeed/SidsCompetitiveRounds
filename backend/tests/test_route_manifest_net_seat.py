@@ -1999,7 +1999,14 @@ def test_the_helper_closure_stays_affordable():
     # median (87 against 87) and p90 (230 against 239) bounds stay, and so do
     # the whole closure's median and p90 (250 against 261, 433 against 453).
     # Its worst is stated at its own bound below.
-    assert code_worst <= 645, f"worst code closure {code_worst} of {total}"
+    # ALT-BAN-1 fix 3, F3-D (2026-11-26): 647 measured at GET /api/v1/health,
+    # of 6238 indexed bindings (645 at bf9779b9): +2 by name, the region
+    # reader's settle margin, geo_region._rgn_SETTLE_NS, and the clock it is
+    # measured on, geo_region._rgn_now_ns, which _rgn_metadata reads and the
+    # health route reaches through file_word. No other code binding of that
+    # closure is new. The bound moves to 647, the measured value, for that
+    # reason and no other; the whole closure's worst (939) stays under 984.
+    assert code_worst <= 647, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is

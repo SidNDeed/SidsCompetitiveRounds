@@ -370,18 +370,65 @@ def test_a_record_of_401_values(osc):
     assert region(osc, V6) == ""
 
 
+def _settled(path):
+    """Set the file's mtime a minute back, past the reader's settle margin, so its parse is kept."""
+    st = os.stat(path)
+    back = st.st_mtime_ns - 60 * 10 ** 9
+    os.utime(path, ns=(back, back))
+
+
 def test_the_kept_metadata_never_changes_an_answer(osc):
     # The record's decode has its own budget of 400 values and the
     # metadata's its own: the call that reads the metadata and the next
     # call, which uses the kept value, answer the same record alike.
     def rec(k):
         return {"country": {"names": {"en": "Ardenmark"}}, "x": [0] * k}
-    put(osc, S.build([(V4, rec(392)), (V4_B, rec(391))]))
+    _settled(put(osc, S.build([(V4, rec(392)), (V4_B, rec(391))])))
     for host, want in ((V4_B, "Ardenmark"), (V4, "")):
         G._rgn_kept = None
         assert region(osc, host) == want
-        assert G._rgn_kept is not None
+        kept = G._rgn_kept
+        assert kept is not None
         assert region(osc, host) == want
+        assert G._rgn_kept is kept                # the second call used the kept value
+
+
+def _rewrite_in_one_tick(path, data):
+    """Rewrite the file in place and give it back the mtime it had, as a
+    rewrite inside one tick of the file system's timestamp clock leaves it:
+    the device, the inode, the size and mtime_ns all stay."""
+    st = os.stat(path)
+    with open(path, "r+b") as fh:
+        fh.write(data)
+        fh.truncate()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    after = os.stat(path)
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == \
+        (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def test_a_rewrite_in_place_inside_one_timestamp_tick_is_read_again(osc, monkeypatch):
+    """ALT-BAN-1 fix 3, F3-D: the stand-in files of two build months are of
+    one size, so a rewrite in place inside one timestamp tick keeps the
+    whole key of the kept parse. A parse is kept only when the file's mtime
+    is at least _rgn_SETTLE_NS before it, so the reader reads such a
+    rewrite again. With the margin at 0 (every parse kept, the reader as it
+    was) the same rewrite is answered with the old month."""
+    nov = S.build([(V4, S.place("Ardenmark"))], build_epoch=1795000000).data
+    dec = S.build([(V4, S.place("Ardenmark"))], build_epoch=1798761599).data
+    assert len(nov) == len(dec)
+    path = put(osc, nov)
+    assert word(osc) == "2026-11"
+    _rewrite_in_one_tick(path, dec)
+    assert word(osc) == "2026-12"
+    assert region(osc, V4) == "Ardenmark"
+    # The old shape, inside the case: every parse kept.
+    monkeypatch.setattr(G, "_rgn_SETTLE_NS", 0)
+    monkeypatch.setattr(G, "_rgn_kept", None)
+    _rewrite_in_one_tick(path, nov)
+    assert word(osc) == "2026-11"
+    _rewrite_in_one_tick(path, dec)
+    assert word(osc) == "2026-11", "with every parse kept, the rewrite is to be answered from the kept parse"
 
 
 def _nest(levels):
