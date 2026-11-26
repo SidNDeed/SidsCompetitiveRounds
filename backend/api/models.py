@@ -2070,3 +2070,18 @@ class BanLinkNotice(Base):
         Index("ix_ban_link_notices_other", "other_steam_id"),
         Index("ix_ban_link_notices_unposted", "noticed_at", postgresql_where=text("posted_at IS NULL")),
     )
+
+
+class BanNoticeDay(Base):
+    """One row per UTC day: how many admin notices of linked accounts the
+    notice pass has posted that day (at most 20). It names no account. A
+    post takes its slot by one statement that adds one only while the
+    count is under 20 (main._BAN_NOTICE_SLOT_SQL)."""
+    __tablename__ = "ban_notice_days"
+
+    day = Column(Date, primary_key=True)
+    posts = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("posts BETWEEN 1 AND 20", name="ck_ban_notice_days_posts"),
+    )

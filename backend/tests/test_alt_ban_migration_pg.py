@@ -7,13 +7,13 @@ text is that text, one space and one sentence, the rollback carries the same
 two texts, the header's character count is the new text's, the FAQ step is
 not selected by the full-schema DDL replay, every top-level statement is a
 guarded form, both files hold the house holding bound, and models.py
-declares the two tables column for column.
+declares the three tables column for column.
 
 The live cases apply the files to a throwaway schema on a PostgreSQL cluster
 through the same harness as 427's own test (SCR_MIGRATION_TEST_PG_DSN; the
 live cases FAIL without it, SCR_MIGRATION_TEST_PG_OPTOUT=1 waives them):
 427 then 431, the wrong order, twice, under an open read, every other FAQ
-state, every other table state, the two tables' checks, and the rollbacks
+state, every other table state, the three tables' checks, and the rollbacks
 in their order.
 """
 import os
@@ -37,7 +37,7 @@ F427, R427 = m427.F427, m427.R427
 F431 = SQL_DIR / "431_ban_links.sql"
 R431 = SQL_DIR / "rollback_431_ban_links.sql"
 
-TABLES = ("ban_link_notices", "ban_regions")
+TABLES = ("ban_link_notices", "ban_notice_days", "ban_regions")
 ALL_TABLES = TABLES + m427.TABLES
 _MARK = re.compile(r"'ban links, DDL sha256 ([0-9a-f]{64})'")
 
@@ -152,7 +152,7 @@ def _orm_columns(names):
 
 
 def test_the_orm_classes_match_431_column_for_column_and_index_for_index():
-    """models.py declares the two tables as 431 makes them (name, type,
+    """models.py declares the three tables as 431 makes them (name, type,
     nullability, in order; the index names and the partial predicate), and
     431's text is read by 427's closed table of statement heads with no
     finding. Negative control: a renamed column and a changed nullability
@@ -215,7 +215,7 @@ def _all_marked():
     return out
 
 
-def test_427_then_431_creates_two_marked_tables_and_revises_message_1_once_more(live):
+def test_427_then_431_creates_three_marked_tables_and_revises_message_1_once_more(live):
     async def go():
         async with m427._Case([(1, _was338(), 2, 2), (2, "message two", 2, 2)]) as c:
             two = await c.msg(2)
@@ -256,7 +256,7 @@ def test_427_run_again_after_431_raises_and_changes_nothing(live):
 
 def test_431_second_run_writes_nothing_and_takes_no_lock_on_the_tables_or_the_row(live):
     """A second run completes while another session holds ACCESS EXCLUSIVE on
-    the two tables and a row lock on message 1, and leaves every relation,
+    the three tables and a row lock on message 1, and leaves every relation,
     constraint and row (xmin included) as it was. Negative control: a copy
     whose FAQ step writes on every run is stopped by the held row lock."""
     async def second_run(sql_second):
@@ -366,10 +366,14 @@ def test_431_refuses_every_other_table_state_and_changes_nothing(live, name, set
                           " VALUES ('1', 'A', 'none', now(), now() - interval '1 second')"),
     ("a pair of one account", "INSERT INTO ban_link_notices (banned_steam_id, other_steam_id) VALUES ('1', '1')"),
     ("a pair with no id", "INSERT INTO ban_link_notices (banned_steam_id, other_steam_id) VALUES ('1', '')"),
+    ("a day count of 0", "INSERT INTO ban_notice_days (day, posts) VALUES ('2026-01-03', 0)"),
+    ("a day count over 20", "INSERT INTO ban_notice_days (day, posts) VALUES ('2026-01-03', 21)"),
+    ("a day count raised past 20", "UPDATE ban_notice_days SET posts = posts + 1 WHERE day = '2026-01-02'"),
 ])
-def test_the_two_tables_refuse_a_row_outside_their_checks(live, name, sql):
+def test_the_three_tables_refuse_a_row_outside_their_checks(live, name, sql):
     """Control first: a region of 130 characters with a comma and a space,
-    the country alone, and a pair of two accounts are accepted."""
+    the country alone, a pair of two accounts, and day counts of 1 and 20
+    are accepted."""
     async def go():
         async with m427._Case([(1, _was338(), 2, 2)]) as c:
             assert await c.apply(_text(F427)) is None
@@ -377,13 +381,14 @@ def test_the_two_tables_refuse_a_row_outside_their_checks(live, name, sql):
             await c.conn.execute(
                 "INSERT INTO ban_regions (steam_id, region, conn_class) VALUES"
                 " ('1', repeat('a', 60) || ', ' || repeat('b', 68), 'vpn'), ('1', 'Ardenmark', 'none');"
-                " INSERT INTO ban_link_notices (banned_steam_id, other_steam_id) VALUES ('1', '2')")
+                " INSERT INTO ban_link_notices (banned_steam_id, other_steam_id) VALUES ('1', '2');"
+                " INSERT INTO ban_notice_days (day, posts) VALUES ('2026-01-01', 1), ('2026-01-02', 20)")
             with pytest.raises(asyncpg.CheckViolationError):
                 await c.conn.execute(sql)
     _run(go())
 
 
-def test_rollback_431_then_rollback_427_restore_338s_text_and_drop_all_five_tables(live):
+def test_rollback_431_then_rollback_427_restore_338s_text_and_drop_all_six_tables(live):
     async def go():
         async with m427._Case([(1, _was338(), 2, 2)]) as c:
             assert await c.apply(_text(F427)) is None

@@ -141,8 +141,8 @@ def test_fewest_sharing_first_then_oldest_and_twenty_a_utc_day(monkeypatch):
             second = await main.ban_link_notice_pass(env.sm)
             third = await main.ban_link_notice_pass(env.sm)
             posted_after_two = {k[1] for k, v in (await _notices(env)).items() if v is not None}
-            await env.conn.execute("UPDATE ban_link_notices SET posted_at = posted_at - interval '1 day'"
-                                   " WHERE posted_at IS NOT NULL")
+            # the next UTC day: the day's count moved back one day (fix 1, H3: the allowance is that count)
+            await env.conn.execute("UPDATE ban_notice_days SET day = day - 1")
             fourth = await main.ban_link_notice_pass(env.sm)
             out.update(first=first, second=second, third=third, fourth=fourth, posted=posted_after_two,
                        others=[o.sid for o in others], posts=await _posts(env), notices=await _notices(env))
@@ -484,3 +484,83 @@ def test_the_line_says_storing_when_the_posting_gate_is_closed(monkeypatch, clos
     lines = [s for s in out["said"] if "notice pass:" in s]
     assert lines and lines[0].startswith("[ALT-BAN] notice pass: storing,"), out["said"]
     assert out["posts"] == [], out
+
+
+def test_two_passes_at_once_post_at_most_twenty_in_a_utc_day(monkeypatch):
+    """H3: pass B has read the day's allowance and stands before its read of
+    the due pairs; pass A posts one pair; then B reads the due pairs and
+    both post. Together they post at most twenty in the UTC day."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            await _pairs(env, c, admin, 24, "both")
+            await _stored(env)
+            real, b_at_due, a_posted = main._ban_notice_pair_tx, asyncio.Event(), asyncio.Event()
+
+            async def first_post_waits(*a, **k):
+                if k.get("post_to") is not None and not a_posted.is_set():
+                    await asyncio.wait_for(b_at_due.wait(), 20)
+                got = await real(*a, **k)
+                if got == "posted":
+                    a_posted.set()
+                return got
+            env.mp.setattr(main, "_ban_notice_pair_tx", first_post_waits)
+
+            def sm_b():
+                s = env.sm()
+                ex = s.execute
+
+                async def execute(stmt, *a, **k):
+                    if "n.posted_at IS NULL" in str(stmt):
+                        b_at_due.set()
+                        await asyncio.wait_for(a_posted.wait(), 20)
+                    return await ex(stmt, *a, **k)
+                s.execute = execute
+                return s
+            one, two = await asyncio.gather(main.ban_link_notice_pass(env.sm), main.ban_link_notice_pass(sm_b))
+            out.update(one=one, two=two, posts=await _posts(env), met=b_at_due.is_set() and a_posted.is_set())
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["met"], out
+    assert len(out["posts"]) == 20 and out["one"]["posted"] + out["two"]["posted"] == 20, (
+        len(out["posts"]), out["one"], out["two"])
+
+
+@pytest.mark.parametrize("between", ["account deletion", "retention pass"])
+def test_twenty_a_utc_day_holds_across_a_deletion_or_a_retention_pass(monkeypatch, between):
+    """H3: after twenty posts, neither an account's deletion nor a retention
+    pass that removes posted pairs gives the day more posts."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            first, others = await _pairs(env, c, admin, 20, "day1")
+            await _stored(env)
+            full = await main.ban_link_notice_pass(env.sm)
+            await _pairs(env, c, admin, 2, "day2")
+            await _stored(env)
+            if between == "account deletion":
+                async with env.sm() as db:
+                    await main._alt_delete_account(db, others[0].sid)
+                    await db.commit()
+            else:
+                await BR._end(env, (await BR._row(env, first.sid))["id"], lifted=True)
+                await main._alt_retention_pass(env.sm)
+            left = await env.conn.fetchval("SELECT count(*) FROM ban_link_notices WHERE posted_at IS NOT NULL")
+            after = await main.ban_link_notice_pass(env.sm)
+            out.update(full=full, after=after, left=left, posts=await _posts(env))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["full"]["posted"] == 20 and out["left"] < 20, out
+    assert out["after"]["posted"] == 0 and len(out["posts"]) == 20, (out["after"], len(out["posts"]))

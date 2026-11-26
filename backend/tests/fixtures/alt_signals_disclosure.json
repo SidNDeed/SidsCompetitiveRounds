@@ -78,12 +78,14 @@
  ],
  "ban_links": {
   "_README": [
-   "ALT-BAN-1. Every column of the two tables migration 431 creates, mapped the",
+   "ALT-BAN-1. Every column of the three tables migration 431 creates, mapped the",
    "same way against FAQ message 1's closing paragraph once 431 has run",
    "(alt_signals.NOTICE_BAN). Bookkeeping is 431's closed list: steam_id,",
    "banned_steam_id and other_steam_id (the row keys). The pair table holds only",
    "what the two accounts' disclosed records already say (ruling ALT-BAN-T0,",
-   "doubt 10); its two times are the notice's own and are kept while the ban stands."
+   "doubt 10); its two times are the notice's own and are kept while the ban stands.",
+   "The notice pass's daily count (ban_notice_days: a UTC day and the number of",
+   "notices posted on it) names no account; its two columns are bookkeeping."
   ],
   "categories": {
    "region": {
@@ -109,7 +111,9 @@
   "bookkeeping": [
    "ban_regions.steam_id",
    "ban_link_notices.banned_steam_id",
-   "ban_link_notices.other_steam_id"
+   "ban_link_notices.other_steam_id",
+   "ban_notice_days.day",
+   "ban_notice_days.posts"
   ]
  }
 }

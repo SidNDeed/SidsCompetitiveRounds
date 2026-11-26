@@ -29,6 +29,12 @@
 --                                  account.
 --   ix_ban_link_notices_unposted   (noticed_at) WHERE posted_at IS NULL: the
 --                                  notice pass's queue.
+--   ban_notice_days                NEW table, one row per UTC day: how many
+--                                  notices the pass has posted that day (at
+--                                  most 20, the CHECK). It names no account;
+--                                  account deletion and the retention pass
+--                                  leave it alone, and the notice pass
+--                                  removes its days older than two.
 --   pending_channel_posts          FAQ message 1 (the FAQ channel's row with
 --                                  sort_order 1) gains one closing sentence
 --                                  after the paragraph 427 added, saying what
@@ -45,7 +51,7 @@
 --
 -- DEPLOY ORDER: THIS FILE FIRST, THE API SECOND; 427 BEFORE THIS FILE.
 -- -------------------------------------------------------------------
--- The api build carrying this change writes the two tables, deletes from them
+-- The api build carrying this change writes the three tables, deletes from them
 -- in account deletion and in its retention pass, and reads FAQ message 1 for
 -- both sentences before it records anything for a banned account. So the
 -- file lands first: the migrate verb applies it on the primary, the standby
@@ -61,7 +67,7 @@
 -- once this file has run, so the row stays pending and is edited forward.
 -- 427 run again after this file raises in its FAQ step and changes nothing.
 --
--- LOCKS. On a first run the two tables and their indexes are created empty
+-- LOCKS. On a first run the three tables and their indexes are created empty
 -- and no other session sees them before COMMIT; they have no foreign keys,
 -- so no existing table is locked for them. The FAQ step updates one row of
 -- pending_channel_posts: the bot's claim and acknowledgement of that row wait
@@ -80,16 +86,16 @@
 -- keeps that flush on this server, waiting for no standby. If a setting
 -- expires the whole file rolls back with nothing changed and is re-applied.
 --
--- CREATE OR REFUSE. The two tables are new and this file alone makes them,
+-- CREATE OR REFUSE. The three tables are new and this file alone makes them,
 -- so it either creates them or proves they are its own work, and refuses
 -- every other state with nothing changed:
---   - neither name stands in the schema: the file creates both, with their
+--   - no one of the names stands in the schema: the file creates all three, with their
 --     keys and indexes, and stamps each with its mark, a table comment
 --     holding the SHA-256 of the statements between the DDL START and DDL END
 --     lines (comment and blank lines dropped, each line trimmed). A name
 --     those statements create that already stands in the schema (an index, a
 --     key's index, a table's row type) refuses the run before any of them;
---   - both are ordinary tables and both carry exactly that mark: they are
+--   - all three are ordinary tables and each carries exactly that mark: they are
 --     this file's own committed work, and the file issues nothing for them
 --     and takes no lock on them;
 --   - anything else refuses: one without the other, either one unmarked or
@@ -118,7 +124,7 @@
 --   - anything else, an absent row and 338's text included: the file raises,
 --     so nothing it did commits.
 --
--- RE-RUNS. A second run finds the two tables marked and the row already
+-- RE-RUNS. A second run finds the three tables marked and the row already
 -- revised: it issues no DDL, writes no row, takes no lock on the two new
 -- tables and no row lock on the FAQ row; its read of the FAQ table takes
 -- the ordinary read lock (ACCESS SHARE) that every SELECT takes. It reads
@@ -127,8 +133,8 @@
 -- COMMIT.
 --
 -- POST-CHECK. The FAQ block reads the row back after its step, and a last
--- block reads back the two tables' comments: exactly one message 1 row
--- holding the new text, and both tables carrying this file's mark. Anything
+-- block reads back the three tables' comments: exactly one message 1 row
+-- holding the new text, and all three tables carrying this file's mark. Anything
 -- else aborts the file, naming what it found.
 
 BEGIN;
@@ -153,18 +159,18 @@ BEGIN
   new_path := set_config('search_path', current_setting('search_path') || ', pg_temp', true);
 END $m431path$;
 
--- The two tables: created and marked, or found marked, or refused (CREATE
+-- The three tables: created and marked, or found marked, or refused (CREATE
 -- OR REFUSE above).
 DO $m431tables$
 DECLARE
-  mark CONSTANT text := 'ban links, DDL sha256 3d65b484efa32db6f13bccb7d0e892239e25bea4cbab88ef487fc68418571734';
+  mark CONSTANT text := 'ban links, DDL sha256 7ef94b06b14f16ac4939deb977baaaf0b2e9da0f90e29f95c8bce3cc8dd96813';
   taken text;
   found text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class c
                    JOIN pg_namespace n ON n.oid = c.relnamespace
                   WHERE n.nspname = current_schema()
-                    AND c.relname IN ('ban_regions', 'ban_link_notices')) THEN
+                    AND c.relname IN ('ban_regions', 'ban_link_notices', 'ban_notice_days')) THEN
     SELECT string_agg(x.name, ', ' ORDER BY x.name) INTO taken
       FROM (SELECT c.relname::text AS name
               FROM pg_class c
@@ -172,13 +178,13 @@ BEGIN
              WHERE n.nspname = current_schema()
                AND c.relname IN ('ban_regions_pkey', 'ix_ban_regions_last_at',
                                  'ban_link_notices_pkey', 'ix_ban_link_notices_other',
-                                 'ix_ban_link_notices_unposted')
+                                 'ix_ban_link_notices_unposted', 'ban_notice_days_pkey')
             UNION ALL
             SELECT t.typname::text
               FROM pg_type t
               JOIN pg_namespace n ON n.oid = t.typnamespace
              WHERE n.nspname = current_schema()
-               AND t.typname IN ('ban_regions', 'ban_link_notices')) x;
+               AND t.typname IN ('ban_regions', 'ban_link_notices', 'ban_notice_days')) x;
     IF taken IS NOT NULL THEN
       RAISE EXCEPTION '431: a name this file creates already stands in schema % (found: %)',
         current_schema(), taken;
@@ -209,9 +215,16 @@ BEGIN
     );
     CREATE INDEX ix_ban_link_notices_other ON ban_link_notices (other_steam_id);
     CREATE INDEX ix_ban_link_notices_unposted ON ban_link_notices (noticed_at) WHERE posted_at IS NULL;
+    CREATE TABLE ban_notice_days (
+      day    DATE     NOT NULL,
+      posts  INTEGER  NOT NULL,
+      CONSTRAINT ban_notice_days_pkey PRIMARY KEY (day),
+      CONSTRAINT ck_ban_notice_days_posts CHECK (posts BETWEEN 1 AND 20)
+    );
     -- DDL END
     EXECUTE format('COMMENT ON TABLE ban_regions IS %L', mark);
     EXECUTE format('COMMENT ON TABLE ban_link_notices IS %L', mark);
+    EXECUTE format('COMMENT ON TABLE ban_notice_days IS %L', mark);
   ELSE
     SELECT string_agg(format('%s %s', w.name, coalesce((
              SELECT CASE WHEN c.relkind <> 'r' THEN 'not a table'
@@ -222,9 +235,9 @@ BEGIN
               WHERE n.nspname = current_schema() AND c.relname = w.name), 'absent')),
            ', ' ORDER BY w.name)
       INTO found
-      FROM (VALUES ('ban_link_notices'), ('ban_regions')) AS w(name);
-    IF found IS DISTINCT FROM 'ban_link_notices marked, ban_regions marked' THEN
-      RAISE EXCEPTION '431: ban_link_notices and ban_regions are neither both absent nor both marked by this file (found: %)',
+      FROM (VALUES ('ban_link_notices'), ('ban_notice_days'), ('ban_regions')) AS w(name);
+    IF found IS DISTINCT FROM 'ban_link_notices marked, ban_notice_days marked, ban_regions marked' THEN
+      RAISE EXCEPTION '431: ban_link_notices, ban_notice_days and ban_regions are neither all absent nor all marked by this file (found: %)',
         found;
     END IF;
   END IF;
@@ -318,7 +331,7 @@ END $m431faq$;
 
 DO $m431check$
 DECLARE
-  mark CONSTANT text := 'ban links, DDL sha256 3d65b484efa32db6f13bccb7d0e892239e25bea4cbab88ef487fc68418571734';
+  mark CONSTANT text := 'ban links, DDL sha256 7ef94b06b14f16ac4939deb977baaaf0b2e9da0f90e29f95c8bce3cc8dd96813';
   found text;
 BEGIN
   SELECT string_agg(format('%s %s', w.name, coalesce((
@@ -330,9 +343,9 @@ BEGIN
             WHERE n.nspname = current_schema() AND c.relname = w.name), 'absent')),
          ', ' ORDER BY w.name)
     INTO found
-    FROM (VALUES ('ban_link_notices'), ('ban_regions')) AS w(name);
-  IF found IS DISTINCT FROM 'ban_link_notices marked, ban_regions marked' THEN
-    RAISE EXCEPTION '431: post-check: the two tables are not both marked (found: %)', found;
+    FROM (VALUES ('ban_link_notices'), ('ban_notice_days'), ('ban_regions')) AS w(name);
+  IF found IS DISTINCT FROM 'ban_link_notices marked, ban_notice_days marked, ban_regions marked' THEN
+    RAISE EXCEPTION '431: post-check: the three tables are not all marked (found: %)', found;
   END IF;
 END $m431check$;
 

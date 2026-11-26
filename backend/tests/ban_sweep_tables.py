@@ -26,6 +26,7 @@ TABLE_CLASSES = {
     "artist_users": (LEFT, "the artist roster; every artist route refuses a banned account"),
     "ban_link_notices": (LEFT, "pairs of a banned account and an account that shared its address code; "
                                "moderation records kept while the ban stands"),
+    "ban_notice_days": (NO_LINK, "the notice pass's count of posts a UTC day; no column names an account"),
     "ban_regions": (LEFT, "the region of a banned account's verified connection; kept while the ban stands"),
     "bets": (LIVE, "an unsettled 1v1 wager on a series the account plays ends with the series (the void "
                    "refunds it); the account's own wager on another's series settles by a game it is not in"),

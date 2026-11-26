@@ -1,17 +1,18 @@
 -- rollback_431_ban_links.sql
 --
--- Reverses migration 431: drops ban_regions and ban_link_notices where they
--- carry 431's mark, and puts FAQ message 1 back to the text 427 wrote,
+-- Reverses migration 431: drops ban_regions, ban_link_notices and
+-- ban_notice_days where they carry 431's mark, and puts FAQ message 1 back to the text 427 wrote,
 -- moving its revision by one so the bot edits the posted message again.
 --
 -- ORDER: the api goes first. Deploy the previous api, which never names the
--- two tables, and then apply this file. (An api of 431's build against a
+-- three tables, and then apply this file. (An api of 431's build against a
 -- schema without the tables records nothing for a banned account: its
 -- recording fails inside its guard, and its notice check finds no sentence
 -- once message 1 is back.) rollback_427 runs only after this file: it
 -- requires message 1 at 427's text or 338's.
 --
--- What this loses: every row the two tables hold. Nothing else refers to
+-- What this loses: every row the three tables hold (the notice pass's
+-- daily count among them). Nothing else refers to
 -- them.
 --
 -- HOLDING BOUND. As 431, per statement and per pause: each statement's own
@@ -55,7 +56,7 @@ END $r431path$;
 
 DO $r431tables$
 DECLARE
-  mark CONSTANT text := 'ban links, DDL sha256 3d65b484efa32db6f13bccb7d0e892239e25bea4cbab88ef487fc68418571734';
+  mark CONSTANT text := 'ban links, DDL sha256 7ef94b06b14f16ac4939deb977baaaf0b2e9da0f90e29f95c8bce3cc8dd96813';
   found text;
   t text;
 BEGIN
@@ -68,7 +69,7 @@ BEGIN
             WHERE n.nspname = current_schema() AND c.relname = w.name), 'absent')),
          ', ' ORDER BY w.name)
     INTO found
-    FROM (VALUES ('ban_link_notices'), ('ban_regions')) AS w(name);
+    FROM (VALUES ('ban_link_notices'), ('ban_notice_days'), ('ban_regions')) AS w(name);
   IF found ~ '(unmarked|not a table)' THEN
     RAISE EXCEPTION 'rollback 431: a table of these names is not 431''s (found: %)', found;
   END IF;
@@ -77,7 +78,7 @@ BEGIN
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = current_schema()
-       AND c.relname IN ('ban_link_notices', 'ban_regions')
+       AND c.relname IN ('ban_link_notices', 'ban_notice_days', 'ban_regions')
        AND c.relkind = 'r'
        AND obj_description(c.oid, 'pg_class') = mark
      ORDER BY 1

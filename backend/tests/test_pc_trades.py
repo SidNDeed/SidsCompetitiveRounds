@@ -3024,7 +3024,8 @@ def test_the_orm_build_leaves_out_the_tables_a_file_above_353_creates():
                                           "steam_family_shares": "427_alt_signals.sql",
                                           "conn_markers": "427_alt_signals.sql",
                                           "ban_regions": "431_ban_links.sql",
-                                          "ban_link_notices": "431_ban_links.sql"}
+                                          "ban_link_notices": "431_ban_links.sql",
+                                          "ban_notice_days": "431_ban_links.sql"}
     planted = (
         "-- CREATE TABLE players (x int);\n"
         "/* CREATE TABLE players ( /* nested */ x int); */\n"

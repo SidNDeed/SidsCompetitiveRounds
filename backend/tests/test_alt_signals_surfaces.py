@@ -284,23 +284,25 @@ def test_every_column_of_the_three_tables_is_disclosed_or_bookkeeping():
 
 
 MIGRATION_431 = os.path.join(SQL_DIR, "431_ban_links.sql")
-TABLES_431 = ("ban_regions", "ban_link_notices")
+TABLES_431 = ("ban_regions", "ban_link_notices", "ban_notice_days")
 # 431's closed bookkeeping list: the row keys, the account's own id and the
 # two ids of a pair (ruling ALT-BAN-T0, doubt 10: the pair table holds only
-# what the two accounts' disclosed records already say).
-BOOKKEEPING_431 = frozenset({"steam_id", "banned_steam_id", "other_steam_id"})
+# what the two accounts' disclosed records already say), and the notice
+# pass's daily count (fix 1, H3: a UTC day and a number; no account).
+BOOKKEEPING_431 = frozenset({"steam_id", "banned_steam_id", "other_steam_id", "day", "posts"})
 
 
-def test_every_column_of_431s_two_tables_is_disclosed_or_bookkeeping():
+def test_every_column_of_431s_three_tables_is_disclosed_or_bookkeeping():
     """The same reading over 431 against the paragraph it closes message 1
-    with (NOTICE_BAN), from the fixture's ban_links part. 5 and 4 columns.
+    with (NOTICE_BAN), from the fixture's ban_links part. 5, 4 and 2 columns.
     Negative control: a column 431 does not map, the region's words gone
     from the sentence, and a pair column called bookkeeping off the closed
     list each fail."""
     sql, part = _read(MIGRATION_431), _fixture()["ban_links"]
     args = dict(want_tables=TABLES_431, bookkeeping=BOOKKEEPING_431, number="431")
     assert _disclosure_problems(sql, part, alt_signals.NOTICE_BAN, **args) == []
-    assert {t: len(c) for t, c in _ddl_columns(sql).items()} == {"ban_regions": 5, "ban_link_notices": 4}
+    assert {t: len(c) for t, c in _ddl_columns(sql).items()} == {
+        "ban_regions": 5, "ban_link_notices": 4, "ban_notice_days": 2}
     grown = sql.replace("      last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),\n      CONSTRAINT ban_regions_pkey",
                         "      last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),\n"
                         "      city        TEXT        NULL,\n      CONSTRAINT ban_regions_pkey")

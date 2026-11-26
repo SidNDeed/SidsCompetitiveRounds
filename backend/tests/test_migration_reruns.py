@@ -549,7 +549,7 @@ PREREQ = {
     # 427 creates steam_signin_facts, steam_family_shares and conn_markers
     # and revises FAQ message 1 once (_427_prereq: the row as 338 wrote it).
     "427": _427_prereq(),
-    # 431 creates ban_regions and ban_link_notices and revises FAQ message 1
+    # 431 creates ban_regions, ban_link_notices and ban_notice_days and revises FAQ message 1
     # once more (_431_prereq: the row as 427 wrote it).
     "431": _431_prereq(),
 }

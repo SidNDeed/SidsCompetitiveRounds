@@ -802,11 +802,12 @@ _EVERY_STATEMENT_GUARDED = {
     "431_ban_links.sql":
         "one block that puts the session's temporary schema last in "
         "search_path for the transaction, "
-        "one catalog-guarded block that creates ban_regions, ban_link_notices "
-        "and their indexes and marks both, or else refuses unless both carry "
-        "the mark, one block that revises FAQ message 1 only while it holds "
-        "427's text and refuses unless exactly one such row or one already "
-        "revised row stands, and a read-only post-check of the two marks, "
+        "one catalog-guarded block that creates ban_regions, ban_link_notices, "
+        "ban_notice_days and their indexes and marks all three, or else refuses "
+        "unless all three carry the mark, one block that revises FAQ message 1 "
+        "only while it holds 427's text and refuses unless exactly one such row "
+        "or one already revised row stands, and a read-only post-check of the "
+        "three marks, "
         "between BEGIN, the four SET LOCAL settings and COMMIT; a re-run "
         "issues no DDL and writes no row",
 }
