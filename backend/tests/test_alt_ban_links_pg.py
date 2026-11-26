@@ -437,3 +437,44 @@ def test_the_list_reads_no_row_at_a_time(monkeypatch):
     finally:
         A.install_key(None)
     assert out[1] == out[6], out
+
+
+# -- fix 1 of the item's round (H1, H2, M7, M8) ----------------------------------------------------
+
+def _gate_mode(env, mode):
+    """This process acts on the read gate's stage `mode` ("unknown": never loaded)."""
+    import read_gate
+    env.mp.setattr(read_gate, "_mode_cache", {"value": mode, "loaded": mode != read_gate.UNKNOWN,
+                                              "at": read_gate._mono(), "gen": 0})
+
+
+@pytest.mark.parametrize("mode", ["enforce", "log", "off", "unknown"])
+def test_the_links_route_meets_the_read_gate_as_the_ban_list_does(monkeypatch, mode):
+    """H1: in every stage of the read gate an admin's valid signature alone
+    gets the links route's own answer, as it gets the ban list's; a wrong
+    signature gets the route's own admin refusal."""
+    out = {}
+
+    async def body(env):
+        BR._open(env)
+        _keyed(env)
+        await _notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            p = await env.player("Links Gate")
+            await BR._ban(c, admin, p.sid)
+            _gate_mode(env, mode)
+            lst = await c.get("/api/v1/admin/banned-users",
+                              params={"admin_steam_id": admin, "hmac_signature": BR._sig(admin, "list_bans", "")})
+            lnk = await _links(c, admin, p.sid)
+            bad_list = await c.get("/api/v1/admin/banned-users",
+                                   params={"admin_steam_id": admin, "hmac_signature": BR._sig(admin, "ban", "")})
+            bad = await _links(c, admin, p.sid, sig=BR._sig(admin, "list_bans", ""))
+            out.update(lst=lst.status_code, lnk=(lnk.status_code, lnk.json().get("steam_id")),
+                       bad_list=bad_list.status_code, bad=bad.status_code, sid=p.sid)
+    try:
+        case(monkeypatch, body, prefix="banlnk")
+    finally:
+        A.install_key(None)
+    assert out["lst"] == 200 and out["lnk"] == (200, out["sid"]), out
+    assert out["bad_list"] == out["bad"] == 403, out

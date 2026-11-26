@@ -66,6 +66,7 @@ CENSUS = {
     ('GET', '/api/v1/admin/alerts/list'): (NOT, 'read', ()),  # main.admin_alerts_list
     ('POST', '/api/v1/admin/alerts/revoke'): (NOT, 'config', (('main', 'admin_alert_revoke'), )),  # main.admin_alert_revoke
     ('GET', '/api/v1/admin/banned-users'): (NOT, 'read', ()),  # main.admin_list_bans
+    ('GET', '/api/v1/admin/bans/links'): (NOT, 'read', ()),  # main.admin_ban_links (ALT-BAN-1: a read, no log row)
     ('GET', '/api/v1/admin/card-evidence'): (NOT, 'read', ()),  # main.admin_card_evidence
     ('POST', '/api/v1/admin/card-pool-census'): (NOT, 'config', ()),  # main.admin_register_card_census
     ('GET', '/api/v1/admin/check-status'): (NOT, 'read', ()),  # main.admin_check_status

@@ -126,3 +126,18 @@ def test_the_reads_in_flight_are_one_pool_of_three_and_three_kinds():
                       "steam": {"_steam_ticket_check"}}, starts
     for name in ("_ban_region_word", "_ban_ticket_seen", "_steam_ticket_check"):
         assert "to_thread" not in ast.unparse(_fn(name)), name
+
+
+def test_the_links_route_stands_with_the_ban_list_in_the_admin_censuses():
+    """Fix 1, H1: the read gate classes the links route as it classes the ban
+    list (the handler's own admin check; the gate refuses nothing), the
+    moderator log's census classes it a read, and the read gate inventory's
+    review names it nowhere (it reaches an admin check inside its class)."""
+    import read_gate
+    import modlog_census as MC
+    import test_read_gate_inventory as INV
+    links, bans = "/api/v1/admin/bans/links", "/api/v1/admin/banned-users"
+    assert read_gate.route_class(links) == read_gate.route_class(bans) == read_gate.C_ADMIN_SIGNED
+    assert links in read_gate.ADMIN_SIGNED and links not in read_gate.PLAYER and links not in read_gate.BOT_ONLY
+    assert MC.CENSUS[("GET", links)] == MC.CENSUS[("GET", bans)] == (MC.NOT, "read", ())
+    assert not [ln for ln in INV.review_report(main.app.routes) if links in ln]
