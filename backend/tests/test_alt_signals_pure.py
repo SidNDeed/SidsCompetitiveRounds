@@ -491,7 +491,12 @@ def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_
     # assignments since its step 4: _alt_store (split out of _alt_record),
     # _alt_ban_spacing, _alt_ban_notice_open, _alt_ban_refused; the eight
     # _ALT_BAN_* spacings, limits and cap, and the stamps _alt_ban_asked.
-    assert counts == (21, 2, 16), (counts, [(n, l) for n, l, _t in texts])
+    # 23 functions, 3 classes and 19 assignments since turn 2's first thing
+    # (the reads bounded at admission): _alt_ban_read_start and
+    # _alt_ban_read_wait; the class _AltBanReadBusy; the pool _ALT_BAN_READS,
+    # the futures in flight _alt_ban_reading and the word's wait
+    # _ALT_BAN_WORD_WAIT_S.
+    assert counts == (23, 3, 19), (counts, [(n, l) for n, l, _t in texts])
     for _name, first, text_ in texts:
         found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
                   for w, t, c in _literals("main.py", text_)]

@@ -151,6 +151,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.delenv("STEAM_AUTH_ENFORCE", raising=False)
     monkeypatch.setattr(main, "_steam_http_get_json", steam)
     monkeypatch.setattr(main, "_alt_ban_asked", {"all": None, "ids": {}})
+    monkeypatch.setattr(main, "_alt_ban_reading", {"word": None, "region": None, "steam": None})
     folder = tmp_path / "geo"
     folder.mkdir()
     (folder / "region.mmdb").write_bytes(S.build([
@@ -672,6 +673,83 @@ def test_two_sign_ins_at_once_ask_once(case, env):
     first, second = R._with(case, body)
     assert isinstance(first, HTTPException) and isinstance(second, HTTPException)
     assert len(env.steam.calls) == 1
+
+
+# -- turn 2, the FIRST thing (ADD1 H5): each read in a thread holds one thread at most --
+
+def _ended(kind):
+    """Wait, bounded, until the read of `kind` in flight has ended (lesson 1297)."""
+    held = main._alt_ban_reading[kind]
+    if held is not None:
+        held.result(timeout=25)
+
+
+def test_a_steam_check_in_flight_starts_no_second_and_the_refusal_is_the_same(case, env):
+    """While one ticket check has not returned, another banned account's
+    sign-in starts no second one: it gets the same refusal at once and records
+    nothing."""
+    one, two = R._sid(), R._sid()
+    env.setattr(main, "_ALT_BAN_SPACE_ALL_S", 0.0)
+    entered, release = threading.Event(), threading.Event()
+    env.steam.gate = (entered, release)
+
+    async def body(sm, rsm):
+        await _ban(sm, one)
+        await _ban(sm, two)
+        first = asyncio.create_task(_sign_in(sm, one))
+        try:
+            assert await _wait(entered), "Steam was never asked"
+            t = time.monotonic()
+            second = await asyncio.wait_for(_sign_in(sm, two), 10)
+            took = time.monotonic() - t
+            asked = len(env.steam.calls)
+        finally:
+            release.set()
+        got = await first
+        await asyncio.to_thread(_ended, "steam")
+        return second, took, asked, got, await _rows(sm, two)
+
+    second, took, asked, got, rows = R._with(case, body)
+    R._run(_same_refusal(second))
+    assert isinstance(got, HTTPException)
+    assert asked == 1, "a second ticket check was started while one was in flight (%d)" % asked
+    assert took < 2.0, "the refusal waited %.2f s" % took
+    assert rows == [0, 0, 0, 0], rows
+
+
+def test_a_region_read_in_flight_starts_no_second_and_the_rest_is_recorded(case, env):
+    """While one region read has not returned, another recording starts no
+    second one: it records without a region."""
+    one, two = R._sid(), R._sid()
+    env.setattr(main, "_ALT_BAN_SPACE_ALL_S", 0.0)
+    entered, release, reads = threading.Event(), threading.Event(), []
+    real = G.region_of
+
+    def slow(host):
+        reads.append(1)
+        entered.set()
+        release.wait(20)
+        return real(host)
+    env.setattr(G, "region_of", slow)
+
+    async def body(sm, rsm):
+        await _ban(sm, one)
+        await _ban(sm, two)
+        first = asyncio.create_task(_sign_in(sm, one))
+        try:
+            assert await _wait(entered), "the region was never read"
+            second = await asyncio.wait_for(_sign_in(sm, two), 10)
+            count = len(reads)
+        finally:
+            release.set()
+        got = await first
+        await asyncio.to_thread(_ended, "region")
+        return second, count, got, await _regions(sm, two), await _rows(sm, two)
+
+    second, count, got, regions, rows = R._with(case, body)
+    assert isinstance(second, HTTPException) and isinstance(got, HTTPException)
+    assert count == 1, "a second region read was started while one was in flight (%d)" % count
+    assert regions == [] and rows == [1, 0, 1, 0], (regions, rows)
 
 
 def test_the_stamps_table_drops_what_has_run_out():

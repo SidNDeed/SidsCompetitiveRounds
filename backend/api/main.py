@@ -8229,7 +8229,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
                               alt_signals_build=_ALT_SIGNALS_BUILD, alt_ban_build=_ALT_BAN_BUILD,
-                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await asyncio.to_thread(_geo_region.file_word),
+                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await _ban_region_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -8310,7 +8310,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
                               alt_signals_build=_ALT_SIGNALS_BUILD, alt_ban_build=_ALT_BAN_BUILD,
-                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await asyncio.to_thread(_geo_region.file_word),
+                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await _ban_region_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -89277,22 +89277,22 @@ def _steam_ticket_params(body, steam_id: str):
 async def _steam_ticket_check(ticket_hex, steam_id, socket_s: float = 6.0, wait_s=None):
     """The Steam helper beside steam_auth: verify `ticket_hex` for
     `steam_id` the way steam_auth does (the same URL, the same predicate),
-    the blocking call in a thread with `socket_s` for each socket operation
-    and, when `wait_s` is given, the whole wait cut there. Returns (params,
-    word): Steam's params and "OK", or None and a word ("no_key",
-    "bad_ticket", "not_ok", or an exception's class name). Never raises
-    but a cancellation; logs nothing."""
+    the blocking call in a thread of the reads' pool, one at most in flight
+    ("busy" when one is), `socket_s` for each socket operation, the wait cut
+    at `wait_s` (socket_s + 1 s when it is not given). Returns (params,
+    word): Steam's params and "OK", or None and a word ("no_key", "bad_ticket",
+    "not_ok", "busy" or an exception's class name). Never raises but a cancellation; logs nothing."""
     key = os.getenv("STEAM_WEB_API_KEY", "")
     if not key:
         return None, "no_key"
     if not isinstance(ticket_hex, str) or not _re.fullmatch(r"[0-9a-fA-F]+", ticket_hex):
         return None, "bad_ticket"
     try:
-        call = asyncio.to_thread(_steam_http_get_json, _steam_ticket_url(key, ticket_hex), socket_s)
-        body = await (asyncio.wait_for(call, wait_s) if wait_s is not None else call)
+        call = _alt_ban_read_start("steam", _steam_http_get_json, _steam_ticket_url(key, ticket_hex), socket_s)
+        body = await _alt_ban_read_wait(call, wait_s if wait_s is not None else socket_s + 1.0)
         params = _steam_ticket_params(body, str(steam_id))
     except Exception as ex:
-        return None, type(ex).__name__
+        return None, ("busy" if isinstance(ex, _AltBanReadBusy) else type(ex).__name__)
     return (params, "OK") if params is not None else (None, "not_ok")
 
 
@@ -89379,7 +89379,7 @@ async def _ban_ticket_seen(db: AsyncSession, request, steam_id: str, steam_param
     after its own Steam verification and with no transaction open on `db`
     (an open one is left as it is and nothing is recorded: the line says
     `open`). Without a lock: the key, the connecting address, Steam's fields,
-    the marks, and the region (geo_region.region_of in a thread, cut at 1 s,
+    the marks, and the region (geo_region.region_of on the reads' pool, one in flight at most, cut at 1 s,
     "" on anything else; only for an address the lane marks). Then one
     transaction: the lane's limits; the account's identity key EXCLUSIVE as
     its first lock; the active ban read under it (none: not recorded); the
@@ -89399,8 +89399,8 @@ async def _ban_ticket_seen(db: AsyncSession, request, steam_id: str, steam_param
         region = ""
         if seen is not None:
             try:
-                region = await asyncio.wait_for(asyncio.to_thread(_geo_region.region_of, host),
-                                                _ALT_BAN_REGION_WAIT_S)
+                region = await _alt_ban_read_wait(_alt_ban_read_start("region", _geo_region.region_of, host),
+                                                  _ALT_BAN_REGION_WAIT_S)
             except Exception:
                 region = ""
             region = region if isinstance(region, str) else ""
@@ -89490,3 +89490,66 @@ def _ban_retention_said(deleted: dict, left) -> dict:
     if left is not None and any(left.values()):
         _alt_print("[ALT-RETENTION] ban rows left: regions %d, notices %d" % (left["regions"], left["notices"]))
     return {"deleted": gone, "left": left}
+
+
+# -- ALT-BAN-1 turn 2: the three reads that run in a thread, bounded at admission --
+# The region file's word for /health (_ban_region_word), the region read of a
+# recording (_ban_ticket_seen) and Steam's ticket check (_steam_ticket_check)
+# each run in a thread of _ALT_BAN_READS, a pool of their own with three
+# workers, so a read that does not return never holds a worker of the pool that
+# asyncio.to_thread uses. A read is admitted only when no read of its kind is
+# in flight: _alt_ban_reading holds the pool's future of the one in flight, and
+# that future is done exactly when its thread has ended (a cut wait never frees
+# it). So each kind holds one thread at most, the three together at most three,
+# the pool's size, and an admitted read never queues behind a held one. A
+# caller that finds its kind in flight starts nothing and answers as for a read
+# that did not answer in time: /health says "pending", the recording stores no
+# region, the ticket check says "busy" and the refusal goes out unrecorded. The
+# wait for a read is cut at its limit without cancelling the read.
+import concurrent.futures as _alt_cf  # noqa: E402
+_ALT_BAN_READS = _alt_cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="alt-ban-read")
+_alt_ban_reading = {"word": None, "region": None, "steam": None}
+_ALT_BAN_WORD_WAIT_S = 0.5       # the whole wait of a /health call for the word
+_BAN_REGION_WORD_PENDING = "pending"   # no state of the file produces it (file_word: absent, refused, YYYY-MM)
+
+
+class _AltBanReadBusy(Exception):
+    """A read of this kind is in flight: none was started."""
+
+
+def _alt_ban_read_start(kind: str, fn, *args):
+    """Start fn(*args) on _ALT_BAN_READS when no read of `kind` is in flight,
+    and return its future; None when one is (nothing is started). The check
+    and the start stand with no await between them."""
+    held = _alt_ban_reading[kind]
+    if held is not None and not held.done():
+        return None
+    fut = _ALT_BAN_READS.submit(fn, *args)
+    _alt_ban_reading[kind] = fut
+    return fut
+
+
+async def _alt_ban_read_wait(fut, wait_s: float):
+    """The answer of the read `fut`, waited for at most wait_s (TimeoutError
+    past it; _AltBanReadBusy when none was started). The read itself is not
+    cancelled: it runs on in its thread and holds its kind until it ends."""
+    if fut is None:
+        raise _AltBanReadBusy()
+    return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(fut)), wait_s)
+
+
+async def _ban_region_word() -> str:
+    """/health's ban_region_file (both arms): geo_region.file_word() read in
+    a thread of the reads' pool. A call that finds a read in flight waits for
+    that same read; else it starts one, so with storage that answers at once
+    the word is the file's state at the call (no age window). Past
+    _ALT_BAN_WORD_WAIT_S, or before a read has answered, the word is
+    _BAN_REGION_WORD_PENDING."""
+    fut = _alt_ban_reading["word"]
+    if fut is None or fut.done():
+        fut = _alt_ban_read_start("word", _geo_region.file_word)
+    try:
+        word = await _alt_ban_read_wait(fut, _ALT_BAN_WORD_WAIT_S)
+    except Exception:
+        return _BAN_REGION_WORD_PENDING
+    return word if isinstance(word, str) and word else _BAN_REGION_WORD_PENDING

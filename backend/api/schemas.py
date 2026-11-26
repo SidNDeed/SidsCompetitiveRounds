@@ -1494,9 +1494,9 @@ class HealthResponse(BaseModel):
     # train and read by nothing else (#306). No default. Absent before it.
     alt_ban_build: int
     # ban_region_file: geo_region.file_word(): "absent" (no file staged),
-    # "refused" (the staged one failed a check) or the file's build month
-    # (YYYY-MM, UTC). Nothing of the file's records. Read in a thread on both
-    # arms. No default.
+    # "refused" (the staged one failed a check), the build month (YYYY-MM, UTC)
+    # or "pending" (main._ban_region_word: not read within 0.5 s). Nothing of
+    # the file's records. No default.
     ban_region_file: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
