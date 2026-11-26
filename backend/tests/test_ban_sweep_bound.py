@@ -148,7 +148,12 @@ def _census_line(rows):
 # head read (_BAN_LINKS_HEAD_SQL, step 6), main.ban_link_notice_pass' candidate read (_BAN_NOTICE_CANDIDATE_SQL) and
 # main._ban_notice_pair_tx' read of a pair under the other account's key (_BAN_NOTICE_PAIR_FACTS, step 7). The other
 # four counts stay.
-CENSUS_LINE = {"bounded": 30, "expanded": 121, "judged": 4, "read": 117, "remaining": 11}
+# ALT-BAN-1 fix 3 (2026-11-26, F3-A), measured by _measure at 82b1abfd (30), 776f22af (30), 2c689e49 (31), 3e5d62a7 (31)
+# and bf9779b9 (31): bounded 30 -> 31 by one place, main.ban_link_notice_pass:90057, the due read
+# text(_BAN_NOTICE_DUE_SQL.format(active=player_ban_active_sql("pb"))). Fix 1's M1 (2c689e49) ranks due pairs by their
+# qualifying shared codes alone, so the read joins player_bans through player_ban_active_sql formatted from literals;
+# before it the statement was text(_BAN_NOTICE_DUE_SQL), read whole. The other four counts stay.
+CENSUS_LINE = {"bounded": 31, "expanded": 121, "judged": 4, "read": 117, "remaining": 11}
 
 
 def test_the_census_line_is_as_measured(base):
