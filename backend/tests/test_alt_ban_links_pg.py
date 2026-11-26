@@ -560,3 +560,47 @@ def test_a_lender_that_matches_no_live_account_is_neither_named_nor_counted(monk
     assert out["lender"] not in out["text"]
     row = next(e for e in out["lst"]["bans"] if e["steam_id"] == out["b"])
     assert not row["links"], row
+
+
+def test_a_bad_signature_reads_nothing_before_the_admin_check(monkeypatch):
+    """M7: with a wrong signature no statement runs before the admin check
+    is entered, and no statement of the route's reads runs at all."""
+    out = {}
+
+    async def body(env):
+        BR._open(env)
+        _keyed(env)
+        await _notice(env)
+        admin = await BR._admin(env)
+        seen, entered = [], []
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            seen.append(statement)
+        real = main._require_admin
+
+        async def marked(*a, **k):
+            entered.append(len(seen))
+            return await real(*a, **k)
+        env.mp.setattr(main, "_require_admin", marked)
+        async with BR._client(env) as c:
+            p = await env.player("Links Sig Read")
+            await BR._ban(c, admin, p.sid)
+            await _region(env, p.sid, "Brynmoor")
+            event.listen(env.engine.sync_engine, "before_cursor_execute", listen)
+            try:
+                seen.clear()
+                entered.clear()
+                r = await _links(c, admin, p.sid, sig=BR._sig(admin, "list_bans", ""))
+            finally:
+                event.remove(env.engine.sync_engine, "before_cursor_execute", listen)
+            out.update(status=r.status_code, seen=list(seen), entered=list(entered))
+    try:
+        case(monkeypatch, body, prefix="banlnk")
+    finally:
+        A.install_key(None)
+    assert out["status"] == 403, out
+    assert out["entered"] == [0], ("statements before the admin check", out["seen"][:out["entered"][0]]
+                                   if out["entered"] else out["seen"])
+    for s in out["seen"]:
+        for t in ("ban_regions", "conn_markers", "steam_family_shares", "pending_channel_posts", "ban_link_notices"):
+            assert t not in s, (t, s[:120])
