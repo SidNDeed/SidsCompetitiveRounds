@@ -115,24 +115,48 @@ async def _calls(n):
     return await asyncio.gather(*[one() for _ in range(n)])
 
 
+async def _word_waits(n):
+    """n waits of the word's reader at once (the one both arms await), each with its own time."""
+    async def one():
+        t = time.monotonic()
+        got = await main._ban_region_word()
+        return got, time.monotonic() - t
+    return await asyncio.gather(*[one() for _ in range(n)])
+
+
 def test_fifty_calls_at_once_start_one_read_and_each_answers_pending_in_time(monkeypatch):
+    """Fifty waits of the word's reader at once (the one both arms await)
+    start one read, each answers "pending" and each ends within
+    _ALT_BAN_WORD_WAIT_S and a margin; then, with that read still held, fifty
+    /health calls at once (the degraded arm) start none and each answers
+    "pending". The time is taken on the reader's own
+    await, not on the whole /health call: a call's whole time also holds the
+    other words' synchronous work, which runs on the event loop, so fifty
+    calls at once run it one after another (about 15 ms a call on the VM with
+    the renderer's fonts placed, three quarters of it pc_card_art's renderer
+    fingerprint, computed again at each call) and the last of fifty whole calls can end past the word's
+    limit while every wait for the word is cut at it (ALT-BAN-1 fix 3, F3-C)."""
     release, started = _hold_the_word(monkeypatch)
-    # Without the limit a call waits for the hold: the hold ends after 3 s, so
-    # such a run answers late (the time goes red) and never hangs.
-    timer = threading.Timer(3.0, release.set)
+    # Without the limit a wait lasts as long as the hold: the hold ends after
+    # 5 s (past both phases' time with a margin), so such a run answers late
+    # (red) and never hangs.
+    timer = threading.Timer(5.0, release.set)
     timer.start()
     try:
-        got = asyncio.run(_calls(50))
+        waits = asyncio.run(_word_waits(50))
         count = len(started)
+        got = asyncio.run(_calls(50))
+        count_after_calls = len(started)
     finally:
         release.set()
         timer.cancel()
         _drain()
-    assert count == 1, "one read was to be started for 50 calls, %d were" % count
-    words = {w for w, _t in got}
-    assert words == {main._BAN_REGION_WORD_PENDING}, words
-    slowest = max(t for _w, t in got)
+    slowest = max(t for _w, t in waits)
     assert slowest < main._ALT_BAN_WORD_WAIT_S + 0.5, "a call waited %.2f s for the word" % slowest
+    assert count == 1, "one read was to be started for 50 calls, %d were" % count
+    assert count_after_calls == 1, "a /health call started a read while one was in flight (%d)" % count_after_calls
+    words = {w for w, _t in waits} | {w for w, _t in got}
+    assert words == {main._BAN_REGION_WORD_PENDING}, words
     # After the release the next call reads again and answers the file's state.
     after = asyncio.run(_calls(1))[0][0]
     _drain()
