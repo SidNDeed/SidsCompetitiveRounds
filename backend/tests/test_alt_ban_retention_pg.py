@@ -181,11 +181,15 @@ def test_another_accounts_ban_keeps_nothing_of_this_one(clean):
     assert rec._with(clean, body) == [0, 0, 0, 0]
 
 
-def test_the_link_notices_go_when_the_ban_ends_or_the_other_side_has_no_marker(clean):
+def test_the_link_notices_go_when_the_ban_ends_and_an_unposted_one_when_the_other_side_has_no_marker(clean):
+    """Fix 1, H4: a posted pair of a standing ban stays though its other
+    side has no marker left; an unposted one goes; every pair of an ended
+    ban goes."""
     banned_prefix, banned = _ids()
     _p1, other_with = _ids()
     _p2, other_without = _ids()
     _p3, ended = _ids()
+    _p4, other_posted = _ids()
 
     async def body(sm, _rsm):
         await _ban(sm, banned)
@@ -196,6 +200,9 @@ def test_the_link_notices_go_when_the_ban_ends_or_the_other_side_has_no_marker(c
             for b, o in ((banned, other_with), (banned, other_without), (ended, other_with)):
                 await db.execute(text("INSERT INTO ban_link_notices (banned_steam_id, other_steam_id)"
                                       " VALUES (:b, :o)"), {"b": b, "o": o})
+            for b, o in ((banned, other_posted), (ended, other_posted)):
+                await db.execute(text("INSERT INTO ban_link_notices (banned_steam_id, other_steam_id, posted_at)"
+                                      " VALUES (:b, :o, now())"), {"b": b, "o": o})
             await db.commit()
         res = await _pass(sm)
         async with sm() as db:
@@ -204,8 +211,8 @@ def test_the_link_notices_go_when_the_ban_ends_or_the_other_side_has_no_marker(c
         return res, left
 
     res, left = rec._with(clean, body)
-    assert left == [(banned, other_with)], left
-    assert res["ban"]["deleted"]["notices"] == 2, res
+    assert left == sorted([(banned, other_with), (banned, other_posted)]), left
+    assert res["ban"]["deleted"]["notices"] == 3, res
 
 
 # -- the counts of what is left ------------------------------------------------------------

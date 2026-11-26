@@ -89438,8 +89438,11 @@ async def _ban_region_store(db: AsyncSession, steam_id: str, region: str, conn_c
 # (the one definition); once the ban has ended, its rows go by their own last
 # sight. Two arms more, here: a ban_regions row goes at the first pass after
 # its account's ban has ended, whatever its age; a ban_link_notices row goes
-# when the ban of its banned side has ended or its other side has no marker
-# row left. Same batches, limits, SKIP LOCKED and budget as the lane's arms.
+# when the ban of its banned side has ended, and an UNPOSTED one also when
+# its other side has no marker row left. A POSTED row stays while the ban
+# stands, whatever the other side's markers, so the candidates' read (which
+# skips a pair that has a row) never posts a pair twice over one ban. Same
+# batches, limits, SKIP LOCKED and budget as the lane's arms.
 
 async def _ban_retention_batch(db: AsyncSession, table: str, bind: dict):
     """One batch of the 'regions' or 'notices' arm, in the transaction
@@ -89462,7 +89465,7 @@ async def _ban_retention_batch(db: AsyncSession, table: str, bind: dict):
             " SELECT x.banned_steam_id, x.other_steam_id FROM ban_link_notices x"
             " WHERE NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.banned_steam_id AND "
             + player_ban_active_sql("pb") + ")"
-            " OR NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id)"
+            " OR (x.posted_at IS NULL AND NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id))"
             " ORDER BY x.noticed_at LIMIT CAST(:batch AS integer)"
             " FOR UPDATE OF x SKIP LOCKED)"
             " RETURNING 1"), {"batch": bind["batch"]})
@@ -89477,7 +89480,7 @@ async def _ban_retention_left(db: AsyncSession) -> dict:
         " WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")),"
         " (SELECT count(*) FROM ban_link_notices x WHERE NOT EXISTS (SELECT 1 FROM player_bans pb"
         " WHERE pb.steam_id = x.banned_steam_id AND " + player_ban_active_sql("pb") + ")"
-        " OR NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id))"))).one()
+        " OR (x.posted_at IS NULL AND NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id)))"))).one()
     return {"regions": int(row[0]), "notices": int(row[1])}
 
 

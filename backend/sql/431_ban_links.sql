@@ -7,8 +7,10 @@
 -- active ban (the region) or from the recorded codes (the pairs), only while
 -- the alternate-account lane's signal key is loaded, and only while the FAQ
 -- notice this file schedules is posted and acknowledged. A region row is
--- deleted at the first retention pass after its account's ban has ended, a
--- pair once it no longer holds, and both at once with the account.
+-- deleted at the first retention pass after its account's ban has ended; a
+-- pair when the ban of its banned account has ended (an unposted pair also
+-- once its other account has no marker left; a posted one stays while the
+-- ban stands), and both at once with the deletion of either account.
 --
 --   ban_regions                    NEW table, one row per account, region and
 --                                  connection class: the region in plain words

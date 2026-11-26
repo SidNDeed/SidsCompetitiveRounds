@@ -302,3 +302,36 @@ def test_the_loop_starts_beside_the_retention_pass_on_the_primary_only():
     line = [ln for ln in src.splitlines() if '_supervised("ban_link_notice", ban_link_notice_loop)' in ln]
     assert len(line) == 1 and '_supervised("alt_signals_retention", alt_signals_retention_loop)' in line[0], line
     assert src.count("ban_link_notice_loop") == 2, "the loop is defined once and started from one place"
+
+
+# -- fix 1 of the item's round (H3, H4, M1, M3) ----------------------------------------------------
+
+def test_a_posted_pair_is_posted_once_over_the_whole_ban(monkeypatch):
+    """H4: the other account's markers run out and the retention takes them
+    between two of its connections while the ban stands: the posted pair
+    stays, and it is not posted again."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b, (o,) = await _pair_world(env, c, admin)
+            first = await main.ban_link_notice_pass(env.sm)
+            await env.conn.execute("UPDATE conn_markers SET last_at = now() - interval '100 days',"
+                                   " first_at = now() - interval '100 days' WHERE steam_id = $1", o.sid)
+            await main._alt_retention_pass(env.sm)
+            out["markers_left"] = await env.conn.fetchval("SELECT count(*) FROM conn_markers WHERE steam_id = $1",
+                                                          o.sid)
+            out["kept"] = await _notices(env)
+            await L._marker(env, o.sid, "home", "blk-home", 0)
+            second = await main.ban_link_notice_pass(env.sm)
+            out.update(first=first, second=second, posts=await _posts(env), pair=(b.sid, o.sid))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["first"]["posted"] == 1 and out["markers_left"] == 0, out
+    assert list(out["kept"]) == [out["pair"]] and out["kept"][out["pair"]] is not None, out["kept"]
+    assert out["second"]["posted"] == 0 and len(out["posts"]) == 1, (out["second"], out["posts"])
