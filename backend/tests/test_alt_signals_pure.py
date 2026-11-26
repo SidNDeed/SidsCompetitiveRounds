@@ -495,8 +495,12 @@ def test_every_address_literal_in_the_lanes_files_and_mains_alt_code_is_special_
     # (the reads bounded at admission): _alt_ban_read_start and
     # _alt_ban_read_wait; the class _AltBanReadBusy; the pool _ALT_BAN_READS,
     # the futures in flight _alt_ban_reading and the word's wait
-    # _ALT_BAN_WORD_WAIT_S.
-    assert counts == (23, 3, 19), (counts, [(n, l) for n, l, _t in texts])
+    # _ALT_BAN_WORD_WAIT_S. 26 functions and 25 assignments since its
+    # step 6 (the links of a banned account): _alt_own_window,
+    # _alt_rel_extra and _alt_lender_seen; _ALT_BAN_OWN_DAYS,
+    # _ALT_BAN_LINKS_SHOWN, _ALT_BAN_REGIONS_SHOWN, _ALT_BAN_LINKS_LOCK_MS,
+    # _ALT_BAN_LINKS_STATEMENT_MS and _ALT_BAN_HOW.
+    assert counts == (26, 3, 25), (counts, [(n, l) for n, l, _t in texts])
     for _name, first, text_ in texts:
         found += [("main.py:%d" % (first + int(w.rsplit(":", 1)[1]) - 1), t, c)
                   for w, t, c in _literals("main.py", text_)]
@@ -542,7 +546,7 @@ def _mains_alt_plants(src, v4):
         return src.replace(anchor, planted, 1)
     seen = "# seen at %s\n" % v4
     boot = "\ndef _alt_boot() -> None:\n"
-    rel = "\nasync def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> dict:\n"
+    rel = "\nasync def alt_relations(db: AsyncSession, steam_id: str, days: int = None, own_days: int = None) -> dict:\n"
     sql = "\n_ALT_RELATION_SQL = (\n"
     cls = "\nclass _AltNotRecorded(Exception):\n"
     faq = "\n_ALT_FAQ_CHANNEL = "

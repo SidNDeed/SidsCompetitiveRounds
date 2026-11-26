@@ -641,7 +641,10 @@ _ORM_CLASSES = frozenset({"SteamSigninFacts", "SteamFamilyShare", "ConnMarker"})
 # (_ban_ticket_seen calls it too); _alt_record names none of the tables since.
 # _ban_retention_batch and _ban_retention_left since its step 5: a link notice
 # goes when its other account has no conn_markers row left (a read, no write).
+# _BAN_LIST_ALT_SQL since its step 6: the ban list's four keys for a page, one
+# read inside a savepoint (main._ban_list_alt), no write.
 _ALLOWED = {
+    ("main.py", "_BAN_LIST_ALT_SQL"),
     ("main.py", "_alt_store"),
     ("main.py", "_alt_delete_account"),
     ("main.py", "_alt_retention_batch"),

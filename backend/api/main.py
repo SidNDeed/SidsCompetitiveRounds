@@ -17462,13 +17462,13 @@ _ALT_RELATION_SQL = (
     "WITH s AS ("
     " SELECT key_id, {mark} AS mark, day, conn_class FROM conn_markers"
     " WHERE steam_id = CAST(:sid AS text)"
-    " AND last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))"
     "), s_mark AS ("
     " SELECT key_id, mark, max(day) AS s_last_day FROM s GROUP BY key_id, mark"
     "), s_day AS ("
     " SELECT DISTINCT key_id, mark, day FROM s"
-    "), pop AS ("
-    " SELECT c.key_id, c.{mark} AS mark, count(DISTINCT c.steam_id) AS n"
+    "), pop AS MATERIALIZED ("
+    " SELECT c.key_id, c.{mark} AS mark, count(DISTINCT c.steam_id) AS n, count(DISTINCT c.steam_id) FILTER (WHERE c.steam_id <> CAST(:sid AS text)) AS n_other"
     " FROM conn_markers c JOIN s_mark m ON m.key_id = c.key_id AND m.mark = c.{mark}"
     " WHERE c.last_at >= now() - make_interval(days => CAST(:w AS integer))"
     " GROUP BY c.key_id, c.{mark}"
@@ -17481,22 +17481,22 @@ _ALT_RELATION_SQL = (
     " LEFT JOIN s_day sd ON sd.key_id = c.key_id AND sd.mark = c.{mark} AND sd.day = c.day"
     " WHERE c.steam_id <> CAST(:sid AS text)"
     " AND c.last_at >= now() - make_interval(days => CAST(:w AS integer))"
-    "), om AS ("
+    "), om AS MATERIALIZED ("
     " SELECT o.steam_id, o.key_id, o.mark, max(o.day) AS o_last_day, bool_or(o.same_day) AS any_same"
     " FROM o GROUP BY o.steam_id, o.key_id, o.mark"
-    "), per AS ("
+    "), per AS MATERIALIZED ("
     " SELECT om.steam_id, count(*) AS shared_markers,"
     " count(*) FILTER (WHERE NOT om.any_same) AS any_day_only,"
     " GREATEST(max(om.o_last_day), max(m.s_last_day)) AS last_shared_day,"
-    " min(pop.n) AS min_population"
+    " min(pop.n) AS min_population, min(pop.n_other) - 1 AS others"
     " FROM om"
     " JOIN s_mark m ON m.key_id = om.key_id AND m.mark = om.mark"
     " JOIN pop ON pop.key_id = om.key_id AND pop.mark = om.mark"
     " GROUP BY om.steam_id"
-    "), same AS ("
-    " SELECT o.steam_id, count(DISTINCT o.day) AS same_day_days FROM o WHERE o.same_day"
-    " GROUP BY o.steam_id"
-    "), cls AS ("
+    "), same AS MATERIALIZED ("
+    " SELECT o.steam_id, count(DISTINCT o.day) FILTER (WHERE o.same_day) AS same_day_days,"
+    " count(DISTINCT o.day) AS seen_days FROM o GROUP BY o.steam_id"
+    "), cls AS MATERIALIZED ("
     " SELECT x.steam_id, array_agg(DISTINCT x.conn_class ORDER BY x.conn_class) AS classes"
     " FROM (SELECT o.steam_id, o.conn_class FROM o"
     " UNION SELECT om.steam_id, s.conn_class FROM om"
@@ -17505,7 +17505,7 @@ _ALT_RELATION_SQL = (
     ")"
     " SELECT per.steam_id, per.shared_markers, COALESCE(same.same_day_days, 0) AS same_day_days,"
     " per.any_day_only, per.last_shared_day, per.min_population, cls.classes,"
-    " count(*) OVER () AS total"
+    " count(*) OVER () AS total, COALESCE(same.seen_days, 0) AS seen_days, per.others"
     " FROM per LEFT JOIN same ON same.steam_id = per.steam_id"
     " JOIN cls ON cls.steam_id = per.steam_id"
     " ORDER BY COALESCE(same.same_day_days, 0) DESC, per.min_population ASC, per.steam_id ASC"
@@ -17527,10 +17527,10 @@ def _alt_listing(rows, entry) -> dict:
     return {"related": [entry(r) for r in rows], "more": max(0, total - len(rows))}
 
 
-async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> dict:
+async def alt_relations(db: AsyncSession, steam_id: str, days: int = None, own_days: int = None) -> dict:
     """What the alternate-account signal tables relate to the account
     `steam_id` over a window of DUE_DAYS, or of `days` when smaller (never
-    larger: a row past the due age may already be gone). Uses the caller's
+    larger: a row past the due age may already be gone; ALT-BAN-1: its OWN rows over `own_days`). Uses the caller's
     session; takes no lock; writes nothing; commits nothing. The shape is
     design 9.4's. Raises ValueError for a window that is not a positive
     integer."""
@@ -17542,22 +17542,22 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
         window = min(days, _alt_signals.DUE_DAYS)
     key = _alt_signals.loaded_key()
     sid = str(steam_id)
-    cap = _alt_signals.RELATION_LIST_CAP
-    base = {"sid": sid, "w": window}
+    cap = _alt_signals.RELATION_LIST_CAP if own_days is None else _ALT_BAN_LINKS_SHOWN
+    base = {"sid": sid, "w": window, "ow": window if own_days is None else _alt_own_window(own_days)}
 
     counts = (await db.execute(text(
         "SELECT (SELECT count(*) FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)) AS facts,"
         " (SELECT count(*) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
-        " AND last_at >= now() - make_interval(days => CAST(:w AS integer))) AS markers,"
+        " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))) AS markers,"
         " (SELECT count(DISTINCT day) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
-        " AND last_at >= now() - make_interval(days => CAST(:w AS integer))) AS address_days,"
+        " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))) AS address_days,"
         " (SELECT count(*) FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
-        " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer))) AS shares,"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))) AS shares,"
         " (SELECT count(*) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
-        " AND last_at >= now() - make_interval(days => CAST(:w AS integer))"
+        " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))"
         " AND key_id <> CAST(:kid AS text))"
         " + (SELECT count(*) FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
-        " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))"
         " AND key_id <> CAST(:kid AS text)) AS earlier"),
         {**base, "kid": key.key_id if key is not None else ""})).mappings().one()
     facts = (await db.execute(text(
@@ -17570,7 +17570,7 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
         return {"steam_id": r["steam_id"], "shared_markers": int(r["shared_markers"]),
                 "same_day_days": int(r["same_day_days"]), "any_day_only": int(r["any_day_only"]),
                 "last_shared_day": _alt_iso(r["last_shared_day"]),
-                "min_population": int(r["min_population"]), "classes": list(r["classes"])}
+                "min_population": int(r["min_population"]), "classes": list(r["classes"]), **_alt_rel_extra(r, own_days)}
 
     address = _alt_listing((await db.execute(text(_alt_relation_sql("addr_mark")),
                                              {**base, "cap": cap})).mappings().all(), relation)
@@ -17580,21 +17580,21 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
     def family_entry(r):
         out = {"steam_id": r["steam_id"], "last_seen_at": _alt_iso(r["last_seen_at"])}
         if "owners" in r:
-            out["owners"] = int(r["owners"])
+            out.update({"owners": int(r["owners"])}, **({"others": int(r["others"])} if own_days is not None else {}))
         return out
 
     # Accounts sharing an owner with this one: a join on (key_id, owner_mark),
     # no key needed.
     sharing = _alt_listing((await db.execute(text(
         "WITH mine AS (SELECT key_id, owner_mark FROM steam_family_shares"
-        " WHERE steam_id = CAST(:sid AS text)"
-        " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer)))"
-        " SELECT f.steam_id, count(*) AS owners, max(f.last_seen_at) AS last_seen_at,"
+        " WHERE steam_id = CAST(:sid AS text) AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))),"
+        " pm AS (SELECT g.key_id, g.owner_mark, count(DISTINCT g.steam_id) AS n FROM steam_family_shares g JOIN mine m2 ON m2.key_id = g.key_id AND m2.owner_mark = g.owner_mark WHERE g.steam_id <> CAST(:sid AS text) AND g.last_seen_at >= now() - make_interval(days => CAST(:w AS integer)) GROUP BY g.key_id, g.owner_mark)"
+        " SELECT f.steam_id, count(*) AS owners, max(f.last_seen_at) AS last_seen_at, min(pm.n) - 1 AS others,"
         " count(*) OVER () AS total"
         " FROM steam_family_shares f"
         " JOIN mine m ON m.key_id = f.key_id AND m.owner_mark = f.owner_mark"
-        " JOIN players p ON p.steam_id = f.steam_id AND p.deleted_at IS NULL"
-        " WHERE f.steam_id <> CAST(:sid AS text)"
+        " JOIN pm ON pm.key_id = f.key_id AND pm.owner_mark = f.owner_mark"
+        " JOIN players p ON p.steam_id = f.steam_id AND p.deleted_at IS NULL WHERE f.steam_id <> CAST(:sid AS text)"
         " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
         " GROUP BY f.steam_id"
         " ORDER BY max(f.last_seen_at) DESC, f.steam_id ASC"
@@ -17619,8 +17619,8 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
              "om": _alt_signals.account_mark(key.secret, sid) if sid.isascii() and sid.isdigit()
              else b""})).mappings().all(), family_entry)
         mine = (await db.execute(text(
-            "SELECT key_id, owner_mark FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
-            " AND last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"), base)).all()
+            "SELECT key_id, owner_mark, last_seen_at FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+            " AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))"), base)).all()
         if not mine:
             owner = {"state": "none"}
         else:
@@ -17633,8 +17633,8 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
                 # Only rows under the loaded key id can resolve; the rest, and
                 # every mark no candidate matches, are "unresolved" and nothing
                 # more (finding 25).
-                want = {bytes(m) for k, m in mine if k == key.key_id}
-                unresolved = sum(1 for k, _m in mine if k != key.key_id)
+                want = {bytes(m) for k, m, *_t in mine if k == key.key_id}
+                unresolved = sum(1 for k, _m, *_t in mine if k != key.key_id)
                 found = {}
                 for cand in ids:
                     if isinstance(cand, str) and cand.isascii() and cand.isdigit():
@@ -17643,7 +17643,7 @@ async def alt_relations(db: AsyncSession, steam_id: str, days: int = None) -> di
                             found.setdefault(mk, cand)
                 unresolved += len(want - set(found))
                 resolved = sorted(set(found.values()))
-                owner = ({"state": "resolved", "steam_ids": resolved, "unresolved": unresolved}
+                owner = ({"state": "resolved", "steam_ids": resolved, "unresolved": unresolved, **_alt_lender_seen(mine, found, own_days)}
                          if resolved else {"state": "unresolved", "unresolved": unresolved})
 
     steam = None
@@ -51922,7 +51922,7 @@ async def admin_list_bans(
     # check's two, THREE or FOUR per call. "live" is the first statement's word; "deleted" needs no live row in
     # the first statement and the id's hash in the ledger at the second (_purged_steam_ids: one read, for the page's
     # ids with no live row, only with MATCH_HMAC_SECRET set, never a bind value nor a statement's text); else "none".
-    gone = await _purged_steam_ids(db, sorted({r["steam_id"] for r in rows if r["live_id"] is None}))
+    gone = await _purged_steam_ids(db, sorted({r["steam_id"] for r in rows if r["live_id"] is None})); alt = await _ban_list_alt(db, [r["steam_id"] for r in rows])  # noqa: E702 -- ALT-BAN-1: with a key loaded FOUR more (a savepoint, the limits, one read, its rollback)
     return {"bans": [
         {
             "id": str(r["id"]), "steam_id": r["steam_id"],
@@ -51936,7 +51936,7 @@ async def admin_list_bans(
             "banned_by_name": r["banned_by_name"] or "",
             "details": r["details"] or "", "details_at": _ban_end_iso(r["details_at"]),
             "details_by_name": (r["details_by_name"] or "") if r["details"] is not None else "",
-            "region": "", "region_at": None, "regions": None, "links": None,  # ALT-BAN-1's four, unrecorded here
+            **alt.get(r["steam_id"], dict(_BAN_LIST_ALT_NONE)),  # ALT-BAN-1's four: region, region_at, regions, links
         } for r in rows
     ], "total": int(got[0]["total"]) if got else 0, "limit": limit, "offset": offset}
 
@@ -89553,3 +89553,245 @@ async def _ban_region_word() -> str:
     except Exception:
         return _BAN_REGION_WORD_PENDING
     return word if isinstance(word, str) and word else _BAN_REGION_WORD_PENDING
+
+
+# -- ALT-BAN-1 step 6: the links of a banned account, and the list's four keys --
+# GET /api/v1/admin/bans/links (CONTRACT-BAN-1124 point 4 with ADD2) is built
+# from main.alt_relations on the banned account, its own side read with
+# _ALT_BAN_OWN_DAYS (its rows are kept while the ban stands), the other side
+# with the lane's window. Rows in the contract's order: address, block,
+# family_shared, family_lender, family_borrower; inside each the lane's order;
+# a block row of an account already shown by address is left out; at most 50.
+# Only current players are named (the lane's reads join players with no
+# deletion stamp): a deleted linked account stands in no row; it is counted
+# only in another row's `others`. No mark, key id, code or address leaves.
+_ALT_BAN_OWN_DAYS = 36500        # the banned subject's own side: no window while the ban stands
+_ALT_BAN_LINKS_SHOWN = 50
+_ALT_BAN_REGIONS_SHOWN = 20
+_ALT_BAN_LINKS_LOCK_MS = 500
+_ALT_BAN_LINKS_STATEMENT_MS = 3000
+_ALT_BAN_HOW = ("address", "block", "family_shared", "family_lender", "family_borrower")
+
+
+def _alt_own_window(own_days) -> int:
+    """alt_relations' own window: a positive integer, else ValueError."""
+    if isinstance(own_days, bool) or not isinstance(own_days, int) or own_days < 1:
+        raise ValueError("own_days must be a positive integer")
+    return own_days
+
+
+def _alt_rel_extra(r, own_days) -> dict:
+    """The two keys a relation entry gains when alt_relations is read with
+    own_days: the linked account's days on a shared code (any day), and the
+    further accounts on the code (other than the subject and the linked
+    one, the least over the codes shared). Nothing otherwise."""
+    if own_days is None:
+        return {}
+    return {"seen_days": int(r["seen_days"]), "others": max(0, int(r["others"]))}
+
+
+def _alt_lender_seen(mine, found, own_days) -> dict:
+    """With own_days: per resolved lender, the newest time the subject's own
+    share rows on that lender's mark were seen (ISO). Nothing otherwise."""
+    if own_days is None:
+        return {}
+    seen = {}
+    for _k, mark, at in mine:
+        sid = found.get(bytes(mark))
+        if sid is not None and (sid not in seen or at > seen[sid]):
+            seen[sid] = at
+    return {"last_seen": {s: _alt_iso(at) for s, at in seen.items()}}
+
+# The links route's second statement: the active ban, the notice with both
+# sentences, and the newest regions, in one read (a cross join of one row
+# with at most 20; no LATERAL).
+_BAN_LINKS_HEAD_SQL = (
+    "SELECT b.banned, b.notice, r.region, r.conn_class, r.first_at, r.last_at FROM ("
+    " SELECT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = CAST(:sid AS text) AND {active}) AS banned,"
+    " (SELECT count(*) = 1 AND count(*) FILTER (WHERE p.posted_revision = p.revision"
+    " AND strpos(p.content, CAST(:sentence AS text)) > 0) = 1"
+    " FROM pending_channel_posts p WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1) AS notice) b"
+    " LEFT JOIN (SELECT x.region, x.conn_class, x.first_at, x.last_at FROM ban_regions x"
+    " WHERE x.steam_id = CAST(:sid AS text) ORDER BY x.last_at DESC, x.region, x.conn_class"
+    " LIMIT CAST(:n AS integer)) r ON true"
+    " ORDER BY r.last_at DESC NULLS LAST, r.region, r.conn_class")
+
+
+def _ban_links_rows(rel: dict) -> tuple:
+    """(rows in the contract's order before the cut, the count of rows
+    before every cap) from alt_relations' answer read with own_days."""
+    rows, seen = [], set()
+
+    def day(v):
+        return v[:10] if isinstance(v, str) else None
+    for how in ("address", "block"):
+        for e in rel[how]["related"]:
+            if how == "block" and e["steam_id"] in seen:
+                continue
+            seen.add(e["steam_id"])
+            rows.append({"linked_steam_id": e["steam_id"], "how": how, "days": int(e["seen_days"]),
+                         "last_day": day(e["last_shared_day"]), "others": max(0, int(e["others"]))})
+    fam = rel["family"]
+    for e in fam["sharing_owner"]["related"]:
+        rows.append({"linked_steam_id": e["steam_id"], "how": "family_shared", "days": None,
+                     "last_day": day(e["last_seen_at"]), "others": max(0, int(e["others"]))})
+    owner = fam["owner"]
+    for s in owner.get("steam_ids", []) if owner.get("state") == "resolved" else []:
+        rows.append({"linked_steam_id": s, "how": "family_lender", "days": None,
+                     "last_day": day(owner["last_seen"].get(s)), "others": 0})
+    lends = fam["lends_to"]
+    if "related" in lends:
+        further = max(0, len(lends["related"]) + lends["more"] - 1)
+        for e in lends["related"]:
+            rows.append({"linked_steam_id": e["steam_id"], "how": "family_borrower", "days": None,
+                         "last_day": day(e["last_seen_at"]), "others": further})
+    # Every account sharing an address code shares that row's block code, so
+    # the block listing's total is the count of the address and block rows
+    # together; the family words add their own.
+    total = (len(rel["block"]["related"]) + rel["block"]["more"] + len(fam["sharing_owner"]["related"])
+             + fam["sharing_owner"]["more"] + sum(1 for r in rows if r["how"] == "family_lender")
+             + ((len(lends["related"]) + lends["more"]) if "related" in lends else 0))
+    return rows, total
+
+
+@app.get("/api/v1/admin/bans/links", tags=["Admin"])
+async def admin_ban_links(
+    admin_steam_id: str = Query(...),
+    target_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """The accounts linked to an actively banned account and its recorded
+    regions (CONTRACT-BAN-1124 point 4, ADD2). Requires the admin signature
+    over action ban_links with the banned id as target. 404 no_active_ban
+    when the id holds no active ban (or is no account id); 503
+    links_unavailable when a read is cancelled by its limits (a lock wait
+    of 500 ms, a statement of 3000 ms, set after the admin check) or fails.
+    At most 13 statements: the admin check's two, the limits, the head
+    (ban, notice, regions), alt_relations' at most eight, the names. Writes
+    nothing; no moderator-log row."""
+    await _require_admin(db, admin_steam_id, "ban_links", target_steam_id, hmac_signature)
+    sid = str(target_steam_id)
+    if not (sid.isascii() and sid.isdigit() and 1 <= len(sid) <= 20):
+        raise HTTPException(status_code=404, detail="no_active_ban")
+    try:
+        await _alt_limits(db, _ALT_BAN_LINKS_LOCK_MS, _ALT_BAN_LINKS_STATEMENT_MS)
+        head = (await db.execute(text(_BAN_LINKS_HEAD_SQL.format(active=player_ban_active_sql("pb"))), {
+            "sid": sid, "sentence": _alt_signals.NOTICE_BAN, "ch": _ALT_FAQ_CHANNEL,
+            "n": _ALT_BAN_REGIONS_SHOWN})).mappings().all()
+        if not head or not head[0]["banned"]:
+            raise _AltNotRecorded("no_active_ban")
+        rel = await alt_relations(db, sid, own_days=_ALT_BAN_OWN_DAYS)
+        rows, total = _ban_links_rows(rel)
+        shown = rows[:_ALT_BAN_LINKS_SHOWN]
+        ids = sorted({r["linked_steam_id"] for r in shown})
+        names = dict((await db.execute(text(
+            "SELECT steam_id, display_name FROM players WHERE steam_id = ANY(CAST(:ids AS text[]))"
+            " AND deleted_at IS NULL"), {"ids": ids})).all()) if ids else {}
+    except _AltNotRecorded:
+        raise HTTPException(status_code=404, detail="no_active_ban")
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _alt_print("[ALT-BAN] links unavailable: %s" % type(ex).__name__)
+        raise HTTPException(status_code=503, detail="links_unavailable")
+    return {
+        "steam_id": sid,
+        "recording": "on" if _alt_signals.loaded_key() is not None and head[0]["notice"] else "off",
+        "regions": [{"region": r["region"], "conn_class": r["conn_class"],
+                     "first_at": _ban_end_iso(r["first_at"]), "last_at": _ban_end_iso(r["last_at"])}
+                    for r in head if r["region"] is not None],
+        "links": [{"linked_steam_id": r["linked_steam_id"], "linked_name": names.get(r["linked_steam_id"]) or "",
+                   "how": r["how"], "days": r["days"], "last_day": r["last_day"], "others": r["others"]}
+                  for r in shown],
+        "links_total": max(total, len(rows)),
+    }
+
+
+# The list's four keys (CONTRACT-BAN-1124 point 1) for every row of a page, by
+# ONE statement (_BAN_LIST_ALT_SQL) inside a savepoint that sets the lane's
+# limits and is rolled back after the read (the limits end with it). Per page
+# id: the newest region and its time, the count of distinct regions, the
+# current players linked by block (an address shared is a block shared),
+# by a shared lender and as borrowers of the account's copy, and the lender
+# marks of the account's own share rows under the loaded key; on the first
+# row only, the current players' ids when any page id holds such a mark, so
+# that the lenders resolve as alt_relations resolves them. Windows as the
+# links route: the own side _ALT_BAN_OWN_DAYS, the other side the lane's.
+# The block links are an index probe per own block (a correlated ARRAY
+# subquery over ix_conn_markers_block; no LATERAL), never a join of the table.
+# No loaded key, a failed or cancelled statement or an absent table: region
+# "", region_at null, regions and links null; the rest of the list as before.
+_BAN_LIST_ALT_NONE = (("region", ""), ("region_at", None), ("regions", None), ("links", None))   # a tuple: no module state
+_BAN_LIST_ALT_SQL = (
+    "WITH ids AS (SELECT u.sid, u.mark, u.ord FROM unnest(CAST(:ids AS text[]), CAST(:marks AS bytea[]))"
+    " WITH ORDINALITY AS u(sid, mark, ord)),"
+    " rg AS (SELECT DISTINCT ON (r.steam_id) r.steam_id, r.region, r.last_at FROM ban_regions r"
+    " JOIN ids ON ids.sid = r.steam_id ORDER BY r.steam_id, r.last_at DESC, r.region, r.conn_class),"
+    " rn AS (SELECT r.steam_id, count(DISTINCT r.region) AS n FROM ban_regions r JOIN ids ON ids.sid = r.steam_id"
+    " GROUP BY r.steam_id),"
+    " own AS (SELECT DISTINCT c.steam_id AS sid, c.key_id, c.block_mark FROM conn_markers c JOIN ids ON ids.sid = c.steam_id"
+    " WHERE c.last_at >= now() - make_interval(days => CAST(:ow AS integer))),"
+    " nb AS (SELECT own.sid, unnest(ARRAY(SELECT o.steam_id FROM conn_markers o"
+    " WHERE o.key_id = own.key_id AND o.block_mark = own.block_mark AND o.steam_id <> own.sid"
+    " AND o.last_at >= now() - make_interval(days => CAST(:w AS integer)))) AS other FROM own),"
+    " sh AS (SELECT m.steam_id AS sid, f.steam_id AS other FROM steam_family_shares m JOIN ids ON ids.sid = m.steam_id"
+    " JOIN steam_family_shares f ON f.key_id = m.key_id AND f.owner_mark = m.owner_mark"
+    " WHERE m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer)) AND f.steam_id <> m.steam_id"
+    " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))),"
+    " br AS (SELECT ids.sid, f.steam_id AS other FROM ids JOIN steam_family_shares f"
+    " ON f.key_id = CAST(:kid AS text) AND f.owner_mark = ids.mark"
+    " WHERE f.steam_id <> ids.sid AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))),"
+    " lk AS (SELECT u.sid, array_agg(DISTINCT u.other) AS linked FROM ("
+    " SELECT sid, other FROM nb UNION SELECT sid, other FROM sh UNION SELECT sid, other FROM br) u"
+    " JOIN players p ON p.steam_id = u.other AND p.deleted_at IS NULL GROUP BY u.sid),"
+    " fl AS (SELECT m.steam_id AS sid, array_agg(DISTINCT m.owner_mark) AS marks FROM steam_family_shares m"
+    " JOIN ids ON ids.sid = m.steam_id WHERE m.key_id = CAST(:kid AS text)"
+    " AND m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer)) GROUP BY m.steam_id)"
+    " SELECT ids.sid, rg.region, rg.last_at AS region_at, COALESCE(rn.n, 0) AS regions, lk.linked, fl.marks,"
+    " CASE WHEN ids.ord = 1 AND EXISTS (SELECT 1 FROM fl) THEN ARRAY(SELECT p.steam_id FROM players p"
+    " WHERE p.deleted_at IS NULL LIMIT CAST(:cap AS integer) + 1) END AS candidates"
+    " FROM ids LEFT JOIN rg ON rg.steam_id = ids.sid LEFT JOIN rn ON rn.steam_id = ids.sid"
+    " LEFT JOIN lk ON lk.sid = ids.sid LEFT JOIN fl ON fl.sid = ids.sid ORDER BY ids.ord")
+
+
+async def _ban_list_alt(db: AsyncSession, steam_ids) -> dict:
+    """steam_id -> the four keys, for the list's page (_BAN_LIST_ALT_SQL).
+    Four statements when it reads (the savepoint, the limits, the read, the
+    savepoint's rollback), none with no key loaded or an empty page."""
+    key = _alt_signals.loaded_key()
+    ids = [str(s) for s in steam_ids]
+    if key is None or not ids:
+        return {}
+    marks = [_alt_signals.account_mark(key.secret, s) if s.isascii() and s.isdigit() else b"" for s in ids]
+    try:
+        sp = await db.begin_nested()
+        try:
+            await _alt_limits(db, _ALT_BAN_LINKS_LOCK_MS, _ALT_BAN_LINKS_STATEMENT_MS)
+            got = (await db.execute(text(_BAN_LIST_ALT_SQL), {
+                "ids": ids, "marks": marks, "kid": key.key_id, "ow": _ALT_BAN_OWN_DAYS,
+                "w": _alt_signals.DUE_DAYS, "cap": _alt_signals.OWNER_CANDIDATE_CAP})).mappings().all()
+        finally:
+            await sp.rollback()
+    except Exception as ex:
+        _alt_print("[ALT-BAN] list keys unavailable: %s" % type(ex).__name__)
+        return {}
+    cands = next((r["candidates"] for r in got if r["candidates"] is not None), None)
+    lender = {}
+    if cands is not None and len(cands) <= _alt_signals.OWNER_CANDIDATE_CAP:
+        want = {bytes(m) for r in got for m in (r["marks"] or [])}
+        for c in cands:
+            if isinstance(c, str) and c.isascii() and c.isdigit():
+                mk = _alt_signals.account_mark(key.secret, str(int(c)))
+                if mk in want:
+                    lender.setdefault(mk, c)
+    out = {}
+    for r in got:
+        linked = set(r["linked"] or [])
+        linked |= {lender[bytes(m)] for m in (r["marks"] or []) if bytes(m) in lender}
+        linked.discard(r["sid"])
+        out[r["sid"]] = {"region": r["region"] or "", "region_at": _ban_end_iso(r["region_at"]),
+                         "regions": int(r["regions"]), "links": len(linked)}
+    return out
