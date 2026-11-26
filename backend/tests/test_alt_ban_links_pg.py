@@ -604,3 +604,25 @@ def test_a_bad_signature_reads_nothing_before_the_admin_check(monkeypatch):
     for s in out["seen"]:
         for t in ("ban_regions", "conn_markers", "steam_family_shares", "pending_channel_posts", "ban_link_notices"):
             assert t not in s, (t, s[:120])
+
+
+def test_recording_says_off_with_no_key_and_the_notice_acknowledged(monkeypatch):
+    """M8: the key's condition alone: the notice acknowledged, no key loaded."""
+    out = {}
+
+    async def body(env):
+        BR._open(env)
+        _keyed(env)
+        await _notice(env, posted=True)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            w = await _world(env, c, admin)
+            out["on"] = (await _links(c, admin, w["b"].sid)).json()["recording"]
+            A.install_key(None)
+            r = await _links(c, admin, w["b"].sid)
+            out["nokey"] = (r.status_code, r.json()["recording"])
+    try:
+        case(monkeypatch, body, prefix="banlnk")
+    finally:
+        A.install_key(None)
+    assert out["on"] == "on" and out["nokey"] == (200, "off"), out
