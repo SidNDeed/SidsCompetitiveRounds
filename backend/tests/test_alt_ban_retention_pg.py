@@ -7,8 +7,9 @@ active ban and takes them after (bar A5), against a real PostgreSQL.
     end time or lifted) each row goes by its own last sight.
   * ban_regions: kept while the ban stands, taken at the first pass after
     it ends (ruling T0, 4), whatever the row's age.
-  * ban_link_notices: taken when the banned account's ban has ended, or
-    when the other account has no marker row left.
+  * ban_link_notices: taken when the banned account's ban has ended; an
+    UNPOSTED pair also when the other account has no marker row left; a
+    posted pair stays while the ban stands.
   * The counts of what is left name only rows the pass would take.
   * 2000 due rows behind 2920 kept ones (one banned account's markers at
     the one-year cap, older than every due row) are taken in one pass, each

@@ -4,12 +4,20 @@ and its loop, over planted rows of the lane's tables and migration 431's.
 A pair is (an actively banned account, another account) where the other
 account recorded an ADDRESS code after the ban began that the banned account
 recorded too. Stored in its own transaction before any post; posted with
-the fewest accounts on the code first, then the oldest; at most 20 posts a
-UTC day; the other account's identity key taken by a try-lock; never for an
+the fewest accounts on a qualifying code (recorded after the ban began)
+first, then the oldest; at most 20 posts a UTC day, counted in
+ban_notice_days: each post takes a slot of the day first by one statement,
+so two passes at once, an account deletion or a retention pass cannot
+raise the day past 20; a posted pair is kept while the ban stands, so it
+is posted once over the ban; the other account's identity key taken by a
+try-lock; never for an
 other account under an active ban; a block code or a family share alone is
 no pair; names from the live players row or "no name", never the name kept
 with a ban. With the channel setting unset or 0, pairs are stored, none is
-posted, and the pass's line says "storing" (the positive signal).
+posted, and the pass's line says "storing"; it says "posting" only with
+the channel set and the gate open (a key loaded, the notice acknowledged).
+The loop is started on the primary only, shown by running lifespan's role
+branch both ways.
 
 Every id, name, channel and mark is invented."""
 import asyncio

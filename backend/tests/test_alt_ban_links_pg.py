@@ -4,7 +4,12 @@ the ban list, over planted rows of the lane's tables and migration 431's.
 The links route (CONTRACT-BAN-1124 point 4 with ADD2): the five words in
 their order, days null for the three family words, others, links_total, the
 caps, the banned account's own side without a window and the other side
-with the lane's, a deleted linked account never named, no mark, key id or
+with the lane's, a linked account with no live players row never named and
+counted as one account in others, links_total and the list's links (a
+lender that matches no live account neither named nor counted), the route
+ADMIN_SIGNED in the read gate as the list is, no read before the admin
+check on a bad signature, recording on only with a key and the notice
+acknowledged, no mark, key id or
 code in the answer, 404 no_active_ban, 503 links_unavailable on a cancelled
 read, at most 13 statements, no moderator-log row. The list (point 1):
 region, region_at, regions and links by ONE more read for the page inside a
