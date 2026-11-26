@@ -1283,7 +1283,10 @@ def test_the_alt_functions_call_print_only_inside_alt_print_and_read_only_listed
     # the three DELETEs the deletion calls at its three places; 16 before it.
     # 21 since ALT-BAN-1 step 4: _alt_store (the upserts split out of
     # _alt_record), _alt_ban_spacing, _alt_ban_notice_open, _alt_ban_refused.
-    assert len(fns) == 21, (len(fns), sorted(fns))
+    # 26 since ALT-BAN-1 turn 2: _alt_ban_read_start and _alt_ban_read_wait (the
+    # bounded reads, the first thing), _alt_own_window, _alt_rel_extra and
+    # _alt_lender_seen (alt_relations' own window and its two columns, step 6).
+    assert len(fns) == 26, (len(fns), sorted(fns))
     loggers = {n for n, v in vars(main).items() if isinstance(v, logging.Logger)}
     aliases, members = _stream_bindings(Path(main.__file__).read_text(encoding="utf-8"))
     assert "*" not in members, members

@@ -766,7 +766,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # mail relay routes, the pending-DM recheck, the face preview, the batch discard) plus main's 6
     # verified-reads control routes; the auto-log upload and prune, added on both sides, count once.
     # The two sides' own histories follow: the lane's on the assertion, main's below it.
-    assert len(manifest) == 440   # BAN-RECORD-1 (migration 429): 439 plus POST /api/v1/admin/ban/details (statically-nonconsumer, first fingerprint by the re-pin tool); QAPPLY-1: 438 plus the held-report Credit route (statically-nonconsumer, in the group of Accept and Discard); MODLOG-1 at its merge of main ac07e3e5 (migration 420): 436 plus the moderator log's two read routes (statically-nonconsumer); QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
+    assert len(manifest) == 441   # ALT-BAN-1 (turn 2, step 6): 440 plus GET /api/v1/admin/bans/links (statically-nonconsumer, first fingerprint by the re-pin tool); BAN-RECORD-1 (migration 429): 439 plus POST /api/v1/admin/ban/details (statically-nonconsumer, first fingerprint by the re-pin tool); QAPPLY-1: 438 plus the held-report Credit route (statically-nonconsumer, in the group of Accept and Discard); MODLOG-1 at its merge of main ac07e3e5 (migration 420): 436 plus the moderator log's two read routes (statically-nonconsumer); QDIG-1 (migration 419): 435 plus the digest posted route (statically-nonconsumer); lobby invites (migration 416): 430 plus the five invite routes; first fingerprints by the re-pin tool, confirmed by its dry run after the write
     # admin evidence report re-land (2026-10-29), claude/admin-evidence-server refit onto main 3fc331e2: main's 426 plus the lane's 4 (the four GET report routes under /api/v1/internal/evidence-report/: game, series, pair and player, the admin-authorized-consumer class), confirmed by the re-pin dry run
     # combat evidence re-land (2026-10-29), claude/combat-evidence-server refit onto main 3f4c9fc9: main's 424 plus the lane's 2 (the combat record route and the admin combat-evidence view), confirmed by the re-pin dry run
     # card draw evidence re-land (2026-10-29), claude/card-draw-server refit onto main 15da9a83: main's 421 plus the lane's 3 (the card record route, the admin card-evidence view and the card-pool census registration), measured by the step 5 dry re-pin of the refit (424 live) and written by its commit (b)
@@ -820,7 +820,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # trunk fold (2026-10-15): the union of the lane's 395 and main's 395 over their shared 387 is
     # 401: the lane's 6 plus main's 6 plus the 2 auto-log routes both sides added (all
     # statically-nonconsumer). The lane's history is on the assertion, main's below it.
-    assert len(static) == 435   # BAN-RECORD-1 (migration 429): 434 plus the ban details route; QAPPLY-1: 433 plus the held-report Credit route; MODLOG-1 at its merge of main ac07e3e5 (migration 420): 431 plus the moderator log's two read routes; QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
+    assert len(static) == 436   # ALT-BAN-1 (turn 2, step 6): 435 plus the ban links route; BAN-RECORD-1 (migration 429): 434 plus the ban details route; QAPPLY-1: 433 plus the held-report Credit route; MODLOG-1 at its merge of main ac07e3e5 (migration 420): 431 plus the moderator log's two read routes; QDIG-1 (migration 419): 430 plus the digest posted route; lobby invites (migration 416): 425 plus the five invite routes; all statically-nonconsumer (first fingerprints by the re-pin tool)
     # combat evidence re-land (2026-10-29): main's 423 plus the lane's 2, both statically-nonconsumer (426 rows, one sentinel-exercised)
     # card draw evidence re-land (2026-10-29): main's 420 plus the lane's 3, all statically-nonconsumer (424 rows, one sentinel-exercised; measured by the step 5 dry re-pin of the refit, written by its commit (b))
     # identity-clock evidence re-land (2026-10-29): main's 417 plus the lane's 3, all statically-nonconsumer (421 rows, one sentinel-exercised)
@@ -1983,20 +1983,23 @@ def test_the_helper_closure_stays_affordable():
     # The median (87 against 87) and p90 (230 against 239) bounds stay, and so
     # do the three bounds of the whole closure (250 against 261, 433 against
     # 453, 887 against 897 at the health route).
-    # ALT-BAN-1 with main e2b485d9 (BAN-RECORD-1) merged in (2026-11-25):
-    # 637 measured at GET /api/v1/health on the merged tree, of 6193 indexed
-    # bindings (607 of 6055 at e2b485d9, 636 of 6172 at the lane's tip
-    # af4693d6, the same walk over each tree): +30 by name against main, the
-    # stack's own: the three of CHEAT-ALT-1 above, main._ALT_BAN_BUILD (the
-    # lane's build marker) and geo_region.file_word with the 25 names of the
-    # region reader it reaches, which the health route reads in both arms;
-    # +1 against the lane's tip, main._BAN_RECORD_BUILD (main's, above). No
-    # other code binding of that closure is new. The bound moves to 637, the
-    # measured value, for that reason and no other. The median (87 against
-    # 87) and p90 (230 against 239) bounds stay, and so do the whole
-    # closure's median and p90 (250 against 261, 433 against 453). Its worst
-    # is stated at its own bound below.
-    assert code_worst <= 637, f"worst code closure {code_worst} of {total}"
+    # ALT-BAN-1 with main e2b485d9 (BAN-RECORD-1) merged in, at the item's
+    # tip (turn 2, step 8, 2026-11-26): 645 measured at GET /api/v1/health,
+    # of 6234 indexed bindings (637 of 6193 at the merged tree aecaccd2, 607
+    # of 6055 at e2b485d9, the same walk over each tree): +38 by name against
+    # main, the stack's own: the three of CHEAT-ALT-1 above, main._ALT_BAN_BUILD
+    # (the lane's build marker), geo_region.file_word with the 25 names of the
+    # region reader it reaches, which the health route reads in both arms, and
+    # the eight of turn 2's bounded reads the word now goes through
+    # (main._ban_region_word, _alt_ban_read_start, _alt_ban_read_wait,
+    # _AltBanReadBusy, _ALT_BAN_READS, _alt_ban_reading, _ALT_BAN_WORD_WAIT_S
+    # and _BAN_REGION_WORD_PENDING); +1 against the lane, main._BAN_RECORD_BUILD
+    # (main's, above). No other code binding of that closure is new. The bound
+    # moves to 645, the measured value, for that reason and no other. The
+    # median (87 against 87) and p90 (230 against 239) bounds stay, and so do
+    # the whole closure's median and p90 (250 against 261, 433 against 453).
+    # Its worst is stated at its own bound below.
+    assert code_worst <= 645, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -2522,11 +2525,16 @@ def test_the_helper_closure_stays_affordable():
     # leaves. The bound moves to 897, the measurement times 1.05 rounded up,
     # for that reason and no other. The median (236 against 245) and p90
     # (398 against 425) bounds stay.
-    # ALT-BAN-1 with main e2b485d9 (BAN-RECORD-1) merged in (2026-11-25):
-    # 929 measured at GET /api/v1/health, of 6193 indexed bindings (884 at
-    # e2b485d9, of 6055, the same route): +45 by name. 30 the health route
-    # runs: main's two build words _ALT_SIGNALS_BUILD and _ALT_BAN_BUILD;
-    # the key word alt_signals.key_word and the _INSTALLED it reads; and
+    # ALT-BAN-1 with main e2b485d9 (BAN-RECORD-1) merged in, at the item's
+    # tip (turn 2, step 8, 2026-11-26): 937 measured at GET /api/v1/health,
+    # of 6234 indexed bindings (929 of 6193 at the merged tree aecaccd2, 884
+    # of 6055 at e2b485d9, the same route): +53 by name against main. 38 the
+    # health route runs: main's two build words _ALT_SIGNALS_BUILD and
+    # _ALT_BAN_BUILD; the key word alt_signals.key_word and the _INSTALLED it
+    # reads; the eight of turn 2's bounded reads the region file's word goes
+    # through (main._ban_region_word, _alt_ban_read_start, _alt_ban_read_wait,
+    # _AltBanReadBusy, _ALT_BAN_READS, _alt_ban_reading, _ALT_BAN_WORD_WAIT_S
+    # and _BAN_REGION_WORD_PENDING); and
     # geo_region.file_word with the 25 names of the region reader it
     # reaches (_rgn_Breach, _rgn_Meta, _rgn_Walk, _rgn_charge, _rgn_head,
     # _rgn_key, _rgn_metadata, _rgn_node, _rgn_open, _rgn_parse, _rgn_pass,
@@ -2537,11 +2545,11 @@ def test_the_helper_closure_stays_affordable():
     # _rgn_stat; and the timedelta import the reader's source leads to in
     # auto_logs, card_evidence, combat_evidence, identity_clock_evidence,
     # main, match_hold, match_report_window, review_calibrate, seat_evidence
-    # and tournaments. The bound moves to 976, the measurement times 1.05
-    # rounded up, for that reason and no other. The median (250 against 261)
-    # and p90 (433 against 453) bounds stay.
-    # Measured again at the item's tip (turn 2, step 8).
-    assert all_worst <= 976, f"worst closure {all_worst} of {total}"
+    # and tournaments. No name of the merged tree's closure left it. The bound
+    # moves to 984, the measurement times 1.05 rounded up, for that reason and
+    # no other. The median (250 against 261) and p90 (433 against 453) bounds
+    # stay.
+    assert all_worst <= 984, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

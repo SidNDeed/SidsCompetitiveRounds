@@ -143,7 +143,12 @@ def _census_line(rows):
 # main's moved: main._alt_retention_batch's three DELETEs and main._alt_retention_left's count (427), and
 # main._ban_retention_batch's two DELETEs, main._ban_retention_left's count, main._ban_ticket_seen's ban read and
 # main.alt_relations' two _alt_relation_sql texts (431). Judged failures 0.
-CENSUS_LINE = {"bounded": 27, "expanded": 121, "judged": 4, "read": 117, "remaining": 11}
+# ALT-BAN-1 turn 2 (2026-11-26), measured by this module's census case at the item's step 8 tree: bounded 27 -> 30 by
+# three new places that read player_bans, each through player_ban_active_sql formatted from literals: main.admin_ban_links'
+# head read (_BAN_LINKS_HEAD_SQL, step 6), main.ban_link_notice_pass' candidate read (_BAN_NOTICE_CANDIDATE_SQL) and
+# main._ban_notice_pair_tx' read of a pair under the other account's key (_BAN_NOTICE_PAIR_FACTS, step 7). The other
+# four counts stay.
+CENSUS_LINE = {"bounded": 30, "expanded": 121, "judged": 4, "read": 117, "remaining": 11}
 
 
 def test_the_census_line_is_as_measured(base):

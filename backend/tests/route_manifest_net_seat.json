@@ -106,7 +106,16 @@
           ],
           "main",
           "admin_list_bans",
-          "31594ccc0fa831c063db825f6e44c9749790af19"
+          "b6cddcdb24fa2a1eacda992d32e1dde680471551"
+        ],
+        [
+          "/api/v1/admin/bans/links",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_ban_links",
+          "5408d776cd6daa301368aaa9206ae890fc6ff526"
         ],
         [
           "/api/v1/admin/check-status",
@@ -1516,7 +1525,7 @@
           ],
           "main",
           "steam_auth",
-          "860db6d6d57e9bfe54d366db0b487ebd1cc6fa15"
+          "925a331e84152ec1ae86638d334780e1fe3532ac"
         ],
         [
           "/api/v1/bets",
@@ -1885,7 +1894,7 @@
           ],
           "main",
           "health_check",
-          "6cf887028180a7806735cc4f09692a0daa7cb84d"
+          "0218a72c72dd7ddffd38d8f6215e3ae6a7d3d6e3"
         ],
         [
           "/api/v1/i18n/approved",
@@ -4130,7 +4139,7 @@
       [
         "main",
         "lifespan",
-        "5818ca32699076f37821b91af3f8ffe83bda0030"
+        "4165be172eec78ef91e968ac3e84678648cf1632"
       ]
     ]
   },
@@ -4574,6 +4583,7 @@
     "POST /api/v1/admin/read-gate/mode -> main.admin_read_gate_mode",
     "GET /api/v1/admin/read-census -> main.admin_read_census",
     "GET /api/v1/read-gate/probe -> main.read_gate_probe",
-    "POST /api/v1/admin/ban/details -> main.admin_ban_details"
+    "POST /api/v1/admin/ban/details -> main.admin_ban_details",
+    "GET /api/v1/admin/bans/links -> main.admin_ban_links"
   ]
 }
