@@ -289,6 +289,27 @@ def _numbered(upto=None, above=None):
     return files
 
 
+def _faq_chain(files):
+    """[(file name, channel id, the text it requires, the text it writes)] for
+    the files that revise FAQ message 1 (a $faq1was$ and a $faq1$ constant
+    each: 427 and 431), in order. Each must require the text its predecessor
+    writes, on the same channel: the chain production runs."""
+    chain = []
+    for path in files:
+        t = path.read_text(encoding="utf-8")
+        was = re.findall(r"\$faq1was\$(.*?)\$faq1was\$", t, re.S)
+        if not was:
+            continue
+        want = re.findall(r"\$faq1\$(.*?)\$faq1\$", t, re.S)
+        channel = set(re.findall(r"p\.channel_id = '(\d+)'", t))
+        assert len(was) == 1 and len(want) == 1 and len(channel) == 1, path.name
+        chain.append((path.name, channel.pop(), was[0], want[0]))
+    for first, second in zip(chain, chain[1:]):
+        assert second[1] == first[1] and second[2] == first[3], (
+            "a FAQ writer does not require its predecessor's text", first[0], second[0])
+    return chain
+
+
 def _stale_held_out():
     """The HELD_OUT names that are not a numbered migration in backend/sql. A
     renamed or removed file leaves a name that excludes nothing, and the list
@@ -2705,8 +2726,20 @@ def test_m53_later_migrations_keep_the_traded_value(env):
     the schema fingerprint sees fails that reset. Whenever a file was
     applied, the schema is therefore rebuilt afterwards by the session
     build's own path, whether or not the leg passed, and the rebuild must
-    reproduce that build's two fingerprints and its empty-table list."""
+    reproduce that build's two fingerprints and its empty-table list.
+
+    The build has already applied these files once (before 353, since
+    e0066bd7), so the leg is their second run. Production runs each once, in
+    order, and every file's second run on its own end state changes nothing
+    (test_migration_reruns); FAQ message 1 is the exception, a chain: each
+    later file that revises it requires the text its predecessor wrote (427
+    338's, 431 427's), and an earlier file run after a later one refuses by
+    design (431's header). So before the files run, the leg puts FAQ message
+    1 back where production holds it before the first of them -- the first
+    writer's earlier text, the revision less one per writer (_faq_chain) --
+    and the chain runs as production runs it."""
     later = _numbered(above=MIGRATION_NUMBER)
+    chain = _faq_chain(later)
 
     async def body(ctx):
         (a, b), s = await _world(ctx)
@@ -2714,6 +2747,12 @@ def test_m53_later_migrations_keep_the_traded_value(env):
         await _executed(ctx, a, b, [p], [await _print(ctx, b, s, "common")])
         conn = await _connect("later")
         try:
+            if chain:
+                back = await conn.execute(
+                    "UPDATE pending_channel_posts SET content = $1, revision = revision - $2"
+                    " WHERE channel_id = $3 AND sort_order = 1 AND content = $4 AND revision > $2",
+                    chain[0][2], len(chain), chain[0][1], chain[-1][3])
+                assert back == "UPDATE 1", ("FAQ message 1 is not the last writer's text", back)
             for path in later:
                 await conn.execute(path.read_text(encoding="utf-8"))
         finally:
