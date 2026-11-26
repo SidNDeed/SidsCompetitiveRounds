@@ -977,3 +977,35 @@ def test_the_helper_refuses_without_a_key_and_a_hex_ticket(monkeypatch):
     monkeypatch.setenv("STEAM_WEB_API_KEY", "k")
     assert asyncio.run(main._steam_ticket_check("ab&appid=1", "1")) == (None, "bad_ticket")
     assert calls == []
+
+
+# -- fix 1 of the item's round (M2): a cancelled ask is not an OK ---------------------------------
+
+def test_a_sign_in_cancelled_while_steam_is_asked_leaves_the_minute(case, env):
+    """The request is cancelled while its ticket check waits: the account's
+    stamp is the 60 s of any outcome that is not a verified OK, never the
+    600 s stamped provisionally before the ask."""
+    sid = R._sid()
+    env.setattr(main, "_ALT_BAN_SPACE_ALL_S", 0.0)
+    entered, release = threading.Event(), threading.Event()
+    env.steam.gate = (entered, release)
+
+    async def body(sm, rsm):
+        await _ban(sm, sid)
+        task = asyncio.create_task(_sign_in(sm, sid))
+        try:
+            assert await _wait(entered), "Steam was never asked"
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            left = main._alt_ban_asked["ids"].get(sid, 0.0) - time.monotonic()
+        finally:
+            release.set()
+        await asyncio.to_thread(_ended, "steam")
+        return left, await _rows(sm, sid)
+
+    left, rows = R._with(case, body)
+    assert 50 < left <= 60, left
+    assert rows == [0, 0, 0, 0], rows

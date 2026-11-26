@@ -89339,7 +89339,9 @@ async def _alt_ban_refused(db: AsyncSession, req, request) -> None:
     in the route's open read transaction; that transaction rolled back, so
     nothing is held from here on; the spacings checked again and stamped;
     the ticket sent to Steam's check (3 s a socket operation, 4 s in all);
-    the stamp of the account set to ten minutes after an OK, else a minute;
+    the stamp of the account set to ten minutes after a verified OK, else
+    (any other answer, an exception, or the request cancelled during the
+    ask) a minute;
     no recording when more than 8 s have passed since this function was
     entered. Lets no Exception out; its lines carry a word only."""
     entered = time.monotonic()
@@ -89354,10 +89356,16 @@ async def _alt_ban_refused(db: AsyncSession, req, request) -> None:
         await db.rollback()
         if not _alt_ban_spacing(sid, time.monotonic(), take=True):
             return
-        params, word = await _steam_ticket_check(req.ticket_hex, sid, _ALT_BAN_STEAM_SOCKET_S,
-                                                 _ALT_BAN_STEAM_WAIT_S)
-        _alt_ban_asked["ids"][sid] = time.monotonic() + (
-            _ALT_BAN_SPACE_OK_S if params is not None else _ALT_BAN_SPACE_OTHER_S)
+        verified = False
+        try:
+            params, word = await _steam_ticket_check(req.ticket_hex, sid, _ALT_BAN_STEAM_SOCKET_S,
+                                                     _ALT_BAN_STEAM_WAIT_S)
+            verified = params is not None
+        finally:
+            # The stamp taken above is provisional: it stands at ten minutes only
+            # after a verified OK; every other end of the ask leaves a minute.
+            _alt_ban_asked["ids"][sid] = time.monotonic() + (
+                _ALT_BAN_SPACE_OK_S if verified else _ALT_BAN_SPACE_OTHER_S)
         if params is None:
             _alt_print("[ALT-BAN] not verified: %s" % word)
             return
