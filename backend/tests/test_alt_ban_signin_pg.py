@@ -659,6 +659,14 @@ def test_two_sign_ins_at_once_ask_once(case, env):
     sid = R._sid()
     entered, release = threading.Event(), threading.Event()
     env.steam.gate = (entered, release)
+    # Fix 1, M5: the ticket check's thread holder alone would also keep Steam from a second call; the second
+    # sign-in must not reach the ticket check at all (its spacing stamped before the first's ask).
+    checks, real = [], main._steam_ticket_check
+
+    async def counted(*a, **k):
+        checks.append(1)
+        return await real(*a, **k)
+    env.setattr(main, "_steam_ticket_check", counted)
 
     async def body(sm, rsm):
         await _ban(sm, sid)
@@ -666,12 +674,14 @@ def test_two_sign_ins_at_once_ask_once(case, env):
         try:
             assert await _wait(entered), "Steam was never asked"
             second = await asyncio.wait_for(_sign_in(sm, sid), 10)
+            reached = len(checks)
         finally:
             release.set()
-        return await first, second
+        return await first, second, reached
 
-    first, second = R._with(case, body)
+    first, second, reached = R._with(case, body)
     assert isinstance(first, HTTPException) and isinstance(second, HTTPException)
+    assert reached == 1, "the second sign-in reached the ticket check (%d)" % reached
     assert len(env.steam.calls) == 1
 
 
