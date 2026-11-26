@@ -89850,12 +89850,15 @@ async def _ban_list_alt(db: AsyncSession, steam_ids) -> dict:
 # posted, so posted once), then posted: the pair whose qualifying code the
 # fewest accounts share first, then the oldest; at most _BAN_NOTICE_DAY_CAP posts in
 # one UTC day, counted in ban_notice_days (one row a UTC day; it names no
-# account). A post first takes a slot of its day by one statement that adds
-# one only while the day's count is under the cap (_BAN_NOTICE_SLOT_SQL), on
-# its own session and committed: passes at once share the one count, and a
-# post that then fails keeps its slot taken. No slot, no post. Account
-# deletion and the retention pass never touch the counter; the notice pass
-# removes its days older than two. Every pair's transaction takes the OTHER account's identity key
+# account). A post takes a slot of its day by one statement that adds one
+# only while the day's count is under the cap (_BAN_NOTICE_SLOT_SQL), inside
+# the pair's own transaction, after posted_at is written and before the post
+# row: the slot's day, posted_at and the post row's created_at read that
+# transaction's one clock (now()), and the three commit together or not at
+# all, so the day's count is the posts that committed on that UTC day. Passes
+# at once share the one row and its CHECK. No slot, no post. Account deletion
+# and the retention pass never touch the counter; the notice pass removes its
+# days older than two. Every pair's transaction takes the OTHER account's identity key
 # shared, by a try-lock (busy: the next pass), and reads the ban and the marker
 # again under it. The post names each account by its LIVE players row's name
 # (escaped) or "no name"; never the name kept with a ban. Nothing here
@@ -89868,24 +89871,14 @@ _BAN_NOTICE_LOCK_MS = 500
 _BAN_NOTICE_STATEMENT_MS = 3000
 _BAN_NOTICE_CHANNEL_ENV = "SCR_BAN_NOTICE_CHANNEL"
 
-# One slot of the current UTC day: one row a day, a delta of one, only while
-# the count is under the cap (the CHECK of 431 holds the same bound). No row
-# returned: the day is full.
+# One slot of the UTC day of the transaction's now(): one row a day, a delta
+# of one, only while the count is under the cap (the CHECK of 431 holds the
+# same bound). No row returned: the day is full. Run only by
+# _ban_notice_pair_tx, inside the pair's transaction.
 _BAN_NOTICE_SLOT_SQL = (
     "INSERT INTO ban_notice_days AS d (day, posts) VALUES ((now() AT TIME ZONE 'UTC')::date, 1)"
     " ON CONFLICT (day) DO UPDATE SET posts = d.posts + 1 WHERE d.posts < CAST(:cap AS integer)"
     " RETURNING d.posts")
-
-
-async def _ban_notice_take_slot(session_factory) -> bool:
-    """One slot of today's allowance, by _BAN_NOTICE_SLOT_SQL in a
-    transaction of its own, committed before it returns: True when a slot
-    was taken, False when the day holds _BAN_NOTICE_DAY_CAP already."""
-    async with session_factory() as s:
-        await _alt_limits(s, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
-        got = (await s.execute(text(_BAN_NOTICE_SLOT_SQL), {"cap": _BAN_NOTICE_DAY_CAP})).scalar()
-        await s.commit()
-    return got is not None
 
 
 def _ban_notice_channel():
@@ -89943,16 +89936,20 @@ _BAN_NOTICE_DUE_SQL = (
     " LIMIT CAST(:n AS integer)")
 
 
-async def _ban_notice_pair_tx(db: AsyncSession, banned: str, other: str, post_to=None, take_slot=None):
-    """One pair's transaction: the limits; the OTHER account's identity key
-    shared by a try-lock ("busy": nothing written); the ban and the marker
-    read again under it ("gone" when the pair no longer holds; a stored row
-    of it removed when posting); then the pair stored (post_to None), or
-    posted_at written (the pair's row now held by this transaction; "gone"
-    when another pass posted it), a slot of the day taken by take_slot (its
-    own committed transaction; "full" and nothing written when none is
-    left) and the post row written. Commits on a write; rolls back
-    otherwise. Returns "stored", "posted", "busy", "gone" or "full"."""
+async def _ban_notice_pair_tx(db: AsyncSession, banned: str, other: str, post_to=None):
+    """One pair's transaction, on the caller's session alone (it opens no
+    other session or connection): the limits; the OTHER account's identity
+    key shared by a try-lock ("busy": nothing written); the ban and the
+    marker read again under it ("gone" when the pair no longer holds; a
+    stored row of it removed when posting); then the pair stored (post_to
+    None), or posted_at written (the pair's row now held by this
+    transaction; "gone" when another pass posted it), a slot of the day
+    taken by _BAN_NOTICE_SLOT_SQL in this same transaction ("full" and
+    nothing written when none is left; "busy" and nothing written when the
+    slot statement fails, a lock time-out on the day's row included) and
+    the post row written. Commits on a write; rolls back otherwise, so a
+    slot is kept only by a post that commits. Returns "stored", "posted",
+    "busy", "gone" or "full"."""
     await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
     if not (await db.execute(text("SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:o AS text)))"),
                              {"o": other})).scalar():
@@ -89990,10 +89987,16 @@ async def _ban_notice_pair_tx(db: AsyncSession, banned: str, other: str, post_to
         await db.rollback()
         return "gone"
     # The day's slot before the post, taken once this transaction holds the
-    # pair's row (so a pair another pass posted takes no slot): no slot, no
-    # post; a slot taken stays taken whatever follows (it is committed on
-    # its own session).
-    if not await take_slot():
+    # pair's row (so a pair another pass posted takes no slot), in this
+    # transaction: its wait on the day's row is bounded by this
+    # transaction's lock limit, and a rollback gives the slot back. No slot,
+    # no post.
+    try:
+        slot = (await db.execute(text(_BAN_NOTICE_SLOT_SQL), {"cap": _BAN_NOTICE_DAY_CAP})).scalar()
+    except Exception:
+        await db.rollback()
+        return "busy"
+    if slot is None:
         await db.rollback()
         return "full"
     await db.execute(text("INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"),
@@ -90021,8 +90024,10 @@ async def ban_link_notice_pass(session_factory=None) -> dict:
     transaction; then, with the channel set, ban_notice_days' days older
     than two removed, and the due pairs (fewest accounts on a qualifying
     code first, then the oldest) read up to the room the counter leaves
-    today, each posted in its own transaction after it takes a slot of the
-    day; the first "full" ends the posting. Returns the counts."""
+    today, each posted in its own transaction, which takes the slot of the
+    day; the first "full" ends the posting. One session throughout: no
+    second session or connection while a pair's transaction is open.
+    Returns the counts."""
     if session_factory is None:
         from database import async_session as session_factory
     out = {"stored": 0, "posted": 0, "busy": 0, "gone": 0, "full": 0,
@@ -90052,11 +90057,8 @@ async def ban_link_notice_pass(session_factory=None) -> dict:
         due = (await db.execute(text(_BAN_NOTICE_DUE_SQL.format(active=player_ban_active_sql("pb"))),
                                 {"n": room})).all() if room else []
         await db.commit()
-
-        async def slot():
-            return await _ban_notice_take_slot(session_factory)
         for banned, other, _shared in due:
-            got = await _ban_notice_pair_tx(db, banned, other, post_to=channel, take_slot=slot)
+            got = await _ban_notice_pair_tx(db, banned, other, post_to=channel)
             out[got] += 1
             if got == "full":
                 break

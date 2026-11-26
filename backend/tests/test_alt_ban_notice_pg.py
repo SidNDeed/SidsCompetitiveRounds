@@ -6,9 +6,12 @@ account recorded an ADDRESS code after the ban began that the banned account
 recorded too. Stored in its own transaction before any post; posted with
 the fewest accounts on a qualifying code (recorded after the ban began)
 first, then the oldest; at most 20 posts a UTC day, counted in
-ban_notice_days: each post takes a slot of the day first by one statement,
-so two passes at once, an account deletion or a retention pass cannot
-raise the day past 20; a posted pair is kept while the ban stands, so it
+ban_notice_days: each post takes a slot of the day by one statement inside
+the pair's own transaction, so two passes at once, an account deletion or a
+retention pass cannot raise the day past 20, a post row that fails to
+commit gives its slot back, a pass on an engine of one connection still
+posts, and a slot held past the lock limit makes the pair "busy" with
+nothing written; a posted pair is kept while the ban stands, so it
 is posted once over the ban; the other account's identity key taken by a
 try-lock; never for an
 other account under an active ban; a block code or a family share alone is
@@ -21,9 +24,11 @@ branch both ways.
 
 Every id, name, channel and mark is invented."""
 import asyncio
+import datetime
 import os
 import re
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = os.path.normpath(os.path.join(HERE, "..", "api"))
@@ -32,7 +37,10 @@ for p in (API, HERE):
         sys.path.insert(0, p)
 
 import pytest  # noqa: E402
+from sqlalchemy import event  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
+import ladder_pg_harness as harness  # noqa: E402
 import main  # noqa: E402
 import alt_signals as A  # noqa: E402
 import test_ban_record_pg as BR  # noqa: E402
@@ -572,3 +580,196 @@ def test_twenty_a_utc_day_holds_across_a_deletion_or_a_retention_pass(monkeypatc
         A.install_key(None)
     assert out["full"]["posted"] == 20 and out["left"] < 20, out
     assert out["after"]["posted"] == 0 and len(out["posts"]) == 20, (out["after"], len(out["posts"]))
+
+
+async def _due_pair(env, c, admin):
+    """One banned account and one other account, stored, the channel set:
+    one pair due for posting."""
+    b, (o,) = await _pair_world(env, c, admin)
+    await _stored(env)
+    return b, o
+
+
+async def _day_posts(env):
+    return await env.conn.fetchval(
+        "SELECT posts FROM ban_notice_days WHERE day = (now() AT TIME ZONE 'UTC')::date")
+
+
+async def _pass_caught(sm):
+    """One pass; its counts, or the name of what it raised, and its time."""
+    t0 = time.monotonic()
+    try:
+        got, err = await main.ban_link_notice_pass(sm), None
+    except Exception as ex:
+        got, err = None, type(ex).__name__
+    return got, err, time.monotonic() - t0
+
+
+POOL_TIMEOUT_S = 4
+
+
+def test_a_pass_on_an_engine_of_one_connection_posts_a_due_pair_before_the_pool_time_out(monkeypatch):
+    """Fix 2, A (finding 1): the pass opens no second session or connection
+    while a pair's transaction is open. On an engine of ONE connection (no
+    overflow, a pool time-out of POOL_TIMEOUT_S) a due pair is posted, no
+    error leaves the pass, and the pass ends before the pool time-out."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b, o = await _due_pair(env, c, admin)
+        one = create_async_engine(
+            harness.async_dsn(env.c.dsn), pool_size=1, max_overflow=0, pool_timeout=POOL_TIMEOUT_S,
+            connect_args={"server_settings": {"search_path": harness.quoted(env.c.schema)}})
+        try:
+            got, err, took = await _pass_caught(async_sessionmaker(one, expire_on_commit=False))
+        finally:
+            await one.dispose()
+        out.update(got=got, err=err, took=took, posts=await _posts(env), rows=await _notices(env),
+                   pair=(b.sid, o.sid), day=await _day_posts(env))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["err"] is None and out["got"]["posted"] == 1, (out["err"], out["got"], out["took"])
+    assert out["took"] < POOL_TIMEOUT_S, out["took"]
+    assert len(out["posts"]) == 1 and out["rows"][out["pair"]] is not None and out["day"] == 1, out
+
+
+def test_the_slot_posted_at_and_the_post_row_are_one_transaction(monkeypatch):
+    """Fix 2, A (findings 1 and 2): the slot statement, the posted_at UPDATE
+    and the post row's INSERT run in ONE transaction on one connection, so
+    the day the slot counts, posted_at and the post row's created_at read
+    one clock. Each statement's transaction is observed by the engine's
+    begin events; then the stored values: posted_at equals the post row's
+    created_at, and the day counted is posted_at's UTC date."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b, o = await _due_pair(env, c, admin)
+        serial, open_tx, seen = [0], {}, []
+
+        def on_begin(conn):
+            serial[0] += 1
+            open_tx[id(conn)] = serial[0]
+
+        def on_statement(conn, cursor, statement, parameters, context, executemany):
+            seen.append((statement, open_tx.get(id(conn))))
+        sync = env.engine.sync_engine
+        event.listen(sync, "begin", on_begin)
+        event.listen(sync, "before_cursor_execute", on_statement)
+        try:
+            got = await main.ban_link_notice_pass(env.sm)
+        finally:
+            event.remove(sync, "before_cursor_execute", on_statement)
+            event.remove(sync, "begin", on_begin)
+        tx = {}
+        for want in ("INSERT INTO ban_notice_days", "UPDATE ban_link_notices SET posted_at",
+                     "INSERT INTO pending_channel_posts"):
+            tx[want] = [t for s, t in seen if want in s]
+        row = await env.conn.fetchrow(
+            "SELECT n.posted_at, p.created_at FROM ban_link_notices n, pending_channel_posts p"
+            " WHERE n.banned_steam_id = $1 AND n.other_steam_id = $2 AND p.channel_id = $3",
+            b.sid, o.sid, CHANNEL)
+        days = [tuple(r) for r in await env.conn.fetch("SELECT day, posts FROM ban_notice_days")]
+        out.update(got=got, tx=tx, row=row and tuple(row), days=days, begins=serial[0])
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["got"]["posted"] == 1 and out["begins"] > 0, out
+    serials = [t for ts in out["tx"].values() for t in ts]
+    assert len(serials) == 3 and None not in serials and len(set(serials)) == 1, out["tx"]
+    posted_at, created_at = out["row"]
+    assert posted_at == created_at, out["row"]
+    assert out["days"] == [(posted_at.astimezone(datetime.timezone.utc).date(), 1)], (out["days"], posted_at)
+
+
+REFUSE_FN = "alt_ban_fix2_refuse_post"
+
+
+def test_a_post_row_that_fails_to_commit_gives_its_slot_back_and_leaves_the_pair_unposted(monkeypatch):
+    """Fix 2, A: a post row refused at COMMIT (a deferred constraint trigger
+    of the case's own on pending_channel_posts) leaves the day's count where
+    it was (3), the pair unposted and no post row; with the trigger gone the
+    next pass posts the pair and the day counts 4."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b, o = await _due_pair(env, c, admin)
+        await env.conn.execute(
+            "INSERT INTO ban_notice_days (day, posts) VALUES ((now() AT TIME ZONE 'UTC')::date, 3)")
+        await env.conn.execute(
+            "CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS"
+            " $f$BEGIN RAISE EXCEPTION 'the post row is refused at commit'; END$f$" % REFUSE_FN)
+        await env.conn.execute(
+            "CREATE CONSTRAINT TRIGGER %s AFTER INSERT ON pending_channel_posts"
+            " DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION %s()" % (REFUSE_FN, REFUSE_FN))
+        try:
+            refused, err, _took = await _pass_caught(env.sm)
+            out.update(refused=refused, err=err, day_refused=await _day_posts(env),
+                       rows_refused=await _notices(env), posts_refused=await _posts(env))
+        finally:
+            await env.conn.execute("DROP TRIGGER IF EXISTS %s ON pending_channel_posts" % REFUSE_FN)
+            await env.conn.execute("DROP FUNCTION IF EXISTS %s()" % REFUSE_FN)
+        again = await main.ban_link_notice_pass(env.sm)
+        out.update(again=again, day=await _day_posts(env), rows=await _notices(env), posts=await _posts(env),
+                   pair=(b.sid, o.sid))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["day_refused"] == 3, (out["day_refused"], out["err"], out["refused"])
+    assert out["rows_refused"] == {out["pair"]: None} and out["posts_refused"] == [], out
+    assert out["again"]["posted"] == 1 and out["day"] == 4 and out["rows"][out["pair"]] is not None, out
+    assert len(out["posts"]) == 1, out["posts"]
+
+
+def test_a_slot_held_past_the_lock_limit_makes_the_pair_busy_with_nothing_written(monkeypatch):
+    """Fix 2, A: while another transaction holds the day's row, the pair's
+    slot statement waits no longer than the pair transaction's lock limit;
+    the pair ends "busy", nothing is written, no error leaves the pass, and
+    the pass ends within the statement limit. With the row free the next
+    pass posts the pair."""
+    out = {}
+
+    async def body(env):
+        _setup(env, CHANNEL)
+        await L._notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b, o = await _due_pair(env, c, admin)
+        await env.conn.execute(
+            "INSERT INTO ban_notice_days (day, posts) VALUES ((now() AT TIME ZONE 'UTC')::date, 2)")
+        side = await env.side()
+        tr = side.transaction()
+        await tr.start()
+        await side.execute(
+            "SELECT posts FROM ban_notice_days WHERE day = (now() AT TIME ZONE 'UTC')::date FOR UPDATE")
+        try:
+            held, err, took = await _pass_caught(env.sm)
+            out.update(held=held, err=err, took=took, day_held=await _day_posts(env),
+                       rows_held=await _notices(env), posts_held=await _posts(env))
+        finally:
+            await tr.rollback()
+        free = await main.ban_link_notice_pass(env.sm)
+        out.update(free=free, day=await _day_posts(env), rows=await _notices(env), pair=(b.sid, o.sid))
+    try:
+        case(monkeypatch, body, prefix="bannote")
+    finally:
+        A.install_key(None)
+    assert out["err"] is None and (out["held"]["busy"], out["held"]["posted"]) == (1, 0), (out["err"], out["held"])
+    assert out["took"] < main._BAN_NOTICE_STATEMENT_MS / 1000.0, out["took"]
+    assert out["day_held"] == 2 and out["rows_held"] == {out["pair"]: None} and out["posts_held"] == [], out
+    assert out["free"]["posted"] == 1 and out["day"] == 3 and out["rows"][out["pair"]] is not None, out
