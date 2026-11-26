@@ -141,6 +141,11 @@ services:
       # reads it (#438/#443: nothing reaches the process unless it is named
       # here).
       SCR_ALT_SIGNAL_KEY: ${SCR_ALT_SIGNAL_KEY:-}
+      # SCR_BAN_NOTICE_CHANNEL: the Discord channel id the primary's notice
+      # pass posts to when an account signs in from an address a banned
+      # account used (main.ban_link_notice_pass). Unset or 0: the pairs are
+      # stored and none is posted; the pass's line says "storing".
+      SCR_BAN_NOTICE_CHANNEL: ${SCR_BAN_NOTICE_CHANNEL:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`

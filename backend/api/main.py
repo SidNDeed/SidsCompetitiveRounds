@@ -4120,7 +4120,7 @@ async def lifespan(app: FastAPI):
             # budget reached), and `[ALT-RETENTION] pass FAILED` with a count
             # in a row when a pass dies.
             tasks.append(asyncio.create_task(
-                _supervised("alt_signals_retention", alt_signals_retention_loop)))
+                _supervised("alt_signals_retention", alt_signals_retention_loop))); tasks.append(asyncio.create_task(_supervised("ban_link_notice", ban_link_notice_loop)))  # noqa: E702
         # Awaited, before anything can render: a face keyed off a colour
         # this box has not read yet is a promise about pixels it cannot make.
         if _pcf is not None:
@@ -89795,3 +89795,200 @@ async def _ban_list_alt(db: AsyncSession, steam_ids) -> dict:
         out[r["sid"]] = {"region": r["region"] or "", "region_at": _ban_end_iso(r["region_at"]),
                          "regions": int(r["regions"]), "links": len(linked)}
     return out
+
+
+# -- ALT-BAN-1 step 7: the notice to the admins (F7; RULING-ALT-BAN-T0 section 4) --
+# A pass on the PRIMARY alone, in the retention loop's form, never inside a
+# sign-in (F8): it finds the pairs (an actively banned account, another
+# account) where the other account's verified sign-in recorded an ADDRESS code
+# that the banned account recorded too, after the ban began and after the
+# banned account's own first sight of that code; the other account under no
+# active ban. Block codes and family sharing are never noticed (they stand on
+# the links page). Each pair is stored in its own transaction (stored before
+# posted, so posted once), then posted: the pair whose code the fewest
+# accounts share first, then the oldest; at most _BAN_NOTICE_DAY_CAP posts in
+# one UTC day. Every pair's transaction takes the OTHER account's identity key
+# shared, by a try-lock (busy: the next pass), and reads the ban and the marker
+# again under it. The post names each account by its LIVE players row's name
+# (escaped) or "no name"; never the name kept with a ban. Nothing here
+# refuses, delays or marks an account.
+_BAN_NOTICE_PERIOD_S = 60
+_BAN_NOTICE_FIRST_DELAY_S = 90
+_BAN_NOTICE_CANDIDATES = 200
+_BAN_NOTICE_DAY_CAP = 20
+_BAN_NOTICE_LOCK_MS = 500
+_BAN_NOTICE_STATEMENT_MS = 3000
+_BAN_NOTICE_CHANNEL_ENV = "SCR_BAN_NOTICE_CHANNEL"
+
+
+def _ban_notice_channel():
+    """The admin channel's id from SCR_BAN_NOTICE_CHANNEL, or None when it is
+    unset, 0 or not an id: then pairs are stored and none is posted."""
+    v = (os.getenv(_BAN_NOTICE_CHANNEL_ENV) or "").strip()
+    return v if v.isascii() and v.isdigit() and len(v) <= 20 and int(v) != 0 else None
+
+
+def _ban_notice_mode(got: dict) -> str:
+    """The pass's word in its log line: "posting" when it ran with the
+    channel set, "storing" when the channel was unset or 0."""
+    return "posting" if got["channel"] else "storing"
+
+
+# The shared address codes of one pair, with the other account's newest row on
+# them, and how many accounts recorded each code (the fewest is the pair's).
+_BAN_NOTICE_PAIR_FACTS = (
+    "SELECT o.day, o.conn_class, (SELECT count(DISTINCT a.steam_id) FROM conn_markers a"
+    " WHERE a.key_id = o.key_id AND a.addr_mark = o.addr_mark) AS n"
+    " FROM conn_markers b JOIN conn_markers o ON o.key_id = b.key_id AND o.addr_mark = b.addr_mark"
+    " JOIN player_bans pb ON pb.steam_id = b.steam_id AND {active}"
+    " WHERE b.steam_id = CAST(:b AS text) AND o.steam_id = CAST(:o AS text)"
+    " AND o.last_at >= pb.banned_at AND o.last_at >= b.first_at"
+    " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = o.steam_id AND {active_o})"
+    " ORDER BY n ASC, o.last_at DESC LIMIT 1")
+
+_BAN_NOTICE_CANDIDATE_SQL = (
+    "SELECT DISTINCT b.steam_id AS banned, o.steam_id AS other"
+    " FROM player_bans pb JOIN conn_markers b ON b.steam_id = pb.steam_id"
+    " JOIN conn_markers o ON o.key_id = b.key_id AND o.addr_mark = b.addr_mark"
+    " WHERE {active} AND o.steam_id <> b.steam_id"
+    " AND o.last_at >= pb.banned_at AND o.last_at >= b.first_at"
+    " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = o.steam_id AND {active_o})"
+    " AND NOT EXISTS (SELECT 1 FROM ban_link_notices n WHERE n.banned_steam_id = b.steam_id"
+    " AND n.other_steam_id = o.steam_id)"
+    " LIMIT CAST(:cap AS integer)")
+
+_BAN_NOTICE_DUE_SQL = (
+    "SELECT n.banned_steam_id AS banned, n.other_steam_id AS other,"
+    " (SELECT min(x.cnt) FROM (SELECT (SELECT count(DISTINCT a.steam_id) FROM conn_markers a"
+    " WHERE a.key_id = o.key_id AND a.addr_mark = o.addr_mark) AS cnt"
+    " FROM conn_markers o JOIN conn_markers b ON b.key_id = o.key_id AND b.addr_mark = o.addr_mark"
+    " WHERE o.steam_id = n.other_steam_id AND b.steam_id = n.banned_steam_id) x) AS shared"
+    " FROM ban_link_notices n WHERE n.posted_at IS NULL"
+    " ORDER BY shared ASC NULLS LAST, n.noticed_at ASC, n.banned_steam_id, n.other_steam_id"
+    " LIMIT CAST(:n AS integer)")
+
+
+async def _ban_notice_pair_tx(db: AsyncSession, banned: str, other: str, post_to=None):
+    """One pair's transaction: the limits; the OTHER account's identity key
+    shared by a try-lock ("busy": nothing written); the ban and the marker
+    read again under it ("gone" when the pair no longer holds; a stored row
+    of it removed when posting); then the pair stored (post_to None) or the
+    post row and posted_at written together. Commits on a write; rolls back
+    otherwise. Returns "stored", "posted", "busy" or "gone"."""
+    await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
+    if not (await db.execute(text("SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:o AS text)))"),
+                             {"o": other})).scalar():
+        await db.rollback()
+        return "busy"
+    facts = (await db.execute(text(_BAN_NOTICE_PAIR_FACTS.format(
+        active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))),
+        {"b": banned, "o": other})).mappings().first()
+    if facts is None:
+        if post_to is None:
+            await db.rollback()
+            return "gone"
+        # A stored pair that no longer holds (the ban ended, the other account
+        # banned, the rows gone): its unposted row is removed, so that it
+        # holds no place among the due pairs; stored again if it holds again.
+        await db.execute(text(
+            "DELETE FROM ban_link_notices WHERE banned_steam_id = CAST(:b AS text)"
+            " AND other_steam_id = CAST(:o AS text) AND posted_at IS NULL"), {"b": banned, "o": other})
+        await db.commit()
+        return "gone"
+    if post_to is None:
+        await db.execute(text(
+            "INSERT INTO ban_link_notices (banned_steam_id, other_steam_id) VALUES (CAST(:b AS text), CAST(:o AS text))"
+            " ON CONFLICT (banned_steam_id, other_steam_id) DO NOTHING"), {"b": banned, "o": other})
+        await db.commit()
+        return "stored"
+    names = dict((await db.execute(text(
+        "SELECT steam_id, display_name FROM players WHERE steam_id = ANY(CAST(:ids AS text[]))"
+        " AND deleted_at IS NULL"), {"ids": [banned, other]})).all())
+    done = (await db.execute(text(
+        "UPDATE ban_link_notices SET posted_at = now() WHERE banned_steam_id = CAST(:b AS text)"
+        " AND other_steam_id = CAST(:o AS text) AND posted_at IS NULL RETURNING 1"),
+        {"b": banned, "o": other})).scalar()
+    if done is None:
+        await db.rollback()
+        return "gone"
+    await db.execute(text("INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"),
+                     {"ch": post_to, "c": _ban_notice_text(names, banned, other, facts)[:2000]})
+    await db.commit()
+    return "posted"
+
+
+def _ban_notice_name(names, sid) -> str:
+    n = names.get(sid)
+    return _dtext.escape_name(n, 64) if n else "no name"
+
+
+def _ban_notice_text(names, banned, other, facts) -> str:
+    return ("Linked to a banned account: **%s** (`%s`) signed in on %s from a connection that **%s** (`%s`,"
+            " banned) used too. Connection class: %s. Accounts seen on that connection: %d. A hint, not proof."
+            % (_ban_notice_name(names, other), other, facts["day"].isoformat(), _ban_notice_name(names, banned),
+               banned, facts["conn_class"], int(facts["n"])))
+
+
+async def ban_link_notice_pass(session_factory=None) -> dict:
+    """One pass (the loop's, or a test's): the gate (a key loaded, the notice
+    open with both sentences: one read), the candidates (one statement, no
+    lock, at most _BAN_NOTICE_CANDIDATES), each stored in its own
+    transaction; then, with the channel set, the due pairs (fewest accounts
+    on the code first, then the oldest) up to the day's cap, each posted in
+    its own transaction. Returns the counts."""
+    if session_factory is None:
+        from database import async_session as session_factory
+    out = {"stored": 0, "posted": 0, "busy": 0, "gone": 0, "channel": _ban_notice_channel() is not None}
+    if _alt_signals.loaded_key() is None:
+        return out
+    async with session_factory() as db:
+        if not await _alt_ban_notice_open(db):
+            await db.rollback()
+            return out
+        await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
+        pairs = (await db.execute(text(_BAN_NOTICE_CANDIDATE_SQL.format(
+            active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))),
+            {"cap": _BAN_NOTICE_CANDIDATES})).all()
+        await db.rollback()
+        for banned, other in pairs:
+            out[await _ban_notice_pair_tx(db, banned, other)] += 1
+        channel = _ban_notice_channel()
+        if channel is None:
+            return out
+        await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
+        today = int((await db.execute(text(
+            "SELECT count(*) FROM ban_link_notices WHERE posted_at >="
+            " (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"))).scalar())
+        room = max(0, _BAN_NOTICE_DAY_CAP - today)
+        due = (await db.execute(text(_BAN_NOTICE_DUE_SQL), {"n": room})).all() if room else []
+        await db.rollback()
+        for banned, other, _shared in due:
+            out[await _ban_notice_pair_tx(db, banned, other, post_to=channel)] += 1
+    return out
+
+
+async def ban_link_notice_loop(clock=None, session_factory=None) -> None:
+    """The pass's own loop, started from lifespan on the PRIMARY only. One
+    `[ALT-BAN] notice pass armed` line at the start (channel set or unset),
+    a `[ALT-BAN] notice pass:` line at the end of its first pass and of every
+    pass that stored or posted (with the channel unset or 0 it says
+    "storing" and posted 0); then a pass every _BAN_NOTICE_PERIOD_S from the
+    start of the one before. A failed pass is caught, counted and said."""
+    clock = clock or time.monotonic
+    _alt_print("[ALT-BAN] notice pass armed: channel %s" % ("set" if _ban_notice_channel() else "unset"))
+    await asyncio.sleep(_BAN_NOTICE_FIRST_DELAY_S)
+    failures, first = 0, True
+    while True:
+        started = clock()
+        try:
+            got = await ban_link_notice_pass(session_factory)
+            if first or got["stored"] or got["posted"]:
+                _alt_print("[ALT-BAN] notice pass: %s, stored %d, posted %d, busy %d"
+                           % (_ban_notice_mode(got), got["stored"], got["posted"], got["busy"]))
+            first, failures = False, 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            failures += 1
+            _alt_print("[ALT-BAN] notice pass FAILED (%d in a row): %s" % (failures, type(ex).__name__))
+        await asyncio.sleep(max(0.0, started + _BAN_NOTICE_PERIOD_S - clock()))

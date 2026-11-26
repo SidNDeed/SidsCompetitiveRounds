@@ -642,8 +642,13 @@ _ORM_CLASSES = frozenset({"SteamSigninFacts", "SteamFamilyShare", "ConnMarker"})
 # _ban_retention_batch and _ban_retention_left since its step 5: a link notice
 # goes when its other account has no conn_markers row left (a read, no write).
 # _BAN_LIST_ALT_SQL since its step 6: the ban list's four keys for a page, one
-# read inside a savepoint (main._ban_list_alt), no write.
+# read inside a savepoint (main._ban_list_alt), no write. Since its step 7, the
+# notice pass's three reads (main.ban_link_notice_pass and _ban_notice_pair_tx):
+# the candidate pairs, a pair's facts under the other account's key, the due pairs.
 _ALLOWED = {
+    ("main.py", "_BAN_NOTICE_CANDIDATE_SQL"),
+    ("main.py", "_BAN_NOTICE_PAIR_FACTS"),
+    ("main.py", "_BAN_NOTICE_DUE_SQL"),
     ("main.py", "_BAN_LIST_ALT_SQL"),
     ("main.py", "_alt_store"),
     ("main.py", "_alt_delete_account"),
