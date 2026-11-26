@@ -30,6 +30,7 @@ names are invented.
 """
 import ast
 import asyncio
+import base64
 import builtins
 import inspect
 import os
@@ -870,14 +871,28 @@ def test_no_address_city_key_or_mark_in_any_stored_text_or_line(case, env):
     async def body(sm, rsm):
         await _ban(sm, sid)
         await _sign_in(sm, sid, host=V4_CITY, owner=owner)
-        return await _every_text(sm, sid), await _regions(sm, sid)
+        async with sm() as db:
+            region_text = [str(r[0]) for r in (await db.execute(text(
+                "SELECT x::text FROM ban_regions x WHERE x.steam_id = :s"), {"s": sid})).all()]
+        return await _every_text(sm, sid), await _regions(sm, sid), region_text
 
-    stored, regions = R._with(case, body)
+    stored, regions, region_text = R._with(case, body)
     assert regions == [("Ardenmark, Vellshire", "unknown")]
     for value in stored:
         for word in (CITY, V4_CITY, owner, R.KEY_HEX, STEAM_KEY):
             assert word not in value, (word, value)
     _guarded(said, sid, owner)
+    # Fix 1, M6: the marks this connection computes (address, block, the account's own, the lender's), in any
+    # form a line or a text could carry them, stand in no printed line and in no text of the region's row.
+    key = A.loaded_key()
+    seen = A.observe(V4_CITY, key, main._conn_ranges.classify_address, main._conn_ranges.CR_LAN_NETS)
+    marks = [seen.addr_mark, seen.block_mark, A.account_mark(key.secret, sid), A.account_mark(key.secret, owner)]
+    forms = [f for m in marks for f in (m.hex(), m.hex().upper(), base64.b64encode(m).decode(),
+                                        base64.urlsafe_b64encode(m).decode().rstrip("="))]
+    for f in forms:
+        cut = f[:16]
+        assert not any(cut in ln for ln in said), ("a mark in a printed line", cut)
+        assert not any(cut in v for v in region_text), ("a mark in the region's row", cut)
 
 
 # -- account deletion takes the two tables' rows ------------------------------------------
