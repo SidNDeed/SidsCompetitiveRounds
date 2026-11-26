@@ -723,6 +723,13 @@ COMPOSED = {
         'an admin, portal or evidence surface, not a player label',
     ('main.py', 'lt', 'ms'):
         'a number with its unit symbol',
+    # main.py _alt_limits (the alternate-account passes' time limits, 71bad8fa): "%dms" % lock_ms and
+    # "%dms" % statement_ms, the bind values of set_config('lock_timeout') and ('statement_timeout') in
+    # _ALT_LIMITS_SQL. Sent to the database only, never in an answer: no player sees either text.
+    ('main.py', 'lt', 'dms'):
+        'a number with its unit symbol',
+    ('main.py', 'st', 'dms'):
+        'a number with its unit symbol',
     ('main.py', 'lv', 'dms'):
         'a number with its unit symbol',
     ('main.py', 'lv', 'ms'):
