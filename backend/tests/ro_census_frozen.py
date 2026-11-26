@@ -4146,3 +4146,20 @@ for _k, _v in GEO_REGION_FROZEN.items():
 FROZEN_COUNT = FROZEN_COUNT + GEO_REGION_COUNT
 COMPLETE_FROZEN.setdefault('api/geo_region.py#complete', [])
 R10_FROZEN.setdefault('api/geo_region.py#complete', [])
+# ALT-BAN-1 turn 2 (the integrator's ADD2 point 2(a), 26 Nov 2026): one dsntext form of api/main.py,
+# admitted by name. main.py _steam_ticket_url, the text its f-string begins with:
+# 'https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/?key='. The judgement: the
+# https address of an outside web service, read by the sign-in's ticket check (the Steam helper of
+# ALT-BAN-1 builds the URL steam_auth builds, the same text a second time); not a database address,
+# and nothing a connection is built from. The lane's step 4 commit added it and froze none. Frozen by
+# hand, not by a re-derivation; FROZEN_COUNT is 907 after this block (906 before it).
+ALT_BAN_STEAM_FROZEN = {
+    'api/main.py': [
+        # main.py _steam_ticket_url: the ticket check's URL, as steam_auth builds it
+        ('dsntext', 'https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/?key='),
+    ],
+}
+ALT_BAN_STEAM_COUNT = 1
+for _k, _v in ALT_BAN_STEAM_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = FROZEN_COUNT + ALT_BAN_STEAM_COUNT
