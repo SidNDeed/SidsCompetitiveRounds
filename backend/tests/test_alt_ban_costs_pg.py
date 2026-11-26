@@ -210,7 +210,7 @@ REF_LIST_SQL = (
     ' f.owner_mark = ids.mark WHERE f.steam_id <> ids.sid AND f.last_seen_at >= now() -'
     ' make_interval(days => CAST(:w AS integer))), lk AS (SELECT u.sid, array_agg(DISTINCT u.other) AS'
     ' linked FROM ( SELECT sid, other FROM nb UNION SELECT sid, other FROM sh UNION SELECT sid, other'
-    ' FROM br) u JOIN players p ON p.steam_id = u.other AND p.deleted_at IS NULL GROUP BY u.sid), fl AS'
+    ' FROM br) u GROUP BY u.sid), fl AS'   # fix 1, H2: every linked account counted, as _BAN_LIST_ALT_SQL
     ' (SELECT m.steam_id AS sid, array_agg(DISTINCT m.owner_mark) AS marks FROM steam_family_shares m'
     ' JOIN ids ON ids.sid = m.steam_id WHERE m.key_id = CAST(:kid AS text) AND m.last_seen_at >= now() -'
     ' make_interval(days => CAST(:ow AS integer)) GROUP BY m.steam_id) SELECT ids.sid, rg.region,'

@@ -645,7 +645,10 @@ _ORM_CLASSES = frozenset({"SteamSigninFacts", "SteamFamilyShare", "ConnMarker"})
 # read inside a savepoint (main._ban_list_alt), no write. Since its step 7, the
 # notice pass's three reads (main.ban_link_notice_pass and _ban_notice_pair_tx):
 # the candidate pairs, a pair's facts under the other account's key, the due pairs.
+# _BAN_LINKS_HEAD_SQL since fix 1 (H2): the links route's head read counts the
+# linked accounts with no live players row (gone, gone_borrowers), a read, no write.
 _ALLOWED = {
+    ("main.py", "_BAN_LINKS_HEAD_SQL"),
     ("main.py", "_BAN_NOTICE_CANDIDATE_SQL"),
     ("main.py", "_BAN_NOTICE_PAIR_FACTS"),
     ("main.py", "_BAN_NOTICE_DUE_SQL"),

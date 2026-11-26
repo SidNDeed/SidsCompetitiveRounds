@@ -106,7 +106,7 @@
           ],
           "main",
           "admin_list_bans",
-          "c0a864c917aacfc2852a84d6fbda6c9484a9c3f1"
+          "b30da37eea517cca52580ae44a520e17cf9fb11e"
         ],
         [
           "/api/v1/admin/bans/links",
@@ -115,7 +115,7 @@
           ],
           "main",
           "admin_ban_links",
-          "7a608331bf816bf13a713661ce5dc588b27cdd22"
+          "b84464ee8ff9249696a62768e11a7b2d84fca627"
         ],
         [
           "/api/v1/admin/check-status",

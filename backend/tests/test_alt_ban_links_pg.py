@@ -184,7 +184,8 @@ def test_each_word_its_numbers_and_the_order(monkeypatch):
     assert all(re.fullmatch(r"\d{4}-\d\d-\d\d", e["last_day"]) for e in a["links"])
     assert by[("address", w["addr"])]["linked_name"] == "Links addr"
     assert w["gone"] not in json.dumps(a) and w["old"] not in json.dumps(a)
-    assert a["links_total"] == len(a["links"]) == 8
+    # the eight rows, and the deleted account on the home code counted once (fix 1, H2)
+    assert len(a["links"]) == 8 and a["links_total"] == 9, (len(a["links"]), a["links_total"])
 
 
 def test_no_mark_key_id_code_or_address_in_the_answer(monkeypatch):
@@ -359,7 +360,8 @@ def test_the_list_fills_its_four_keys_by_one_read_and_the_old_parse_reads_the_sa
         assert list(e) == BR.OLD_KEYS + BR.NEW_KEYS, list(e)
     by = {e["steam_id"]: e for e in answer["bans"]}
     b = by[out["b"]]
-    assert (b["region"], b["regions"], b["links"]) == (NASTY, 2, 8), b
+    # links counts accounts: the eight named in the links rows and the deleted one (fix 1, H2)
+    assert (b["region"], b["regions"], b["links"]) == (NASTY, 2, 9), b
     assert BR.Z.match(b["region_at"]), b
     o = by[out["other"]]
     assert (o["region"], o["region_at"], o["regions"], o["links"]) == ("", None, 0, 0), o
@@ -478,3 +480,83 @@ def test_the_links_route_meets_the_read_gate_as_the_ban_list_does(monkeypatch, m
         A.install_key(None)
     assert out["lst"] == 200 and out["lnk"] == (200, out["sid"]), out
     assert out["bad_list"] == out["bad"] == 403, out
+
+
+def test_every_count_counts_a_deleted_account_and_names_none(monkeypatch):
+    """H2: a deleted account linked to the banned one is named nowhere and
+    counted everywhere as one account: in a row's others (address and
+    family_borrower), in links_total, and in the list's links."""
+    out = {}
+
+    async def body(env):
+        BR._open(env)
+        _keyed(env)
+        await _notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b = await env.player("Count Banned")
+            await BR._ban(c, admin, b.sid)
+            live, gone, lent, lent_gone = (await env.player("Count Live"), await env.player("Count Gone"),
+                                           await env.player("Count Lent"), await env.player("Count Lent Gone"))
+            await _marker(env, b.sid, "c-home", "c-blk", 1)
+            await _marker(env, live.sid, "c-home", "c-blk", 1)
+            await _marker(env, gone.sid, "c-home", "c-blk", 2)
+            await _share(env, lent.sid, _account(b.sid), 1)
+            await _share(env, lent_gone.sid, _account(b.sid), 2)
+            for p in (gone, lent_gone):
+                await env.conn.execute("UPDATE players SET deleted_at = now() WHERE steam_id = $1", p.sid)
+            r = await _links(c, admin, b.sid)
+            lst = (await BR._list(c, admin)).json()
+            out.update(status=r.status_code, body=r.json(), text=r.text, lst=lst,
+                       ids={k: p.sid for k, p in (("b", b), ("live", live), ("gone", gone), ("lent", lent),
+                                                  ("lent_gone", lent_gone))})
+    try:
+        case(monkeypatch, body, prefix="banlnk")
+    finally:
+        A.install_key(None)
+    a, ids = out["body"], out["ids"]
+    assert out["status"] == 200, out
+    by = {(e["how"], e["linked_steam_id"]): e for e in a["links"]}
+    assert set(by) == {("address", ids["live"]), ("family_borrower", ids["lent"])}, sorted(by)
+    assert by[("address", ids["live"])]["others"] == 1, by
+    assert by[("family_borrower", ids["lent"])]["others"] == 1, by
+    assert a["links_total"] == 4, a
+    for k in ("gone", "lent_gone"):
+        assert ids[k] not in out["text"], k
+    row = next(e for e in out["lst"]["bans"] if e["steam_id"] == ids["b"])
+    assert row["links"] == 4, row
+
+
+def test_a_lender_that_matches_no_live_account_is_neither_named_nor_counted(monkeypatch):
+    """Q1 (ruling of fix 1): the banned account borrows its copy from a
+    lender. Control first: with the lender's players row live the answer
+    names it (family_lender) and counts it. With the row deleted it is
+    neither named nor counted: the stored code is one-way and cannot tell
+    a deleted account from one that never played."""
+    out = {}
+
+    async def body(env):
+        BR._open(env)
+        _keyed(env)
+        await _notice(env)
+        admin = await BR._admin(env)
+        async with BR._client(env) as c:
+            b = await env.player("Lender Banned")
+            await BR._ban(c, admin, b.sid)
+            lender = await env.player("Lender Gone")
+            await _share(env, b.sid, _account(lender.sid), 1)
+            before = await _links(c, admin, b.sid)
+            await env.conn.execute("UPDATE players SET deleted_at = now() WHERE steam_id = $1", lender.sid)
+            after = await _links(c, admin, b.sid)
+            lst = (await BR._list(c, admin)).json()
+            out.update(before=before.json(), after=after.json(), text=after.text, lst=lst, b=b.sid, lender=lender.sid)
+    try:
+        case(monkeypatch, body, prefix="banlnk")
+    finally:
+        A.install_key(None)
+    got = [(e["how"], e["linked_steam_id"]) for e in out["before"]["links"]]
+    assert got == [("family_lender", out["lender"])] and out["before"]["links_total"] == 1, out["before"]
+    assert out["after"]["links"] == [] and out["after"]["links_total"] == 0, out["after"]
+    assert out["lender"] not in out["text"]
+    row = next(e for e in out["lst"]["bans"] if e["steam_id"] == out["b"])
+    assert not row["links"], row

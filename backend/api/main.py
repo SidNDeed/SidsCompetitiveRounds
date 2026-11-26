@@ -89563,8 +89563,12 @@ async def _ban_region_word() -> str:
 # family_shared, family_lender, family_borrower; inside each the lane's order;
 # a block row of an account already shown by address is left out; at most 50.
 # Only current players are named (the lane's reads join players with no
-# deletion stamp): a deleted linked account stands in no row; it is counted
-# only in another row's `others`. No mark, key id, code or address leaves.
+# deletion stamp): a linked account with no live players row stands in no
+# row, and every count counts it as one account: a row's `others`, the
+# borrowers' `others` (the head's gone_borrowers), links_total (the head's
+# gone) and the list's `links`. A lender with no live players row cannot be
+# resolved (its mark is computed from live candidates): neither named nor
+# counted. No mark, key id, code or address leaves.
 _ALT_BAN_OWN_DAYS = 36500        # the banned subject's own side: no window while the ban stands
 _ALT_BAN_LINKS_SHOWN = 50
 _ALT_BAN_REGIONS_SHOWN = 20
@@ -89603,23 +89607,46 @@ def _alt_lender_seen(mine, found, own_days) -> dict:
     return {"last_seen": {s: _alt_iso(at) for s, at in seen.items()}}
 
 # The links route's second statement: the active ban, the notice with both
-# sentences, and the newest regions, in one read (a cross join of one row
-# with at most 20; no LATERAL).
+# sentences, the linked accounts with no live players row (gone: by block,
+# which holds every address link, by a shared lender and as borrowers of the
+# account's copy, in alt_relations' windows; gone_borrowers: the borrowers
+# alone), and the newest regions, in one read (a cross join of one row with
+# at most 20; no LATERAL).
 _BAN_LINKS_HEAD_SQL = (
-    "SELECT b.banned, b.notice, r.region, r.conn_class, r.first_at, r.last_at FROM ("
+    "SELECT b.banned, b.notice, b.gone, b.gone_borrowers, r.region, r.conn_class, r.first_at, r.last_at FROM ("
     " SELECT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = CAST(:sid AS text) AND {active}) AS banned,"
     " (SELECT count(*) = 1 AND count(*) FILTER (WHERE p.posted_revision = p.revision"
     " AND strpos(p.content, CAST(:sentence AS text)) > 0) = 1"
-    " FROM pending_channel_posts p WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1) AS notice) b"
+    " FROM pending_channel_posts p WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1) AS notice,"
+    " (SELECT count(DISTINCT g.other) FROM ("
+    " SELECT o.steam_id AS other FROM conn_markers s JOIN conn_markers o"
+    " ON o.key_id = s.key_id AND o.block_mark = s.block_mark"
+    " WHERE s.steam_id = CAST(:sid AS text) AND s.last_at >= now() - make_interval(days => CAST(:ow AS integer))"
+    " AND o.steam_id <> CAST(:sid AS text) AND o.last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " UNION SELECT f.steam_id FROM steam_family_shares m JOIN steam_family_shares f"
+    " ON f.key_id = m.key_id AND f.owner_mark = m.owner_mark"
+    " WHERE m.steam_id = CAST(:sid AS text) AND m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))"
+    " AND f.steam_id <> CAST(:sid AS text) AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " UNION SELECT f.steam_id FROM steam_family_shares f WHERE f.key_id = CAST(:kid AS text)"
+    " AND f.owner_mark = CAST(:om AS bytea) AND f.steam_id <> CAST(:sid AS text)"
+    " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))) g"
+    " WHERE NOT EXISTS (SELECT 1 FROM players p WHERE p.steam_id = g.other AND p.deleted_at IS NULL)) AS gone,"
+    " (SELECT count(DISTINCT f.steam_id) FROM steam_family_shares f WHERE f.key_id = CAST(:kid AS text)"
+    " AND f.owner_mark = CAST(:om AS bytea) AND f.steam_id <> CAST(:sid AS text)"
+    " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " AND NOT EXISTS (SELECT 1 FROM players p WHERE p.steam_id = f.steam_id AND p.deleted_at IS NULL))"
+    " AS gone_borrowers) b"
     " LEFT JOIN (SELECT x.region, x.conn_class, x.first_at, x.last_at FROM ban_regions x"
     " WHERE x.steam_id = CAST(:sid AS text) ORDER BY x.last_at DESC, x.region, x.conn_class"
     " LIMIT CAST(:n AS integer)) r ON true"
     " ORDER BY r.last_at DESC NULLS LAST, r.region, r.conn_class")
 
 
-def _ban_links_rows(rel: dict) -> tuple:
-    """(rows in the contract's order before the cut, the count of rows
-    before every cap) from alt_relations' answer read with own_days."""
+def _ban_links_rows(rel: dict, gone_borrowers: int = 0) -> tuple:
+    """(rows in the contract's order before the cut, the count of the
+    current players' rows before every cap) from alt_relations' answer read
+    with own_days; `gone_borrowers` (borrowers with no live players row) is
+    counted in each family_borrower row's others."""
     rows, seen = [], set()
 
     def day(v):
@@ -89641,7 +89668,7 @@ def _ban_links_rows(rel: dict) -> tuple:
                      "last_day": day(owner["last_seen"].get(s)), "others": 0})
     lends = fam["lends_to"]
     if "related" in lends:
-        further = max(0, len(lends["related"]) + lends["more"] - 1)
+        further = max(0, len(lends["related"]) + lends["more"] + max(0, int(gone_borrowers)) - 1)
         for e in lends["related"]:
             rows.append({"linked_steam_id": e["steam_id"], "how": "family_borrower", "days": None,
                          "last_day": day(e["last_seen_at"]), "others": further})
@@ -89674,15 +89701,18 @@ async def admin_ban_links(
     sid = str(target_steam_id)
     if not (sid.isascii() and sid.isdigit() and 1 <= len(sid) <= 20):
         raise HTTPException(status_code=404, detail="no_active_ban")
+    key = _alt_signals.loaded_key()
     try:
         await _alt_limits(db, _ALT_BAN_LINKS_LOCK_MS, _ALT_BAN_LINKS_STATEMENT_MS)
         head = (await db.execute(text(_BAN_LINKS_HEAD_SQL.format(active=player_ban_active_sql("pb"))), {
             "sid": sid, "sentence": _alt_signals.NOTICE_BAN, "ch": _ALT_FAQ_CHANNEL,
-            "n": _ALT_BAN_REGIONS_SHOWN})).mappings().all()
+            "n": _ALT_BAN_REGIONS_SHOWN, "ow": _ALT_BAN_OWN_DAYS, "w": _alt_signals.DUE_DAYS,
+            "kid": key.key_id if key is not None else "",
+            "om": _alt_signals.account_mark(key.secret, sid) if key is not None else b""})).mappings().all()
         if not head or not head[0]["banned"]:
             raise _AltNotRecorded("no_active_ban")
         rel = await alt_relations(db, sid, own_days=_ALT_BAN_OWN_DAYS)
-        rows, total = _ban_links_rows(rel)
+        rows, total = _ban_links_rows(rel, int(head[0]["gone_borrowers"]))
         shown = rows[:_ALT_BAN_LINKS_SHOWN]
         ids = sorted({r["linked_steam_id"] for r in shown})
         names = dict((await db.execute(text(
@@ -89706,7 +89736,7 @@ async def admin_ban_links(
         "links": [{"linked_steam_id": r["linked_steam_id"], "linked_name": names.get(r["linked_steam_id"]) or "",
                    "how": r["how"], "days": r["days"], "last_day": r["last_day"], "others": r["others"]}
                   for r in shown],
-        "links_total": max(total, len(rows)),
+        "links_total": max(total, len(rows)) + int(head[0]["gone"]),
     }
 
 
@@ -89714,8 +89744,9 @@ async def admin_ban_links(
 # ONE statement (_BAN_LIST_ALT_SQL) inside a savepoint that sets the lane's
 # limits and is rolled back after the read (the limits end with it). Per page
 # id: the newest region and its time, the count of distinct regions, the
-# current players linked by block (an address shared is a block shared),
-# by a shared lender and as borrowers of the account's copy, and the lender
+# accounts linked by block (an address shared is a block shared), by a
+# shared lender and as borrowers of the account's copy, each counted once
+# whether or not it has a live players row (never named), and the lender
 # marks of the account's own share rows under the loaded key; on the first
 # row only, the current players' ids when any page id holds such a mark, so
 # that the lenders resolve as alt_relations resolves them. Windows as the
@@ -89746,7 +89777,7 @@ _BAN_LIST_ALT_SQL = (
     " WHERE f.steam_id <> ids.sid AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))),"
     " lk AS (SELECT u.sid, array_agg(DISTINCT u.other) AS linked FROM ("
     " SELECT sid, other FROM nb UNION SELECT sid, other FROM sh UNION SELECT sid, other FROM br) u"
-    " JOIN players p ON p.steam_id = u.other AND p.deleted_at IS NULL GROUP BY u.sid),"
+    " GROUP BY u.sid),"
     " fl AS (SELECT m.steam_id AS sid, array_agg(DISTINCT m.owner_mark) AS marks FROM steam_family_shares m"
     " JOIN ids ON ids.sid = m.steam_id WHERE m.key_id = CAST(:kid AS text)"
     " AND m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer)) GROUP BY m.steam_id)"
