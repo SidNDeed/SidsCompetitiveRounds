@@ -2402,6 +2402,65 @@ FAQ_ENTRIES = [
                   "500 XP base a game times win/solo/handicap/tier bonuses; 40g/20g series gold "
                   "scaled by opponent tier."),
     },
+    {
+        # CHEAT-ALT-1: what the server may record at sign-in. Last in the list
+        # on purpose: the first regex hit wins, so this entry takes no message
+        # an older entry's patterns match. The answer carries the last
+        # paragraph of FAQ message 1 verbatim (alt_signals.DISCLOSURE in the
+        # api, which this process cannot import); the api's surface tests hold
+        # the copies equal and keep every older entry's examples routed where
+        # they were.
+        "key": "recorded",
+        "title": "What the server records at sign-in",
+        "patterns": [
+            # What is recorded or collected about a player.
+            r"\bprivacy\b",
+            r"\b(what|which|any)\b[^.?!]{0,20}\b(data|info|information|details)\b[^.?!]{0,30}"
+            r"\b(collect(s|ed|ing)?|stor(e|es|ed|ing)|record(s|ed|ing)?|keep(s|ing)?|kept|log(s|ged|ging)?"
+            r"|track(s|ed|ing)?|gather(s|ed|ing)?|sav(e|es|ed|ing))\b",
+            r"\bwhat\b[^.?!]{0,20}\b(do|does|is|are|will)\b[^.?!]{0,15}\b(you|mod|server|scr|bot)\b[^.?!]{0,10}"
+            r"\b(record|recorded|store|stored|collect|collected|log|logged|track|tracked|keep|save|saved)\b"
+            r"[^.?!]{0,10}\b(about (me|us|players|my account)|when (i|you) (sign|log) ?in|at (sign|log) ?in)\b",
+            r"\b(do|does|will|is|are)\b[^.?!]{0,20}\b(you|mod|server|scr|bot|it)\b[^.?!]{0,15}"
+            r"\b(collect(s|ed|ing)?|stor(e|es|ed|ing)|record(s|ed|ing)?|keep(s|ing)?|kept|log(s|ged|ging)?"
+            r"|track(s|ed|ing)?|gather(s|ed|ing)?|sav(e|es|ed|ing))\b[^.?!]{0,15}"
+            r"\b(my|our|any|personal|player) (personal )?(data|info|information|details)\b",
+            r"\b(my|our|personal|player) (data|info|information|details)\b[^.?!]{0,20}"
+            r"\b(stored|kept|recorded|logged|collected|saved|tracked)\b",
+            # Internet addresses.
+            r"\b(stor(e|es|ed|ing)|record(s|ed|ing)?|log(s|ged|ging)?|track(s|ed|ing)?|collect(s|ed|ing)?"
+            r"|sav(e|es|ed|ing)|keep(s|ing)?|kept)\b[^.?!]{0,30}\b(ip|ips|ip address(es)?|internet address(es)?)\b",
+            r"\b(ip|ips|ip address(es)?|internet address(es)?)\b[^.?!]{0,25}"
+            r"\b(stored|recorded|logged|tracked|collected|saved|kept)\b",
+            # Family sharing and VAC, asked as what the server checks or records.
+            r"\b(check(s|ed|ing)?|record(s|ed|ing)?|detect(s|ed|ing)?|track(s|ed|ing)?|log(s|ged|ging)?"
+            r"|stor(e|es|ed|ing))\b[^.?!]{0,30}\b(family ?shar(e|ed|ing)|vac( bans?| banned| status)?)\b",
+            r"\b(family ?shar(e|ed|ing)|vac( bans?| banned| status)?)\b[^.?!]{0,25}"
+            r"\b(checked|recorded|detected|tracked|logged|stored)\b",
+        ],
+        "examples": ["what data does the mod collect", "does the server store my ip address",
+                     "is my ip address logged", "what do you record when i sign in",
+                     "does the mod check family sharing", "does the mod check vac bans",
+                     "what is your privacy policy"],
+        "answer": (
+            "**What the server may record at sign-in, for fair-play review:** what Steam reports about "
+            "your account, namely whether your copy of ROUNDS is owned or borrowed through Steam Family "
+            "Sharing (for a borrowed copy, a keyed one-way code of the lending account, never its id) and "
+            "whether the account has a VAC ban or a game ban; and from your connection, keyed one-way "
+            "codes of your internet address and of its network block (never the address itself), whether "
+            "it is IPv4 or IPv6, and its connection class, such as VPN or hosting. With these go the "
+            "times each was first and last seen, and on how many days a storage limit was reached. "
+            "Each record is deleted no later than 90 days after it was last seen, and at once if you delete "
+            "your account. For a banned account the server also records the rough region of its connection "
+            "(country and state) and keeps these records until the ban has ended.\n"
+            f"The same text closes the first FAQ message in {FAQ_INFO_CHANNEL}."),
+        # KEEP UNDER ~460 CHARS: _post_ingame_chat hard-cuts at 490.
+        "short": ("At sign-in the server may record what Steam reports about your account (an owned or "
+                  "Family-Shared copy, a VAC or game ban) and keyed one-way codes of your connection's "
+                  "address and network block, never the address itself, with when each was seen. "
+                  "Each record is deleted no later than 90 days after it was last seen, and at once if "
+                  "you delete your account. Full text: the first FAQ message on the Discord server."),
+    },
 ]
 
 for _e in FAQ_ENTRIES:

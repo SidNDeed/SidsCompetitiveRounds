@@ -16,7 +16,7 @@ sweep of every production statement that sets a setting, and, on the
 cluster CF_TEST_PG_DSN names (never skipped), the pg_settings answer itself,
 the GREEN control (a transaction-local set_config inside an ended
 transaction leaves nothing) and its session-scope counterpart. The driver
-controls (the report's case at main.py:17985 and one control per route) are
+controls (the report's case at main.py:18705 and one control per route) are
 in test_r8_ro_covered_pg.py.
 """
 
@@ -204,9 +204,21 @@ def test_r11_res_sweep_production_settings_statements():
     # interpolated, never a request input; lock_timeout is a literal name,
     # already measured. The count moves from 25 to 27 for these two and no
     # other reason.
+    # Judged, +1 (CHEAT-ALT-1): the alternate-account signals' time limits,
+    # main._ALT_LIMITS_SQL, two set_config calls with is_local the literal
+    # true and the literal names lock_timeout and statement_timeout (values
+    # bound as text), run by main._alt_limits as the first statement of each
+    # transaction it bounds: the recording's own transaction, which begins
+    # after the sign-in's commit, each batch of the retention pass, and the
+    # pass's count of the due rows left. No commit stands between it and the
+    # statements it bounds. The count moves from 24 to 25 for this one and no
+    # other reason.
+    # CHEAT-ALT-1 merged onto main f1460a11 (24 Nov 2026): 27 + 1 = 28. Its
+    # text binds CAST(:st AS text), so the list of the `:st,` texts below
+    # stays main._DELETION_ARM_SQL alone.
     assert names == {"lock_timeout", "statement_timeout",
                      "idle_in_transaction_session_timeout", "synchronous_commit"}, names
-    assert len(got) == 27, got
+    assert len(got) == 28, got
     assert [sql for _w, sql in got if "'statement_timeout', :st," in sql] == [
         "SELECT set_config('lock_timeout', :lt, true), "
         "set_config('statement_timeout', :st, true)"], got

@@ -3942,7 +3942,7 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
 # re-derivation; FROZEN_COUNT is 898 after the stack's block above (890 on the lane alone).
 MDPL_FROZEN = {
     'api/main.py': [
-        # main.py:46855, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
+        # main.py:47575, the docstring of _deletion_arm_every_statement, prose matched by the word PostgreSQL;
         #  it holds no DSN
         ('dsntext', ('MDPL r1, the hold-time figure; r2 HIGH 1, one armed path. For the\n'
                      "    length of one attempt, every statement the attempt's connection sends\n"
@@ -3983,7 +3983,7 @@ MDPL_FROZEN = {
                      '    most until its deadline (at most _DELETION_BUDGET_S after arrival)\n'
                      "    plus one arming's round trip, then its rollback. Returns the undo,\n"
                      '    which the bound runs when the attempt ends.')),
-        # main.py:47140, the docstring of _deletion_bounded, prose matched by the word PostgreSQL; it holds no
+        # main.py:47860, the docstring of _deletion_bounded, prose matched by the word PostgreSQL; it holds no
         #  DSN
         ('dsntext', ("The account deletion's bound (MDPL R6). The whole transaction runs\n"
                      '    again from fresh reads when PostgreSQL ends it as a deadlock victim or\n'
@@ -4000,7 +4000,7 @@ MDPL_FROZEN = {
                      '    round trip. Used up: 503 account_cleanup_contended with nothing written;\n'
                      '    the client\'s line reads "Deletion failed", which is true, and a second\n'
                      "    click starts afresh. FastAPI reads the wrapped function's signature.")),
-        # main.py:46821, the docstring of _deletion_signal_of, prose matched by the word PostgreSQL; it holds
+        # main.py:47541, the docstring of _deletion_signal_of, prose matched by the word PostgreSQL; it holds
         #  no DSN
         ('dsntext', ("The deletion's signal for a PostgreSQL error inside an attempt, or\n"
                      '    None when the error is not one of its two timeouts: a 57014\n'
@@ -4008,20 +4008,20 @@ MDPL_FROZEN = {
                      '    deadline has passed, is _DeletionPastDeadline; a 55P03 before it is a\n'
                      '    lock wait that reached _DELETION_WAIT_CAP_S, a held row or key\n'
                      '    (_DeletionRowHeld).')),
-        # main.py:46845, _deletion_listen: SQLAlchemy's event module, to add the before_cursor_execute
+        # main.py:47565, _deletion_listen: SQLAlchemy's event module, to add the before_cursor_execute
         #  listener that arms one attempt's statements on that attempt's own connection
         ('import', 'from sqlalchemy import event'),
-        # main.py:46850, _deletion_unlisten: the same module, to remove that listener
+        # main.py:47570, _deletion_unlisten: the same module, to remove that listener
         ('import', 'from sqlalchemy import event'),
     ],
     'api/main.py#complete': [
-        # main.py:47018, `getattr(db, "__dict__", {})` in the attempt's undo: the session's own instance
+        # main.py:47738, `getattr(db, "__dict__", {})` in the attempt's undo: the session's own instance
         #  attributes, so that only the methods the attempt set are taken back
         ('alias', 'str __dict__'),
-        # main.py:47021, the undo removes a method the attempt set, only while the session still holds that
+        # main.py:47741, the undo removes a method the attempt set, only while the session still holds that
         #  same function
         ('dynamic', 'delattr(db, name)'),
-        # main.py:47015, puts the attempt's armed flush, commit and begin_nested on the session
+        # main.py:47735, puts the attempt's armed flush, commit and begin_nested on the session
         ('dynamic', 'setattr(db, name, fn)'),
     ],
     'tests/closed_walk.py#complete': [
@@ -4114,3 +4114,52 @@ FROZEN_COUNT = (COARSE_COUNT + COMPLETE_COUNT + R10_COUNT + R10_MERGE_COUNT
                 + MAIL_SEND_RECEIPTS_COUNT + LOBBY_INVITES_COUNT + MODLOG_COUNT
                 + BOT_TEXT_ESCAPE_COUNT + QAPPLY_COUNT + BAN_SWEEP_COUNT + MDPL_COUNT
                 + BAN_RECORD_COUNT)
+# On the merge of main e2b485d9 into ALT-BAN-1 (25 Nov 2026) the lane's two blocks below stand
+# after BAN_RECORD's, so that their FROZEN_COUNT assignment stays the file's last: 906 + 0 + 0 = 906.
+# CHEAT-ALT-1 (22 Nov 2026, finding R2-7): api/alt_signals.py joins
+# CENSUS_FILES (main.py imports it). Its forms, reviewed by hand: none in
+# either layer (it imports hashlib, hmac, ipaddress, re and
+# collections.namedtuple under private names, and no driver, engine,
+# session, URL or opener form). The
+# derivation: 873 + 0 + 0 = 873. Frozen by hand as two empty entries, so a
+# form that appears in it later is a '+' row of the diff.
+# On the lane's merge of main f1460a11 (24 Nov 2026) this block stands after the stack's: 904 + 0 + 0 = 904.
+ALT_SIGNALS_FROZEN = {'api/alt_signals.py': [], 'api/alt_signals.py#complete': []}
+ALT_SIGNALS_COUNT = 0
+for _k, _v in ALT_SIGNALS_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = FROZEN_COUNT + ALT_SIGNALS_COUNT
+# The complete layer's two keyed tables cover every CENSUS_FILES entry too.
+COMPLETE_FROZEN.setdefault('api/alt_signals.py#complete', [])
+R10_FROZEN.setdefault('api/alt_signals.py#complete', [])
+# ALT-BAN-1 (24 Nov 2026): api/geo_region.py joins CENSUS_FILES (main.py
+# imports it). Its forms, reviewed by hand and measured by ro_census.file_forms:
+# none in either layer (it imports datetime, ipaddress, os and stat under
+# private names and opens one local file read-only by os.open; no driver,
+# engine, session, URL or connection opener). The derivation: 904 + 0 = 904.
+# Frozen by hand as two empty entries, so a form that appears in it later is a
+# '+' row of the diff.
+GEO_REGION_FROZEN = {'api/geo_region.py': [], 'api/geo_region.py#complete': []}
+GEO_REGION_COUNT = 0
+for _k, _v in GEO_REGION_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = FROZEN_COUNT + GEO_REGION_COUNT
+COMPLETE_FROZEN.setdefault('api/geo_region.py#complete', [])
+R10_FROZEN.setdefault('api/geo_region.py#complete', [])
+# ALT-BAN-1 turn 2 (the integrator's ADD2 point 2(a), 26 Nov 2026): one dsntext form of api/main.py,
+# admitted by name. main.py _steam_ticket_url, the text its f-string begins with:
+# 'https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/?key='. The judgement: the
+# https address of an outside web service, read by the sign-in's ticket check (the Steam helper of
+# ALT-BAN-1 builds the URL steam_auth builds, the same text a second time); not a database address,
+# and nothing a connection is built from. The lane's step 4 commit added it and froze none. Frozen by
+# hand, not by a re-derivation; FROZEN_COUNT is 907 after this block (906 before it).
+ALT_BAN_STEAM_FROZEN = {
+    'api/main.py': [
+        # main.py _steam_ticket_url: the ticket check's URL, as steam_auth builds it
+        ('dsntext', 'https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/?key='),
+    ],
+}
+ALT_BAN_STEAM_COUNT = 1
+for _k, _v in ALT_BAN_STEAM_FROZEN.items():
+    FROZEN[_k] = list(FROZEN.get(_k, [])) + list(_v)
+FROZEN_COUNT = FROZEN_COUNT + ALT_BAN_STEAM_COUNT

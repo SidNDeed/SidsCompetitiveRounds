@@ -6,7 +6,7 @@ Red on a new statement that waits for a players row (a new site), a new entry
 that reaches a site, a changed class, a changed step 1 (the deletion's own
 waits) or a new statement whose SQL text the reader cannot read. Every READ
 site carries its judgement by hand, every unread statement its reason, and
-the premises of the two unread judgements are read here. A planted route of
+the premises of every unread judgement are read here. A planted route of
 each class is classed as it must be, with a planted route that holds nothing
 as the negative control. Two mutants of the source move a frozen site: a
 route that drops its identity key changes the site's class, and a new route
@@ -256,6 +256,21 @@ def test_the_unread_judgements_premises_hold(src):
         if name.endswith(".py") and name != "review_measures.py":
             body = open(os.path.join(mc.API, name), encoding="utf-8").read()
             assert not re.search(r"Entry\(\s*[\"']sitting[\"']|sitting_operator\(", body), name
+    # alt_relations: both statements are text(_alt_relation_sql(<literal>)); the
+    # helper refuses any column but addr_mark and block_mark and returns
+    # _ALT_RELATION_SQL with {mark} replaced; neither text locks or writes.
+    alt_calls = [n for n in mc.ast.walk(src.tree)
+                 if isinstance(n, mc.ast.Call) and getattr(n.func, "id", "") == "_alt_relation_sql"]
+    assert sorted(mc.ast.literal_eval(c.args[0]) for c in alt_calls) == ["addr_mark", "block_mark"], \
+        [mc.ast.unparse(c) for c in alt_calls]
+    (helper,) = [n for n in src.tree.body if isinstance(n, mc.ast.FunctionDef) and n.name == "_alt_relation_sql"]
+    assert [mc.ast.unparse(s) for s in helper.body] == [
+        "if mark_column not in ('addr_mark', 'block_mark'):\n    raise ValueError(mark_column)",
+        "return _ALT_RELATION_SQL.replace('{mark}', mark_column)"], mc.ast.unparse(helper)
+    alt_sql = mc.ast.literal_eval(assigns["_ALT_RELATION_SQL"])
+    assert "{mark}" in alt_sql
+    for col in ("addr_mark", "block_mark"):
+        assert not rx.search(alt_sql.replace("{mark}", col)), col
 
 
 def _numbered_migrations():

@@ -93,6 +93,22 @@ same 382 (QDIG-1), the stack adds thirteen (382 -> 395) and the account
 deletion lane five (382 -> 387), and no function is counted by both, so
 382 + 13 + 5 = 400, as main._janitor_sql_from_sources measures the merged
 tree.
+
+CHEAT-ALT-1 reads 400 and 0: its retention pass (main.alt_signals_retention_loop,
+a janitor root) reaches five statements, its time limits (main._alt_limits,
+the one text of main._ALT_LIMITS_SQL), one DELETE per table in
+main._alt_retention_batch and the count of the due rows left in
+main._alt_retention_left, and no function is counted twice (395 + 5 = 400).
+
+With CHEAT-ALT-1 merged onto main f1460a11 (24 Nov 2026) the tree reads 405
+and 0: both counted from the same 395, main with the account deletion lane
+five more (400) and CHEAT-ALT-1 five more (400), and no function is counted
+by both, so 395 + 5 + 5 = 405, as main._janitor_sql_inventory() measures the
+merged tree.
+
+ALT-BAN-1 (step 5) on that tree reads 408 and 0: the retention pass reaches
+three statements more, the two DELETEs of main._ban_retention_batch (regions,
+notices) and the count of main._ban_retention_left, so 405 + 3 = 408.
 """
 import asyncio
 import os
@@ -108,7 +124,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 import main  # noqa: E402
 import models  # noqa: E402
 
-STATEMENTS, DYNAMIC = 400, 0   # 395 the stack alone, 387 the account deletion lane alone, 382 before both, 371 before QDIG-1 (see the module docstring)
+STATEMENTS, DYNAMIC = 408, 0   # 405 before ALT-BAN-1's step 5, 400 the stack and the account deletion lane, 400 CHEAT-ALT-1 alone, 395 the stack alone, 387 the account deletion lane alone, 382 before both, 371 before QDIG-1 (see the module docstring)
 ROOT = (("main", "root"),)
 DEF = re.compile(r"\((\w+)\.unbanned_at IS NULL AND \(\1\.expires_at IS NULL OR \1\.expires_at > NOW\(\)\)\)")
 # the sites that were dynamic on 88a0a2bf, and the alias each one's definition call names

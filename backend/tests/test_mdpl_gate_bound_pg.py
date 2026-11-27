@@ -651,14 +651,14 @@ _ORDER_CASES = {
     "a compound statement planted between the deletion key and the read of P": (
         '    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()\n'
         '    if player is None:\n'
-        '        return {"status": "not_found", "steam_id": steam_id}',
+        '        await _alt_delete_account(db, steam_id)',
         '    try:\n'
         '        pass\n'
         '    finally:\n'
         '        pass\n'
         '    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()\n'
         '    if player is None:\n'
-        '        return {"status": "not_found", "steam_id": steam_id}'),
+        '        await _alt_delete_account(db, steam_id)'),
     "the ban read under the two keys taken out": (_BAN_READ_LINE, ""),
     "the ban read put before the deletion key": (
         _DELETION_KEY_LINE + _BAN_READ_LINE, _BAN_READ_LINE + _DELETION_KEY_LINE),

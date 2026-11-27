@@ -341,9 +341,21 @@ _ITEM_ANCHORS = ("backend/tests/test_faq_surfaces.py",
 # the bullet's last sentence. Those are that lane's and ship under its
 # review; they are not this item's to sweep or to hand back. A named commit
 # must be one the log lists, so the record cannot outlive the commit it names.
+# ALT-BAN-1's sentence commit (the third) changed only this module's docstring
+# beside its own files (alt_signals.py, the disclosure map and its test, the
+# bot's answer, docs/FAQ.md): that lane's, under its review. ALT-BAN-1's
+# step 3 commit changed this module (the record of the sentence commit above)
+# beside main.py, docs/FAQ.md and six files of that lane's own: the /health
+# schema (schemas.py), the region folder's mount (docker-compose.yml), the
+# read-only census's freeze and its test (ro_census_frozen.py,
+# test_r7_ro_role_pg.py), the health word's test and the lane's literal scan
+# (test_alt_ban_build_health_word.py, test_alt_signals_pure.py): that lane's,
+# under its review.
 _OTHER_LANE_COMMITS = (
     "f683d3440dc006981401d5637204767523f6809d",
     "7675e46c7b78c207b72407c1310cb59d6ad908e7",
+    "6fd013f79bc618daf6c7f970cb9d87df5445ad79",
+    "d0b52e280909661d264ed646c72ce4c8684c80d3",
 )
 
 # A DRIVE-LETTER PATH, any of them and not only one under a home directory: a
@@ -1321,7 +1333,7 @@ def test_the_privacy_oracle_is_the_pre_push_hook():
         "is created without that hook running at all")
 
 
-# ── 4. docs/FAQ.md and the migration that posts it cannot drift ──────────────
+# ── 4. docs/FAQ.md and the migrations that post it cannot drift ─────────────
 
 _SECTION = re.compile(r"^## Message (\d+)[^\n]*$", re.M)
 
@@ -1331,24 +1343,84 @@ def _faq_sections():
     return [(int(parts[i]), parts[i + 1].strip()) for i in range(1, len(parts), 2)]
 
 
-def test_faq_md_matches_migration_338():
-    """Migration 338 carries docs/FAQ.md's six sections as the text the bot
-    edits into #scr-faq. Before 338 the only way to correct a posted message
-    was to append a new one under the wrong text (134's Part C), and the doc
-    and the channel had already diverged. Nothing enforces the copy, so this
-    does."""
-    sql = _read(MIGRATION)
+_NUMBERED_MIGRATION = re.compile(r"^(\d+)_.*\.sql$")
+
+
+def _sql_files():
+    d = os.path.join(REPO, "backend", "sql")
+    return {name: _read(os.path.join(d, name))
+            for name in os.listdir(d) if name.endswith(".sql")}
+
+
+def _faq_carriers(files):
+    """{N: (file name, body)}: for each message number N, the NEWEST numbered
+    migration among `files` ({name: text}) that carries a $faqN$ literal,
+    and the body it carries. A rollback or resume file is not numbered and
+    never counts. Two files of the newest number carrying it, or one file
+    carrying two such literals, is an error, not a choice."""
+    found = {}
+    for name, text_ in files.items():
+        m = _NUMBERED_MIGRATION.match(name)
+        if not m:
+            continue
+        for n in set(re.findall(r"\$faq(\d)\$", text_)):
+            found.setdefault(int(n), {}).setdefault(int(m.group(1)), []).append(name)
+    out = {}
+    for n, by_number in found.items():
+        newest = max(by_number)
+        names = sorted(by_number[newest])
+        assert len(names) == 1, (
+            "two migrations numbered %d carry $faq%d$: %s" % (newest, n, names))
+        bodies = re.findall(r"\$faq%d\$(.*?)\$faq%d\$" % (n, n), files[names[0]], re.S)
+        assert len(bodies) == 1, (
+            "%s carries %d $faq%d$ literals" % (names[0], len(bodies), n))
+        out[n] = (names[0], bodies[0])
+    return out
+
+
+def test_faq_md_matches_the_newest_migration_carrying_each_message():
+    """docs/FAQ.md's six sections are the text the bot edits into #scr-faq,
+    and migrations carry it there: 338 wrote all six, and a later migration
+    that revises one message carries that message's new text (427 and then
+    431 revise message 1). For each section N, the NEWEST numbered migration carrying a
+    $faqN$ literal carries docs/FAQ.md's section N verbatim, at Discord's
+    2,000 characters or fewer. Before 338 the only way to correct a posted
+    message was to append a new one under the wrong text (134's Part C), and
+    the doc and the channel had already diverged. Nothing enforces the copy,
+    so this does."""
     sections = _faq_sections()
     assert [n for n, _ in sections] == [1, 2, 3, 4, 5, 6], (
         "docs/FAQ.md no longer has six '## Message N' sections: %s"
         % [n for n, _ in sections])
+    carriers = _faq_carriers(_sql_files())
+    assert sorted(carriers) == [1, 2, 3, 4, 5, 6], (
+        "the migrations carry messages %s, not the six" % sorted(carriers))
     for n, body in sections:
         assert len(body) <= 2000, (
             "message %d is %d chars; Discord truncates at 2000 and the bot "
             "sends content[:2000]" % (n, len(body)))
-        quoted = "$faq%d$%s$faq%d$" % (n, body, n)
-        assert quoted in sql, (
-            "migration 338 does not carry docs/FAQ.md's message %d verbatim" % n)
+        name, carried = carriers[n]
+        assert carried == body, (
+            "%s, the newest migration carrying message %d, does not carry "
+            "docs/FAQ.md's message %d verbatim" % (name, n, n))
+
+
+def test_the_newest_carrier_rule_can_fail():
+    """The carrier rule shown deciding: an older carrier with other text
+    does not stand in for the newest one, a newest carrier with one
+    character changed is read as changed, a rollback file never counts, and
+    two carriers of one number, or two literals in one file, are refused."""
+    body = _faq_sections()[0][1]
+    old, new = "$faq1$older text$faq1$", "$faq1$%s$faq1$" % body
+    assert _faq_carriers({"338_a.sql": old, "427_b.sql": new,
+                          "rollback_427_b.sql": old})[1] == ("427_b.sql", body)
+    assert _faq_carriers({"338_a.sql": new, "427_b.sql": old})[1] == ("427_b.sql", "older text")
+    changed = "$faq1$%s$faq1$" % (body[:-1] + ("!" if body[-1] != "!" else "?"))
+    assert _faq_carriers({"338_a.sql": new, "427_b.sql": changed})[1][1] != body
+    with pytest.raises(AssertionError, match="two migrations numbered 427"):
+        _faq_carriers({"427_a.sql": new, "427_b.sql": new})
+    with pytest.raises(AssertionError, match="carries 2"):
+        _faq_carriers({"427_b.sql": new + new})
 
 
 SEED_110 = os.path.join(REPO, "backend", "sql", "110_faq_channel_post.sql")

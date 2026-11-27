@@ -316,6 +316,9 @@ ADMIN_SIGNED: frozenset = frozenset({
     "/api/v1/admin/admins",
     "/api/v1/admin/alerts/list",
     "/api/v1/admin/banned-users",
+    # ALT-BAN-1: the linked accounts of a banned account; _require_admin with
+    # its own action word (ban_links) before any read, as the ban list above.
+    "/api/v1/admin/bans/links",
     "/api/v1/admin/cosmetic-frames",
     "/api/v1/admin/cosmetic-release-candidates",
     "/api/v1/admin/cosmetic-submissions",

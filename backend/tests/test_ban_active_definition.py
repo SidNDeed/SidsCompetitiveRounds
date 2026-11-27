@@ -26,6 +26,15 @@ scope needs as many markers of an alias as it holds occurrences of it. So
 two subqueries that share an alias cannot cover each other, and neither can
 an outer reader be covered by a marker inside a nested one.
 
+A module-level SQL template (fix 4, F4-C) is a constant bound once whose
+text names player_bans with str.format holes (`{active}`) and whose every
+use is `NAME.format(hole=player_ban_active_sql("<alias>"), ...)`: the
+definition stands at the call site, not in the constant. Each format call is
+then one reader, judged in its own function on the template's text with each
+hole a keyword fills with the definition replaced by that call's marker; a
+hole filled any other way stays a hole and its occurrence stays uncovered. A
+template used any other way is judged as written.
+
 A site that does not compare a ban's state at all (a writer, a lookup by id,
 a count of an admin's bans by time) is on ALLOWED, keyed by module and
 function, with the number of roots it holds and the reason. The counts are
@@ -228,13 +237,74 @@ def _tripwire(node):
     return None
 
 
+# A str.format hole of a template: {name}.
+HOLE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _templates(tree, parents):
+    """{id(value root): (template SQL, [format calls])} for the module-level
+    SQL templates (fix 4, F4-C): `NAME = <SQL naming player_bans with {hole}s>`,
+    NAME bound once in the module and every load of it `NAME.format(...)`
+    with keyword arguments only. The definition then stands at each call site
+    (`hole=player_ban_active_sql("<alias>")`), so each call is one reader,
+    judged in its own function with the template's text and each hole a
+    keyword fills with a direct call of the definition on a string-literal
+    alias replaced by that call's marker. A hole filled with any other value
+    (a name, an attribute, another call, a literal, a conditional) stays a
+    hole, so its occurrence stays uncovered (ruling Q1, condition 1). A
+    template with any other load (bare, %, a concatenation, a format with a
+    positional argument or **kwargs), or bound more than once, is judged as
+    written, as any other root (condition 2)."""
+    stores, loads = {}, {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                stores[node.id] = stores.get(node.id, 0) + 1
+            elif isinstance(node.ctx, ast.Load):
+                loads.setdefault(node.id, []).append(node)
+    out = {}
+    for stmt in tree.body:
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+            continue
+        name = stmt.targets[0].id
+        sql = _sql_text(stmt.value)
+        if stores.get(name) != 1 or not TABLE.search(sql) or not HOLE.search(sql):
+            continue
+        calls = []
+        for use in loads.get(name, []):
+            attr = parents.get(use)
+            call = parents.get(attr)
+            if not (isinstance(attr, ast.Attribute) and attr.attr == "format"
+                    and isinstance(call, ast.Call) and call.func is attr
+                    and not call.args and all(kw.arg is not None for kw in call.keywords)):
+                calls = None
+                break
+            calls.append(call)
+        if calls:
+            out[id(stmt.value)] = (sql, calls)
+    return out
+
+
+def _formatted(sql, call):
+    """The template's SQL as this format call fills it: each hole a keyword
+    names with a call to the definition becomes that call's marker."""
+    fill = {}
+    for kw in call.keywords:
+        alias = _definition_alias(kw.value)
+        if alias is not None:
+            fill[kw.arg] = " " + MARK + alias.encode().hex() + MARK + " "
+    return HOLE.sub(lambda m: fill.get(m.group(1), m.group(0)), sql)
+
+
 def scan_source(module, src):
     """(readers, orm): readers maps (module, qualname) to a list of
     (lineno, uncovered aliases, occurrences) per root; orm maps (module,
     qualname) to the line numbers of PlayerBan uses, and an unmodelled ORM
-    form is entered under ("<tripwire>", form) with its line."""
+    form is entered under ("<tripwire>", form) with its line. A module-level
+    template (_templates) is one reader per format call, at the call."""
     tree = ast.parse(src)
     parents = _parents(tree)
+    templates = _templates(tree, parents)
     readers, roots_seen, orm = {}, set(), {}
     for node in ast.walk(tree):
         trip = _tripwire(node)
@@ -247,6 +317,13 @@ def scan_source(module, src):
             if id(root) in roots_seen:
                 continue
             roots_seen.add(id(root))
+            if id(root) in templates:
+                tsql, calls = templates[id(root)]
+                for call in calls:
+                    sql = _formatted(tsql, call)
+                    readers.setdefault((module, _qualname(call, parents)), []).append(
+                        (call.lineno, uncovered(sql), len(occurrences(sql))))
+                continue
             sql = _sql_text(root)
             readers.setdefault((module, _qualname(node, parents)), []).append(
                 (root.lineno, uncovered(sql), len(occurrences(sql))))
@@ -327,6 +404,13 @@ def test_every_reader_of_player_bans_uses_the_one_definition(capsys):
     assert ("main.py", "_apply_ban_core") in readers and ("main.py", "_ban_set_length_core") in readers
     assert ("tournaments.py", "_player_id_banned") in readers
     assert ("main.py", "_is_banned") in readers
+    # fix 4, F4-C: the links answer and the notice pass read player_bans through four module-level
+    # templates (_BAN_LINKS_HEAD_SQL, _BAN_NOTICE_PAIR_FACTS, _BAN_NOTICE_CANDIDATE_SQL,
+    # _BAN_NOTICE_DUE_SQL); each format call is a reader of its own function, and none stays at <module>
+    assert len(readers[("main.py", "admin_ban_links")]) == 1
+    assert len(readers[("main.py", "_ban_notice_pair_tx")]) == 1
+    assert len(readers[("main.py", "ban_link_notice_pass")]) == 2
+    assert not [r for r in readers.get(("main.py", "<module>"), []) if r[1]]
 
 
 def test_the_definition_compares_the_end_on_the_database_clock():
@@ -423,6 +507,100 @@ def test_negative_control_each_shape_of_uncovered_occurrence_is_reported(shape):
     problems, counts = judge(readers, orm, whole_tree=False)
     assert problems == [("reader without the definition", ("planted.py", "planted"), 3, missing)], problems
     assert counts["occurrences"] == 2, counts
+
+
+# F4-C (ruling Q1): module-level templates filled by str.format at the call site. The covered
+# form, then one planted case per way the definition can be missing from the filled text, each
+# red under the walk; each case's body is green again with the definition inline in the constant
+# (TEMPLATE_INLINE, no hole), so the walk judges the template as it judges the inline form.
+TEMPLATE_HEAD = '''T = ("SELECT 1 FROM player_bans pb WHERE pb.steam_id = :s AND {active}"
+     " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = :o AND {active_o})")
+'''
+TEMPLATE_NOHOLE = '''T = ("SELECT 1 FROM player_bans pb WHERE pb.steam_id = :s AND pb.unbanned_at IS NULL"
+     " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = :o AND ob.unbanned_at IS NULL)")
+'''
+TEMPLATE_INLINE = '''T = ("SELECT 1 FROM player_bans pb WHERE pb.steam_id = :s AND " + player_ban_active_sql("pb")
+     + " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = :o AND " + player_ban_active_sql("ob") + ")")
+'''
+TEMPLATE_COVERED = TEMPLATE_HEAD + '''
+async def planted(db):
+    return await db.execute(text(T.format(
+        active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))))
+'''
+_AT_CALL = ("planted.py", "planted")
+_AS_WRITTEN = ("planted.py", "<module>")
+# shape -> (the constant, the body, the reported key, its line, the uncovered aliases)
+PLANTED_TEMPLATES = {
+    "both holes filled by other values (a literal, a name)": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T.format(active="pb.unbanned_at IS NULL", active_o=ACTIVE_O)))
+''', _AT_CALL, 5, ["ob", "pb"]),
+    "one hole by the definition, the other by a conditional": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T.format(active=player_ban_active_sql("pb"), active_o=("x" if db else "y"))))
+''', _AT_CALL, 5, ["ob"]),
+    "one hole by another call": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T.format(active=str(player_ban_active_sql("pb")), active_o=player_ban_active_sql("ob"))))
+''', _AT_CALL, 5, ["pb"]),
+    "one hole by an attribute": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T.format(active=models.ACTIVE, active_o=player_ban_active_sql("ob"))))
+''', _AT_CALL, 5, ["pb"]),
+    "one hole by the definition of the other alias": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T.format(active=player_ban_active_sql("ob"), active_o=player_ban_active_sql("ob"))))
+''', _AT_CALL, 5, ["pb"]),
+    "a template used bare": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+    "a template formatted with a positional argument": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T.format(player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+    "a template formatted with **kwargs": (TEMPLATE_HEAD, '''
+async def planted(db):
+    kw = {"active": player_ban_active_sql("pb")}
+    return await db.execute(text(T.format(**kw, active_o=player_ban_active_sql("ob"))))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+    "a template concatenated": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T + " LIMIT 1"))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+    "a template formatted with %": (TEMPLATE_HEAD, '''
+async def planted(db):
+    return await db.execute(text(T % ()))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+    "a template formatted and also read bare": (TEMPLATE_HEAD, '''
+async def planted(db):
+    await db.execute(text(T.format(active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))))
+    return await db.execute(text(T))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+    "player_bans named with no hole": (TEMPLATE_NOHOLE, '''
+async def planted(db):
+    return await db.execute(text(T.format(active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))))
+''', _AS_WRITTEN, 1, ["ob", "pb"]),
+}
+
+
+def test_positive_control_a_template_filled_with_the_definition_is_silent():
+    readers, orm = scan_source("planted.py", TEMPLATE_COVERED)
+    assert readers == {("planted.py", "planted"): [(5, [], 2)]}, readers
+    assert judge(readers, orm, whole_tree=False) == (
+        [], {"roots": 1, "occurrences": 2, "covered": 1, "allowed": 0, "orm": 0})
+
+
+@pytest.mark.parametrize("shape", sorted(PLANTED_TEMPLATES))
+def test_negative_control_each_template_without_the_definition_is_reported(shape):
+    head, body, key, line, missing = PLANTED_TEMPLATES[shape]
+    readers, orm = scan_source("planted.py", head + body)
+    problems, _ = judge(readers, orm, whole_tree=False)
+    assert problems == [("reader without the definition", key, line, missing)], problems
+    # the same body with the definition inline in the constant: silent
+    readers, orm = scan_source("planted.py", TEMPLATE_INLINE + body)
+    problems, counts = judge(readers, orm, whole_tree=False)
+    assert problems == [] and counts["occurrences"] == 2, (problems, counts)
 
 
 def test_negative_control_a_reader_in_a_second_statement_is_reported():

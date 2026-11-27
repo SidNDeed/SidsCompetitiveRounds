@@ -1729,6 +1729,10 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # gate only under the held-report replay; no janitor sets that, so only
     # an admin's Accept takes this lock. It waits on a settle or a rating
     # write of the same player, never on a janitor row. Before it: 43/31/40/28.
+    # CHEAT-ALT-1 adds three declines at three sites and no waiter: the
+    # retention pass's batch of each alternate-account signal table, one
+    # DELETE whose row read is FOR UPDATE SKIP LOCKED (_alt_retention_batch).
+    # Before it: 43/32/40/29.
     assert [r["func"] for r in census["declines"]].count("_qdig_janitor_pass") == 1, census["declines"]
     assert [r["func"] for r in census["waits"]].count("_qapply_gate") == 1, census["waits"]
     # The account deletion lane (claude/mdpl-1116) adds two declines at two
@@ -1742,9 +1746,16 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # counts what the function can reach. Before both lanes: 42/31/39/28.
     # Both lanes on one tree (claude/mdpl-stack-1120): QAPPLY-1's one waiter
     # and this lane's two declines, 43 + 2, 31 + 1, 40 + 2, 28 + 1.
-    assert len(census["declines"]) == 45, census["declines"]
+    # CHEAT-ALT-1 merged onto main f1460a11 (24 Nov 2026): its three declines
+    # at three sites on main's 45/32/42/29, 45 + 3, 32, 42 + 3, 29.
+    # ALT-BAN-1 (step 5): two declines at two sites more, no waiter: the
+    # retention pass's regions and notices arms (_ban_retention_batch), each a
+    # DELETE whose row read is FOR UPDATE OF x SKIP LOCKED. 48 + 2, 32, 45 + 2, 29.
+    assert [r["func"] for r in census["declines"]].count("_alt_retention_batch") == 3, census["declines"]
+    assert [r["func"] for r in census["declines"]].count("_ban_retention_batch") == 2, census["declines"]
+    assert len(census["declines"]) == 50, census["declines"]
     assert len(census["waits"]) == 32, census["waits"]   # 25 before the queue-row lock became visible
-    assert len(census["decline_sites"]) == 42, census["decline_sites"]
+    assert len(census["decline_sites"]) == 47, census["decline_sites"]
     assert len(census["wait_sites"]) == 29, census["wait_sites"]   # 22 before: the four queue-row lock literals
 
 

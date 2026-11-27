@@ -3662,6 +3662,8 @@
  "unread": [
   "_ban_void_apply | text(_cancel)",
   "_discord_fix_probe | text(_DISCORD_FIX_PROBE)",
-  "_report_rows | text(sql)"
+  "_report_rows | text(sql)",
+  "alt_relations | text(_alt_relation_sql('addr_mark'))",
+  "alt_relations | text(_alt_relation_sql('block_mark'))"
  ]
 }

@@ -1,0 +1,119 @@
+{
+ "_README": [
+  "CHEAT-ALT-1 ruling R5. Every column of the three tables migration 427 creates,",
+  "as table.column, mapped to the category of the disclosure sentence",
+  "(alt_signals.DISCLOSURE) that tells a player it is recorded, or to bookkeeping.",
+  "Bookkeeping is a closed list of column names: steam_id (the account's own id,",
+  "the row key) and key_id (which key made a row's codes).",
+  "Read by backend/tests/test_alt_signals_surfaces.py, which reads the columns",
+  "from 427's DDL and fails on a column this table does not map, on a mapped",
+  "column 427 does not create, on a column called bookkeeping outside the",
+  "closed list, and on a sentence that lacks any category's words.",
+  "sentence_only: words the sentence must hold that name no column;",
+  "{DEADLINE_DAYS} is alt_signals.DEADLINE_DAYS."
+ ],
+ "categories": {
+  "copy": {
+   "words": ["owned or borrowed", "Steam Family Sharing"],
+   "columns": ["steam_signin_facts.copy_state"]
+  },
+  "lender": {
+   "words": ["code of the lending account"],
+   "columns": ["steam_family_shares.owner_mark"]
+  },
+  "bans": {
+   "words": ["VAC ban", "game ban"],
+   "columns": ["steam_signin_facts.vac_banned", "steam_signin_facts.publisher_banned"]
+  },
+  "address": {
+   "words": ["internet address", "never the address itself"],
+   "columns": ["conn_markers.addr_mark"]
+  },
+  "block": {
+   "words": ["network block"],
+   "columns": ["conn_markers.block_mark"]
+  },
+  "family": {
+   "words": ["IPv4 or IPv6"],
+   "columns": ["conn_markers.family"]
+  },
+  "class": {
+   "words": ["connection class"],
+   "columns": ["conn_markers.conn_class"]
+  },
+  "times": {
+   "words": ["first and last seen"],
+   "columns": [
+    "steam_signin_facts.first_seen_at",
+    "steam_signin_facts.last_seen_at",
+    "steam_signin_facts.shared_first_at",
+    "steam_signin_facts.shared_last_at",
+    "steam_signin_facts.vac_banned_first_at",
+    "steam_signin_facts.vac_banned_last_at",
+    "steam_signin_facts.publisher_banned_first_at",
+    "steam_signin_facts.publisher_banned_last_at",
+    "steam_family_shares.first_seen_at",
+    "steam_family_shares.last_seen_at",
+    "conn_markers.day",
+    "conn_markers.first_at",
+    "conn_markers.last_at"
+   ]
+  },
+  "limit": {
+   "words": ["storage limit"],
+   "columns": ["steam_signin_facts.over_limit_days", "steam_signin_facts.over_limit_day"]
+  }
+ },
+ "sentence_only": {
+  "may": ["may record"],
+  "deadline": ["{DEADLINE_DAYS} days after it was last seen"],
+  "deletion": ["delete your account"]
+ },
+ "bookkeeping": [
+  "steam_signin_facts.steam_id",
+  "steam_family_shares.steam_id",
+  "steam_family_shares.key_id",
+  "conn_markers.steam_id",
+  "conn_markers.key_id"
+ ],
+ "ban_links": {
+  "_README": [
+   "ALT-BAN-1. Every column of the three tables migration 431 creates, mapped the",
+   "same way against FAQ message 1's closing paragraph once 431 has run",
+   "(alt_signals.NOTICE_BAN). Bookkeeping is 431's closed list: steam_id,",
+   "banned_steam_id and other_steam_id (the row keys). The pair table holds only",
+   "what the two accounts' disclosed records already say (ruling ALT-BAN-T0,",
+   "doubt 10); its two times are the notice's own and are kept while the ban stands.",
+   "The notice pass's daily count (ban_notice_days: a UTC day and the number of",
+   "notices posted on it) names no account; its two columns are bookkeeping."
+  ],
+  "categories": {
+   "region": {
+    "words": ["For a banned account", "rough region of its connection", "(country and state)"],
+    "columns": ["ban_regions.region"]
+   },
+   "class": {
+    "words": ["connection class"],
+    "columns": ["ban_regions.conn_class"]
+   },
+   "times": {
+    "words": ["first and last seen"],
+    "columns": ["ban_regions.first_at", "ban_regions.last_at"]
+   },
+   "pair": {
+    "words": ["codes of your internet address", "For a banned account", "until the ban has ended"],
+    "columns": ["ban_link_notices.noticed_at", "ban_link_notices.posted_at"]
+   }
+  },
+  "sentence_only": {
+   "kept": ["keeps these records until the ban has ended"]
+  },
+  "bookkeeping": [
+   "ban_regions.steam_id",
+   "ban_link_notices.banned_steam_id",
+   "ban_link_notices.other_steam_id",
+   "ban_notice_days.day",
+   "ban_notice_days.posts"
+  ]
+ }
+}

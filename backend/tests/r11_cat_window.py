@@ -153,22 +153,39 @@ ENV_ALLOWED = {"PGCLIENTENCODING": "UTF8"}
 # _connect opens) and the rollback file at rollback_401's (one test_zz start,
 # two _connect opens). So _connect 1161 -> 1165, record 440 -> 441, run
 # 391 -> 392, test_zz 31 -> 32; every other count is unchanged.
+# Then 427_alt_signals.sql and its rollback file (CHEAT-ALT-1), neither with
+# a d2_seed prerequisite (the FAQ row 427 revises is the one 110 seeds and
+# 338 rewrites, both in the chain) and neither with a resume file: the
+# numbered file at 401's cost (one run start, one record start, two _connect
+# opens) and the rollback file at rollback_401's (one test_zz start, two
+# _connect opens). So _connect 1165 -> 1169, record 441 -> 442, run
+# 392 -> 393, test_zz 32 -> 33; every other count is unchanged.
 # Then 429_ban_record.sql and its rollback file (BAN-RECORD-1), neither with
 # a d2_seed prerequisite (SEEDS names no 429 file) and neither with a resume
 # file: the numbered file at 401's cost (one run start, one record start, two
 # _connect opens) and the rollback file at rollback_401's (one test_zz start,
 # two _connect opens). So _connect 1165 -> 1169, record 441 -> 442, run
 # 392 -> 393, test_zz 32 -> 33; every other count is unchanged.
+# Then 431_ban_links.sql and its rollback file (ALT-BAN-1), neither with a
+# d2_seed prerequisite (the FAQ row 431 revises is the one 427 revised, in
+# the chain) and neither with a resume file: the numbered file at 401's cost
+# and the rollback file at rollback_401's. So _connect 1169 -> 1173, record
+# 442 -> 443, run 393 -> 394, test_zz 33 -> 34; every other count is
+# unchanged.
+# On the merge of main e2b485d9 into ALT-BAN-1 (25 Nov 2026) the three pairs
+# stand in one chain, each at 401's and rollback_401's cost: _connect
+# 1165 -> 1177, record 441 -> 444, run 392 -> 395, test_zz 32 -> 35; every
+# other count is unchanged.
 OPEN_COUNTS = {
-    "_admin": 315, "_clone_with_oid": 2, "_connect": 1169, "_fetchval": 6, "_orm": 1,
+    "_admin": 315, "_clone_with_oid": 2, "_connect": 1177, "_fetchval": 6, "_orm": 1,
     "_probe_problems": 2, "_r10_authid_reading": 1, "_r10_inplace_bound": 1,
     "_r10_outside_across_drop": 2, "_r10_routes": 1, "_r10_settings": 2, "_r9_databases": 1,
     "_template_problem": 3, "_whoami": 3}
 START_COUNTS = {
-    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 442,
-    "_build.<locals>.run": 393, "_git": 2, "_route_run": 56,
+    "_apply_tail": 2, "_blobs": 1, "_build": 1, "_build.<locals>.record": 444,
+    "_build.<locals>.run": 395, "_git": 2, "_route_run": 56,
     "test_migrations_are_applied_from_the_object_store": 2,
-    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 33}
+    "test_zz_rollback_and_resume_files_do_not_change_mail_inbox_rev": 35}
 
 REUSE_REFUSAL = ("D2_REUSE_DB is set: the chain was not built in this run, so the run is not "
                  "one the packet cites (ruling FOUR-R11-A17 (g))")

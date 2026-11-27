@@ -1503,4 +1503,6 @@ def test_every_catch_in_the_deletion_s_reach_hands_its_signals_back():
                            and isinstance(first.body[0], ast.Raise) and first.body[0].exc is None)
                     (kept if handed or via else broad).append((name, h.lineno - fn.lineno))
     assert broad == [], broad
-    assert len(kept) == 7, kept
+    # 8 since CHEAT-ALT-1's merge of main f1460a11 (24 Nov 2026): _alt_delete_one's clause that re-raises the
+    # bound's two signals before its own catch of the table's absence; 7 before it.
+    assert len(kept) == 8, kept

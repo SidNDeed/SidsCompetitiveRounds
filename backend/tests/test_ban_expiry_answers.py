@@ -125,6 +125,15 @@ CONTAINERS = {"set", "dict", "list", "deque", "defaultdict", "OrderedDict", "Cou
 BAN_STATE_ALLOWED = {
     ("discord_bot.py", "_last_ban_id_posted"): "the feed cursor: the id of the last ban posted to #scr-admin",
     ("discord_bot.py", "_ban_poller_initialized"): "whether the feed cursor has been seeded at start",
+    # ALT-BAN-1 step 4: the spacing of Steam asks for a refused sign-in. It is never read as an answer about a
+    # ban: _alt_ban_refused runs only after the gate refused from player_bans, and _ban_ticket_seen reads the
+    # ban again under the key.
+    ("main.py", "_alt_ban_asked"): "the Steam-ask stamps: the last ask overall, and per account the monotonic "
+                                   "time before which it is not asked again",
+    # ALT-BAN-1 turn 2 (ADD1 H2, H5): the futures of the three reads in flight (the region file's word, a region
+    # read, a ticket check), one per kind, so that a kind in flight starts no second thread. Never read as an
+    # answer about a ban: it holds no id and no ban fact.
+    ("main.py", "_alt_ban_reading"): "the reads in flight: per kind, the pool's future of the one read running",
 }
 # A module-level container about bans that is a CONSTANT, not state. The
 # detector above reports it (it is a top-level container); a row here is

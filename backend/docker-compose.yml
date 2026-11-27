@@ -134,6 +134,18 @@ services:
       # health word reads paused:env); unset or anything else runs it. Named
       # here so a value in .env reaches the process at all (#438/#443).
       PC_STEAM_SWEEP: ${PC_STEAM_SWEEP:-}
+      # SCR_ALT_SIGNAL_KEY: the key (64 hex digits) of the one-way codes the
+      # api may record at a verified sign-in (api/alt_signals.py). Unset,
+      # empty or malformed, nothing is recorded and /health's alt_signals_key
+      # says "absent" or "refused". The api alone gets it; the bot never
+      # reads it (#438/#443: nothing reaches the process unless it is named
+      # here).
+      SCR_ALT_SIGNAL_KEY: ${SCR_ALT_SIGNAL_KEY:-}
+      # SCR_BAN_NOTICE_CHANNEL: the Discord channel id the primary's notice
+      # pass posts to when an account signs in from an address a banned
+      # account used (main.ban_link_notice_pass). Unset or 0: the pairs are
+      # stored and none is posted; the pass's line says "storing".
+      SCR_BAN_NOTICE_CHANNEL: ${SCR_BAN_NOTICE_CHANNEL:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`
@@ -171,6 +183,12 @@ services:
       # conn_ranges=absent and every post's class is `unknown`. The api never
       # fetches a list; staging one is an operator step.
       - ${SCR_RANGES_DIR:-/opt/competitive-rounds/private/ranges}:/app/private/ranges:ro
+      # The region file (geo_region.py, ALT-BAN-1): staged per box as
+      # /opt/competitive-rounds/private/geo/region.mmdb, a new file written
+      # beside it and RENAMED over it, the PARENT mounted READ-ONLY. With
+      # nothing staged /health reads ban_region_file=absent and no region is
+      # kept. The api never fetches the file; staging it is an operator step.
+      - ${SCR_GEO_DIR:-/opt/competitive-rounds/private/geo}:/app/private/geo:ro
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:

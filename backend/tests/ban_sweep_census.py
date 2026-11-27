@@ -834,6 +834,9 @@ SINGLE_KEY_TAKERS = {
     # key; the helper takes the two-key PLAYER_DELETION_LOCK_CLASS key, another
     # family, so it is not listed here (test_mdpl_gate_bound_pg.py holds its takers).
     ("tournaments", "signup"): _ONE,
+    # ALT-BAN-1 step 4: the recording of a banned account's verified connection
+    # takes that account's key exclusive, as its transaction's first lock.
+    ("main", "_ban_ticket_seen"): _ONE,
 }
 
 # FIX-1B point 3: functions that reach both the shared read (LOCK_CALLERS) and an
@@ -850,6 +853,11 @@ SHARED_AND_EXCLUSIVE = {
                                   "the route's own read is plain (ROW_SERIALIZED)",
     ("main", "submit_team_match"): "the receipt's exclusive guards come before the settle's shared read; "
                                    "the route's own read is plain (ROW_SERIALIZED)",
+    # ALT-BAN-1 step 4: steam_auth reaches _ban_ticket_seen's exclusive key through _alt_ban_refused.
+    ("main", "steam_auth"): "the exclusive key (_ban_ticket_seen, on the early refusal) is the first lock of a new "
+                            "transaction: _alt_ban_refused rolls the early plain read back first and _ban_ticket_seen "
+                            "records nothing in an open one; the route raises after it, and its own shared-then-"
+                            "exclusive pass (_ban_lock_and_gate, exclusive=) is on the other branch",
 }
 _EXCLUSIVE_KEY = re.compile(
     r"pg_advisory_xact_lock\(\s*hashtext\(\s*(:sid|CAST\(\s*:sid\s+AS\s+text\s*\))\s*\)\s*\)", re.I)

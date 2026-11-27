@@ -50,6 +50,7 @@ import discord_text as _dtext   # typed text in a Discord message the api compos
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
+import alt_signals as _alt_signals   # the alternate-account signals' pure half, standard library only: the sign-in's recording, the retention pass and the read use it (CHEAT-ALT-1)
 from models import AdminUser, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from models import player_ban_active_sql
 from models import BAN_MAX_DAYS, BAN_MAX_HOURS, BAN_MAX_MINUTES, ban_cap_sql
@@ -2153,6 +2154,10 @@ _JANITOR_SELFTEST_ROOTS = (
     # failure is silent. It also names a column migration 356 adds, which makes
     # the boot banner the loud half of the migration-before-api deploy order.
     ("main", "team_dc_fallback_sweep_loop"),
+    # CHEAT-ALT-1 (R4): the retention pass of the alternate-account signal
+    # tables. Its DELETEs and its count of the due rows left run unattended
+    # every hour on the primary, and they name migration 427's tables.
+    ("main", "alt_signals_retention_loop"),
     ("tournaments", "tournament_tick"),
 )
 
@@ -4011,7 +4016,8 @@ async def lifespan(app: FastAPI):
             # work; the replica is a read surface and nothing more.
             print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
                   "(queue_cleanup, team_queue_cleanup, tournament_tick, "
-                  "min_version_autoraise, auto_log_retention, janitor self-test)")
+                  "min_version_autoraise, auto_log_retention, "
+                  "alt_signals_retention, janitor self-test)")
             # The review worker writes, so it is primary-only. This line is
             # the standby's POSITIVE signal that it took this branch and
             # started no worker (an absent pass line alone cannot tell a
@@ -4104,6 +4110,17 @@ async def lifespan(app: FastAPI):
             # is NOT this sweep's failure signal.
             tasks.append(asyncio.create_task(
                 _supervised("auto_log_retention", _auto_logs.auto_log_retention_loop)))
+            # CHEAT-ALT-1 (R4): the retention pass of the alternate-account
+            # signal tables, on its own task and called by no other loop.
+            # Primary only: every pass DELETEs, and the deletes reach the
+            # standby by replication. WHAT TO GREP FOR: `[ALT-RETENTION] pass
+            # armed` once at boot, one `[ALT-RETENTION] pass:` line per pass
+            # including the empty ones, `[ALT-RETENTION] due rows left` when a
+            # pass leaves due rows (rows held by another transaction, or the
+            # budget reached), and `[ALT-RETENTION] pass FAILED` with a count
+            # in a row when a pass dies.
+            tasks.append(asyncio.create_task(
+                _supervised("alt_signals_retention", alt_signals_retention_loop))); tasks.append(asyncio.create_task(_supervised("ban_link_notice", ban_link_notice_loop)))  # noqa: E702
         # Awaited, before anything can render: a face keyed off a colour
         # this box has not read yet is a promise about pixels it cannot make.
         if _pcf is not None:
@@ -4914,7 +4931,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:58882 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:59610 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4980,7 +4997,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:58681 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:59409 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -5050,7 +5067,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:57979 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:58707 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -8106,6 +8123,17 @@ _QAPPLY_BUILD = 1
 # constant, equal on both boxes by construction, probed by the release train
 # and read by nothing else (#306). Absent on any build before it.
 _BOT_TEXT_BUILD = 1
+# Release-train verification plumbing, not a design mechanism: the build
+# marker of CHEAT-ALT-1, in which a verified sign-in may record the
+# alternate-account signals while a signal key is loaded, account deletion
+# deletes them, and the retention pass deletes each row no later than its
+# deadline on the primary. Reported on /health as `alt_signals_build`, beside
+# `alt_signals_key` (alt_signals.key_word(): 'absent', 'refused' or the key
+# id, never the key). It names build identity only; the lane adds no route
+# (learnings 780, 794). A code constant, equal on both boxes by construction,
+# probed by the release train and read by nothing else (#306). Absent on any
+# build before it.
+_ALT_SIGNALS_BUILD = 1
 
 
 def _title_ladders_health_word() -> int:
@@ -8200,6 +8228,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
+                              alt_signals_build=_ALT_SIGNALS_BUILD, alt_ban_build=_ALT_BAN_BUILD,
+                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await _ban_region_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -8279,6 +8309,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               review_rules=_review_rules.health_word(),
                               identity_clock_evidence=_identity_clock_health_word(),
                               conn_ranges=_conn_ranges.ranges_health_word(),
+                              alt_signals_build=_ALT_SIGNALS_BUILD, alt_ban_build=_ALT_BAN_BUILD,
+                              alt_signals_key=_alt_signals.key_word(), ban_region_file=await _ban_region_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -16974,27 +17006,706 @@ def _steam_http_get_json(url: str, timeout: float) -> dict:
         return _json.loads(resp.read().decode("utf-8", "replace"))
 
 
+# -- Alternate-account signals: the recording (CHEAT-ALT-1, migration 427) ----
+# After a VERIFIED sign-in has committed, and only while a signal key is
+# loaded, a second transaction on the same session may record what Steam
+# reported and the marks of the connecting address (alt_signals.py). The
+# route runs it inside one guard that lets no Exception out and returns the
+# answer it built before, so the sign-in's answer and rows never depend on
+# it. With no key, nothing is recorded and no statement is added.
+
+# The FAQ channel whose message 1 carries the disclosure (338 and 427 write
+# that row); the notice check reads it on every recording.
+_ALT_FAQ_CHANNEL = "1159243585309384805"
+# The time limits of the transaction it runs in (is_local true), the values
+# bound as text. _alt_limits runs it as the first statement of each
+# transaction it bounds: the recording's, with alt_signals' RECORD_* limits,
+# and each batch of the retention pass and the pass's count of the due rows
+# left, with the PASS_* limits.
+_ALT_LIMITS_SQL = ("SELECT set_config('lock_timeout', CAST(:lt AS text), true),"
+                   " set_config('statement_timeout', CAST(:st AS text), true)")
+_ALT_NOTICE_LINE_EVERY_S = 3600.0
+_alt_notice_line_at = [None]   # monotonic time of the last notice line
+
+
+class _AltNotRecorded(Exception):
+    """A refusal of the recording; `word` is what its one line says."""
+
+    def __init__(self, word: str):
+        super().__init__(word)
+        self.word = word
+
+
+class _AltOutcomeUnknown(Exception):
+    """The recording's commit failed or its answer never came: the commit
+    may stand on the server. `word` is the failure's class name."""
+
+    def __init__(self, word: str):
+        super().__init__(word)
+        self.word = word
+
+
+def _alt_print(msg: str) -> None:
+    """print() that cannot raise (the form of _janitor_print): the recording's
+    lines are printed on paths that must return the sign-in's answer."""
+    try:
+        print(msg)
+    except Exception:
+        pass
+
+
+def _alt_notice_line() -> None:
+    """The closed-notice line, at most once an hour."""
+    now = time.monotonic()
+    last = _alt_notice_line_at[0]
+    if last is None or now - last >= _ALT_NOTICE_LINE_EVERY_S:
+        _alt_notice_line_at[0] = now
+        _alt_print("[ALT-SIGNALS] notice not up: nothing recorded")
+
+
+async def _alt_record(db: AsyncSession, steam_id: str, params, request) -> None:
+    """The recording's transaction after the sign-in's commit (design 5.2): limits; the identity key exclusive
+    with the ban read under it; the tombstone; the notice; _alt_store's capped upserts and commit. Raises on every
+    refusal and failure (the route's guard calls _alt_abandon); with no key loaded, returns before any statement."""
+    key = _alt_signals.loaded_key()
+    if key is None:
+        return
+    host = _rl_client_address(request) if request is not None else None
+    facts = _alt_signals.steam_fields(params, steam_id, key)
+    seen = _alt_signals.observe(host, key, _conn_ranges.classify_address, _conn_ranges.CR_LAN_NETS)
+    await _alt_limits(db, _alt_signals.RECORD_LOCK_TIMEOUT_MS, _alt_signals.RECORD_STATEMENT_TIMEOUT_MS)
+    await _ban_lock_and_gate(db, [steam_id], exclusive=[steam_id])
+    if MATCH_HMAC_SECRET:
+        tombed = (await db.execute(text(
+            "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
+        ), {"h": _hash_steam_id(steam_id)})).scalar()
+        if tombed:
+            raise _AltNotRecorded("deleted")
+    # The notice (R6): one message 1 row, its revision posted, holding the disclosure; a failed read is closed.
+    try:
+        notice = tuple((await db.execute(text(
+            "SELECT count(*), count(*) FILTER (WHERE p.posted_revision = p.revision"
+            " AND strpos(p.content, CAST(:sentence AS text)) > 0)"
+            " FROM pending_channel_posts p"
+            " WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1"),
+            {"sentence": _alt_signals.DISCLOSURE, "ch": _ALT_FAQ_CHANNEL})).one())
+    except Exception:
+        notice = None
+    if notice != (1, 1):
+        raise _AltNotRecorded("notice")
+    await _alt_store(db, steam_id, key, facts, seen)
+
+
+async def _alt_store(db: AsyncSession, steam_id: str, key, facts, seen, region: str = "") -> None:
+    """The capped upserts and the commit (_alt_record's; _ban_ticket_seen's, with the region of a banned account)."""
+    over = False
+    if facts.copy_state == "shared" and facts.owner_mark is not None:
+        # Stored when the row exists or fewer than SHARES_PER_ACCOUNT stand; no row back: the limit refused it.
+        stored = (await db.execute(text(
+            "INSERT INTO steam_family_shares AS s (steam_id, key_id, owner_mark)"
+            " SELECT CAST(:sid AS text), CAST(:kid AS text), CAST(:om AS bytea)"
+            " WHERE EXISTS (SELECT 1 FROM steam_family_shares x WHERE x.steam_id = CAST(:sid AS text)"
+            " AND x.key_id = CAST(:kid AS text) AND x.owner_mark = CAST(:om AS bytea))"
+            " OR (SELECT count(*) FROM steam_family_shares x"
+            " WHERE x.steam_id = CAST(:sid AS text)) < CAST(:cap AS integer)"
+            " ON CONFLICT (steam_id, key_id, owner_mark)"
+            " DO UPDATE SET last_seen_at = GREATEST(s.last_seen_at, now())"
+            " RETURNING 1"),
+            {"sid": steam_id, "kid": key.key_id, "om": facts.owner_mark,
+             "cap": _alt_signals.SHARES_PER_ACCOUNT})).first()
+        over = over or stored is None
+    if seen is not None:
+        # One row per account, UTC day, key and address; at most MARKERS_PER_DAY rows per account and day.
+        stored = (await db.execute(text(
+            "INSERT INTO conn_markers AS c"
+            " (steam_id, day, key_id, addr_mark, block_mark, family, conn_class)"
+            " SELECT CAST(:sid AS text), CAST((now() AT TIME ZONE 'UTC') AS date), CAST(:kid AS text),"
+            " CAST(:am AS bytea), CAST(:bm AS bytea), CAST(:fam AS smallint), CAST(:cls AS varchar)"
+            " WHERE EXISTS (SELECT 1 FROM conn_markers x WHERE x.steam_id = CAST(:sid AS text)"
+            " AND x.day = CAST((now() AT TIME ZONE 'UTC') AS date) AND x.key_id = CAST(:kid AS text)"
+            " AND x.addr_mark = CAST(:am AS bytea))"
+            " OR (SELECT count(*) FROM conn_markers x WHERE x.steam_id = CAST(:sid AS text)"
+            " AND x.day = CAST((now() AT TIME ZONE 'UTC') AS date)) < CAST(:cap AS integer)"
+            " ON CONFLICT (steam_id, day, key_id, addr_mark) DO UPDATE SET"
+            " last_at = GREATEST(c.last_at, now()),"
+            " conn_class = CASE WHEN now() >= c.last_at THEN EXCLUDED.conn_class ELSE c.conn_class END"
+            " RETURNING 1"),
+            {"sid": steam_id, "kid": key.key_id, "am": seen.addr_mark, "bm": seen.block_mark,
+             "fam": seen.family, "cls": seen.conn_class,
+             "cap": _alt_signals.MARKERS_PER_DAY})).first()
+        over = over or stored is None
+        if region:
+            await _ban_region_store(db, steam_id, region, seen.conn_class)
+    # The account's row: last-ats move forward only, first-ats back only; a
+    # reported value replaces the stored one only when this sign-in is not
+    # older than the row's last sight; Steam reporting nothing keeps the
+    # stored copy state; a day a limit refused a row counts once.
+    await db.execute(text(
+        "INSERT INTO steam_signin_facts AS f (steam_id, copy_state, shared_first_at, shared_last_at,"
+        " vac_banned, vac_banned_first_at, vac_banned_last_at,"
+        " publisher_banned, publisher_banned_first_at, publisher_banned_last_at,"
+        " over_limit_days, over_limit_day)"
+        " SELECT v.sid, v.cs,"
+        " CASE WHEN v.cs = 'shared' THEN now() END, CASE WHEN v.cs = 'shared' THEN now() END,"
+        " v.vac, CASE WHEN v.vac THEN now() END, CASE WHEN v.vac THEN now() END,"
+        " v.pub, CASE WHEN v.pub THEN now() END, CASE WHEN v.pub THEN now() END,"
+        " CASE WHEN v.over THEN 1 ELSE 0 END,"
+        " CASE WHEN v.over THEN CAST((now() AT TIME ZONE 'UTC') AS date) END"
+        " FROM (SELECT CAST(:sid AS text) AS sid, CAST(:cs AS varchar) AS cs,"
+        " CAST(:vac AS boolean) AS vac, CAST(:pub AS boolean) AS pub, CAST(:over AS boolean) AS over) v"
+        " ON CONFLICT (steam_id) DO UPDATE SET"
+        " last_seen_at = GREATEST(f.last_seen_at, now()),"
+        " copy_state = CASE WHEN EXCLUDED.copy_state <> 'unknown' AND now() >= f.last_seen_at"
+        " THEN EXCLUDED.copy_state ELSE f.copy_state END,"
+        " shared_first_at = CASE WHEN EXCLUDED.copy_state = 'shared'"
+        " THEN LEAST(COALESCE(f.shared_first_at, now()), now()) ELSE f.shared_first_at END,"
+        " shared_last_at = CASE WHEN EXCLUDED.copy_state = 'shared'"
+        " THEN GREATEST(COALESCE(f.shared_last_at, now()), now()) ELSE f.shared_last_at END,"
+        " vac_banned = CASE WHEN EXCLUDED.vac_banned IS NOT NULL AND now() >= f.last_seen_at"
+        " THEN EXCLUDED.vac_banned ELSE f.vac_banned END,"
+        " vac_banned_first_at = CASE WHEN EXCLUDED.vac_banned"
+        " THEN LEAST(COALESCE(f.vac_banned_first_at, now()), now()) ELSE f.vac_banned_first_at END,"
+        " vac_banned_last_at = CASE WHEN EXCLUDED.vac_banned"
+        " THEN GREATEST(COALESCE(f.vac_banned_last_at, now()), now()) ELSE f.vac_banned_last_at END,"
+        " publisher_banned = CASE WHEN EXCLUDED.publisher_banned IS NOT NULL AND now() >= f.last_seen_at"
+        " THEN EXCLUDED.publisher_banned ELSE f.publisher_banned END,"
+        " publisher_banned_first_at = CASE WHEN EXCLUDED.publisher_banned"
+        " THEN LEAST(COALESCE(f.publisher_banned_first_at, now()), now())"
+        " ELSE f.publisher_banned_first_at END,"
+        " publisher_banned_last_at = CASE WHEN EXCLUDED.publisher_banned"
+        " THEN GREATEST(COALESCE(f.publisher_banned_last_at, now()), now())"
+        " ELSE f.publisher_banned_last_at END,"
+        " over_limit_days = f.over_limit_days + CASE WHEN EXCLUDED.over_limit_days > 0"
+        " AND (f.over_limit_day IS NULL OR f.over_limit_day < CAST((now() AT TIME ZONE 'UTC') AS date))"
+        " THEN 1 ELSE 0 END,"
+        " over_limit_day = CASE WHEN EXCLUDED.over_limit_days > 0"
+        " THEN GREATEST(f.over_limit_day, CAST((now() AT TIME ZONE 'UTC') AS date))"
+        " ELSE f.over_limit_day END"),
+        {"sid": steam_id, "cs": facts.copy_state, "vac": facts.vac_banned,
+         "pub": facts.publisher_banned, "over": over})
+    try:
+        await db.commit()
+    except Exception as ex:
+        # The COMMIT may have reached the server and stood while its answer
+        # was lost: the outcome is not known (finding R2-2).
+        raise _AltOutcomeUnknown(type(ex).__name__) from ex
+
+
+async def _alt_abandon(db: AsyncSession, ex: Exception) -> None:
+    """End a refused or failed recording: roll back (the rollback guarded),
+    say one line through _alt_print. Lets no Exception out. The line carries
+    a word only: `deleted`, `refused` (the ban read), or the exception's
+    class name. `not recorded` is said only where the rollback was confirmed
+    and no commit was sent; after a failed or unanswered commit, or a
+    rollback that raised, the line says `outcome unknown`. A closed notice
+    whose rollback was confirmed says the hourly line."""
+    rolled = False
+    try:
+        await db.rollback()
+        rolled = True
+    except Exception:
+        pass
+    try:
+        if isinstance(ex, (_AltNotRecorded, _AltOutcomeUnknown)):
+            word = ex.word
+        elif isinstance(ex, HTTPException) and ex.status_code == 409:
+            word = "refused"
+        else:
+            word = type(ex).__name__
+        if isinstance(ex, _AltOutcomeUnknown) or not rolled:
+            _alt_print("[ALT-SIGNALS] outcome unknown: %s" % word)
+            return
+        if isinstance(ex, _AltNotRecorded) and ex.word == "notice":
+            _alt_notice_line()
+            return
+        _alt_print("[ALT-SIGNALS] not recorded: %s" % word)
+    except Exception:
+        pass
+
+
+def _alt_table_missing(ex) -> bool:
+    """True only when the SQLSTATEs `ex` carries, on itself or on an exception
+    it wraps (.orig, or the explicit cause of `raise ... from`), are 42P01
+    ("the table does not exist") and nothing else, and it carries one. An
+    error raised while another was being handled (__context__) does not wrap
+    it, and a chain that also carries another state is not this failure."""
+    states, todo, seen = set(), [ex], set()
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        for code in (getattr(e, "sqlstate", None), getattr(e, "pgcode", None)):
+            if isinstance(code, str) and code:
+                states.add(code)
+        todo.append(getattr(e, "orig", None))
+        if isinstance(e, BaseException):
+            todo.append(e.__cause__)
+    return states == {"42P01"}
+
+
+async def _alt_delete_one(db: AsyncSession, stmt, steam_id: str) -> None:
+    """One of account deletion's three DELETEs of the alternate-account
+    signal tables (items 11 and 12), in its own savepoint. A table that does
+    not exist (42P01: a box migration 427 has not reached) is passed over;
+    any other failure is raised and fails the deletion."""
+    try:
+        async with db.begin_nested():
+            await db.execute(stmt, {"sid": steam_id})
+    except (_DeletionRowHeld, _DeletionPastDeadline):
+        raise   # MDPL: the bound's two signals go back to it
+    except Exception as ex:
+        if not _alt_table_missing(ex):
+            raise
+
+
+async def _alt_delete_account(db: AsyncSession, steam_id: str) -> None:
+    # CHEAT-ALT-1 (items 11, 12), ALT-BAN-1: the account's rows of the three signal tables and of ban_regions
+    # and ban_link_notices (either side), under the identity key. delete_player_data calls this at three places:
+    # in the branch of a missing players row and of a row already deleted, each directly before that branch's
+    # commit; for a live row directly after the pool snapshot's key and before the first personal DELETE (the
+    # deletion takes no row lock before that key, MDPL R3, and the wait for the bot's leases holds none another
+    # deletion needs). A retention batch skips a row this holds (SKIP LOCKED); a batch holding one ends the
+    # attempt as a held row (_DeletionRowHeld), which the bound runs again while its time allows. ban_regions
+    # and ban_link_notices are kept only while a ban stands (retention, ALT-BAN-1 step 5); deletion takes them now.
+    await _alt_delete_one(db, text(
+        "DELETE FROM conn_markers WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text(
+        "DELETE FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text(
+        "DELETE FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text(
+        "DELETE FROM ban_regions WHERE steam_id = CAST(:sid AS text)"), steam_id)
+    await _alt_delete_one(db, text("DELETE FROM ban_link_notices WHERE banned_steam_id = CAST(:sid AS text)"
+                                   " OR other_steam_id = CAST(:sid AS text)"), steam_id)
+
+
+# -- Alternate-account signals: the retention pass (CHEAT-ALT-1 R4, design 6) --
+# Every row of the three tables is gone no later than DEADLINE_DAYS after its own last sight (last_at for a
+# marker row, last_seen_at for a share row and for the facts row), or after the end of an active ban of its
+# account (ALT-BAN-1: kept while it stands, F4). A row is due DUE_DAYS after it. One pass an hour takes
+# every due row: rounds of batches, one batch per table per round, each batch
+# its own short transaction under the pass's own limits; a table is finished
+# when a batch takes fewer than PASS_BATCH rows; the budget is checked after
+# each batch. A row another transaction holds is skipped (SKIP LOCKED) and
+# taken by a later pass. Primary only: deletes reach the standby by
+# replication.
+
+
+async def _alt_limits(db: AsyncSession, lock_ms: int, statement_ms: int) -> None:
+    """The time limits of the transaction `db` is in (_ALT_LIMITS_SQL)."""
+    await db.execute(text(_ALT_LIMITS_SQL), {"lt": "%dms" % lock_ms, "st": "%dms" % statement_ms})
+
+
+async def _alt_retention_batch(db: AsyncSession, table: str, at=None) -> int:
+    """One batch of the pass on one table ('markers', 'shares', 'facts'; 'regions', 'notices': ALT-BAN-1),
+    as its own transaction: the pass's limits, then up to PASS_BATCH due rows
+    deleted, oldest first, rows another transaction holds skipped; commit.
+    `at` is the instant a row's age is counted to (None: the server's now()).
+    Returns the number of rows deleted."""
+    await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
+    bind = {"days": _alt_signals.DUE_DAYS, "batch": _alt_signals.PASS_BATCH, "at": at}
+    if table == "markers":
+        res = await db.execute(text(
+            "DELETE FROM conn_markers"
+            " WHERE (steam_id, day, key_id, addr_mark) IN ("
+            " SELECT x.steam_id, x.day, x.key_id, x.addr_mark FROM conn_markers x"
+            " WHERE x.last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
+            " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_at LIMIT CAST(:batch AS integer) FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), bind)
+    elif table == "shares":
+        res = await db.execute(text(
+            "DELETE FROM steam_family_shares"
+            " WHERE (steam_id, key_id, owner_mark) IN ("
+            " SELECT x.steam_id, x.key_id, x.owner_mark FROM steam_family_shares x"
+            " WHERE x.last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
+            " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer) FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), bind)
+    elif table == "facts":
+        res = await db.execute(text(
+            "DELETE FROM steam_signin_facts"
+            " WHERE steam_id IN ("
+            " SELECT x.steam_id FROM steam_signin_facts x"
+            " WHERE x.last_seen_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
+            " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_seen_at LIMIT CAST(:batch AS integer) FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), bind)
+    else:
+        res = await _ban_retention_batch(db, table, bind)
+    n = len(res.all())
+    await db.commit()
+    return n
+
+
+async def _alt_retention_left(db: AsyncSession, at=None) -> dict:
+    """The due rows left in each table at `at` (None: now()), read in its own
+    transaction under the pass's limits."""
+    await _alt_limits(db, _alt_signals.PASS_LOCK_TIMEOUT_MS, _alt_signals.PASS_STATEMENT_TIMEOUT_MS)
+    row = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM conn_markers"
+        " WHERE last_at < COALESCE(CAST(:at AS timestamptz), now()) - make_interval(days => CAST(:days AS integer))"
+        " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = conn_markers.steam_id AND " + player_ban_active_sql("pb") + ")" "),"
+        " (SELECT count(*) FROM steam_family_shares WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now())"
+        " - make_interval(days => CAST(:days AS integer))" " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = steam_family_shares.steam_id AND " + player_ban_active_sql("pb") + ")" "),"
+        " (SELECT count(*) FROM steam_signin_facts WHERE last_seen_at < COALESCE(CAST(:at AS timestamptz), now())"
+        " - make_interval(days => CAST(:days AS integer))" " AND NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = steam_signin_facts.steam_id AND " + player_ban_active_sql("pb") + ")" ")"),
+        {"days": _alt_signals.DUE_DAYS, "at": at})).one()
+    return {"markers": int(row[0]), "shares": int(row[1]), "facts": int(row[2])}
+
+
+async def _alt_retention_pass(session_factory=None, at=None) -> dict:
+    """One pass (design 6.3). Each batch runs in its own session from `session_factory` (the app's sessions by
+    default); `at` is the instant ages are counted to (None: the server's now(), as in production). A batch that
+    fails ends the batches. Unless cancelled, the pass then counts the due rows left in a session and under limits
+    of their own, says what it deleted per table (ALT-BAN-1's two arms in "ban"), and the rows left when counted
+    and any are, or that they were not counted; then raises a failed batch's. A cancelled pass prints nothing."""
+    if session_factory is None:
+        from database import async_session as session_factory
+    t0 = time.monotonic()
+    deleted = {"markers": 0, "shares": 0, "facts": 0, "regions": 0, "notices": 0}
+    todo = list(deleted)
+    batches = 0
+    failed = None
+    try:
+        while todo:
+            for table in tuple(todo):
+                async with session_factory() as db:
+                    n = await _alt_retention_batch(db, table, at)
+                batches += 1
+                deleted[table] += n
+                if n < _alt_signals.PASS_BATCH:
+                    todo.remove(table)
+                if time.monotonic() - t0 >= _alt_signals.PASS_BUDGET_S:
+                    todo.clear()
+                    break
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        failed = ex
+    left, left_failed, ban_left = None, None, None
+    try:
+        async with session_factory() as db:
+            left = await _alt_retention_left(db, at)
+            ban_left = await _ban_retention_left(db)
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        left_failed = type(ex).__name__
+    head = ("[ALT-RETENTION] pass ended by a failed batch (%s): deleted" % type(failed).__name__
+            if failed is not None else "[ALT-RETENTION] pass: deleted")
+    _alt_print("%s markers %d, shares %d, facts %d in %d batch(es)"
+               % (head, deleted["markers"], deleted["shares"], deleted["facts"], batches))
+    ban = _ban_retention_said(deleted, ban_left)
+    if left is None:
+        _alt_print("[ALT-RETENTION] due rows left: not counted (%s)" % left_failed)
+    elif any(left.values()):
+        _alt_print("[ALT-RETENTION] due rows left: markers %d, shares %d, facts %d"
+                   % (left["markers"], left["shares"], left["facts"]))
+    if failed is not None:
+        raise failed
+    return {"deleted": {k: deleted[k] for k in ("markers", "shares", "facts")}, "left": left, "batches": batches,
+            "seconds": round(time.monotonic() - t0, 3), "ban": ban}
+
+
+async def alt_signals_retention_loop(clock=None) -> None:
+    """The pass's own loop, started from lifespan on the PRIMARY only (every
+    pass DELETEs). One `[ALT-RETENTION] pass armed` line at boot; the first
+    pass PASS_FIRST_DELAY_S after the loop starts, after a restart too. In
+    one process, a pass that ends within PASS_PERIOD_S of its start is
+    followed PASS_PERIOD_S after it STARTED, on `clock` (time.monotonic
+    unless a test gives one); one that ran past the period is followed at
+    once, and the loop says so (`pass overran`). A pass that fails is caught
+    here, counted and said (`pass FAILED (<n> in a row)`); `pass recovered`
+    says when one gets through. _supervised is the backstop for what escapes."""
+    clock = clock or time.monotonic
+    _alt_print("[ALT-RETENTION] pass armed: every %ds, rows past %d days, first pass in %ds"
+               % (_alt_signals.PASS_PERIOD_S, _alt_signals.DUE_DAYS, _alt_signals.PASS_FIRST_DELAY_S))
+    await asyncio.sleep(_alt_signals.PASS_FIRST_DELAY_S)
+    failures = 0
+    while True:
+        started = clock()
+        try:
+            await _alt_retention_pass()
+            if failures:
+                _alt_print("[ALT-RETENTION] pass recovered after %d failed pass(es)" % failures)
+                failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            failures += 1
+            _alt_print("[ALT-RETENTION] pass FAILED (%d in a row): %s" % (failures, type(ex).__name__))
+        wait = started + _alt_signals.PASS_PERIOD_S - clock()
+        if wait <= 0:
+            _alt_print("[ALT-RETENTION] pass overran its period by %ds: the next starts now" % int(-wait))
+            wait = 0
+        await asyncio.sleep(wait)
+
+
+# -- Alternate-account signals: the read (CHEAT-ALT-1, design 8 and 9) --------
+# What the three tables relate to one account, for a moderator's report
+# (CHEAT-REPORT-1's to call; this lane adds no route). Counts and current
+# players only: no address, block, mark or key id leaves this function, and
+# every account a list names has a players row with no deletion stamp (R3).
+# The owner of a borrowed copy is resolved here, with the loaded key, by
+# computing each candidate's mark (R2): nothing stored resolves it.
+
+# The address or the block relation of one account over the window, per
+# related current player: the marks both recorded, the UTC days both
+# recorded one of them, the marks never shared on one day, the last day
+# EITHER recorded a shared mark (finding 24), the smallest population of a
+# shared mark (every account recording it in the window, players or not),
+# and the classes on both accounts' rows of those marks. {mark} is
+# addr_mark or block_mark (_alt_relation_sql).
+_ALT_RELATION_SQL = (
+    "WITH s AS ("
+    " SELECT key_id, {mark} AS mark, day, conn_class FROM conn_markers"
+    " WHERE steam_id = CAST(:sid AS text)"
+    " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))"
+    "), s_mark AS ("
+    " SELECT key_id, mark, max(day) AS s_last_day FROM s GROUP BY key_id, mark"
+    "), s_day AS ("
+    " SELECT DISTINCT key_id, mark, day FROM s"
+    "), pop AS MATERIALIZED ("
+    " SELECT c.key_id, c.{mark} AS mark, count(DISTINCT c.steam_id) AS n, count(DISTINCT c.steam_id) FILTER (WHERE c.steam_id <> CAST(:sid AS text)) AS n_other"
+    " FROM conn_markers c JOIN s_mark m ON m.key_id = c.key_id AND m.mark = c.{mark}"
+    " WHERE c.last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " GROUP BY c.key_id, c.{mark}"
+    "), o AS ("
+    " SELECT c.steam_id, c.key_id, c.{mark} AS mark, c.day, c.conn_class,"
+    " (sd.day IS NOT NULL) AS same_day"
+    " FROM conn_markers c"
+    " JOIN s_mark m ON m.key_id = c.key_id AND m.mark = c.{mark}"
+    " JOIN players p ON p.steam_id = c.steam_id AND p.deleted_at IS NULL"
+    " LEFT JOIN s_day sd ON sd.key_id = c.key_id AND sd.mark = c.{mark} AND sd.day = c.day"
+    " WHERE c.steam_id <> CAST(:sid AS text)"
+    " AND c.last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    "), om AS MATERIALIZED ("
+    " SELECT o.steam_id, o.key_id, o.mark, max(o.day) AS o_last_day, bool_or(o.same_day) AS any_same"
+    " FROM o GROUP BY o.steam_id, o.key_id, o.mark"
+    "), per AS MATERIALIZED ("
+    " SELECT om.steam_id, count(*) AS shared_markers,"
+    " count(*) FILTER (WHERE NOT om.any_same) AS any_day_only,"
+    " GREATEST(max(om.o_last_day), max(m.s_last_day)) AS last_shared_day,"
+    " min(pop.n) AS min_population, min(pop.n_other) - 1 AS others"
+    " FROM om"
+    " JOIN s_mark m ON m.key_id = om.key_id AND m.mark = om.mark"
+    " JOIN pop ON pop.key_id = om.key_id AND pop.mark = om.mark"
+    " GROUP BY om.steam_id"
+    "), same AS MATERIALIZED ("
+    " SELECT o.steam_id, count(DISTINCT o.day) FILTER (WHERE o.same_day) AS same_day_days,"
+    " count(DISTINCT o.day) AS seen_days FROM o GROUP BY o.steam_id"
+    "), cls AS MATERIALIZED ("
+    " SELECT x.steam_id, array_agg(DISTINCT x.conn_class ORDER BY x.conn_class) AS classes"
+    " FROM (SELECT o.steam_id, o.conn_class FROM o"
+    " UNION SELECT om.steam_id, s.conn_class FROM om"
+    " JOIN s ON s.key_id = om.key_id AND s.mark = om.mark) x"
+    " GROUP BY x.steam_id"
+    ")"
+    " SELECT per.steam_id, per.shared_markers, COALESCE(same.same_day_days, 0) AS same_day_days,"
+    " per.any_day_only, per.last_shared_day, per.min_population, cls.classes,"
+    " count(*) OVER () AS total, COALESCE(same.seen_days, 0) AS seen_days, per.others"
+    " FROM per LEFT JOIN same ON same.steam_id = per.steam_id"
+    " JOIN cls ON cls.steam_id = per.steam_id"
+    " ORDER BY COALESCE(same.same_day_days, 0) DESC, per.min_population ASC, per.steam_id ASC"
+    " LIMIT CAST(:cap AS integer)")
+
+
+def _alt_relation_sql(mark_column: str) -> str:
+    if mark_column not in ("addr_mark", "block_mark"):
+        raise ValueError(mark_column)
+    return _ALT_RELATION_SQL.replace("{mark}", mark_column)
+
+
+def _alt_iso(value):
+    return value.isoformat() if value is not None else None
+
+
+def _alt_listing(rows, entry) -> dict:
+    total = int(rows[0]["total"]) if rows else 0
+    return {"related": [entry(r) for r in rows], "more": max(0, total - len(rows))}
+
+
+async def alt_relations(db: AsyncSession, steam_id: str, days: int = None, own_days: int = None) -> dict:
+    """What the alternate-account signal tables relate to the account
+    `steam_id` over a window of DUE_DAYS, or of `days` when smaller (never
+    larger: a row past the due age may already be gone; ALT-BAN-1: its OWN rows over `own_days`). Uses the caller's
+    session; takes no lock; writes nothing; commits nothing. The shape is
+    design 9.4's. Raises ValueError for a window that is not a positive
+    integer."""
+    if days is None:
+        window = _alt_signals.DUE_DAYS
+    elif isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError("days")
+    else:
+        window = min(days, _alt_signals.DUE_DAYS)
+    key = _alt_signals.loaded_key()
+    sid = str(steam_id)
+    cap = _alt_signals.RELATION_LIST_CAP if own_days is None else _ALT_BAN_LINKS_SHOWN
+    base = {"sid": sid, "w": window, "ow": window if own_days is None else _alt_own_window(own_days)}
+
+    counts = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)) AS facts,"
+        " (SELECT count(*) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
+        " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))) AS markers,"
+        " (SELECT count(DISTINCT day) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
+        " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))) AS address_days,"
+        " (SELECT count(*) FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))) AS shares,"
+        " (SELECT count(*) FROM conn_markers WHERE steam_id = CAST(:sid AS text)"
+        " AND last_at >= now() - make_interval(days => CAST(:ow AS integer))"
+        " AND key_id <> CAST(:kid AS text))"
+        " + (SELECT count(*) FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+        " AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))"
+        " AND key_id <> CAST(:kid AS text)) AS earlier"),
+        {**base, "kid": key.key_id if key is not None else ""})).mappings().one()
+    facts = (await db.execute(text(
+        "SELECT copy_state, first_seen_at, last_seen_at, vac_banned, vac_banned_first_at,"
+        " vac_banned_last_at, publisher_banned, publisher_banned_first_at,"
+        " publisher_banned_last_at, over_limit_days"
+        " FROM steam_signin_facts WHERE steam_id = CAST(:sid AS text)"), {"sid": sid})).mappings().first()
+
+    def relation(r):
+        return {"steam_id": r["steam_id"], "shared_markers": int(r["shared_markers"]),
+                "same_day_days": int(r["same_day_days"]), "any_day_only": int(r["any_day_only"]),
+                "last_shared_day": _alt_iso(r["last_shared_day"]),
+                "min_population": int(r["min_population"]), "classes": list(r["classes"]), **_alt_rel_extra(r, own_days)}
+
+    address = _alt_listing((await db.execute(text(_alt_relation_sql("addr_mark")),
+                                             {**base, "cap": cap})).mappings().all(), relation)
+    block = _alt_listing((await db.execute(text(_alt_relation_sql("block_mark")),
+                                           {**base, "cap": cap})).mappings().all(), relation)
+
+    def family_entry(r):
+        out = {"steam_id": r["steam_id"], "last_seen_at": _alt_iso(r["last_seen_at"])}
+        if "owners" in r:
+            out.update({"owners": int(r["owners"])}, **({"others": int(r["others"])} if own_days is not None else {}))
+        return out
+
+    # Accounts sharing an owner with this one: a join on (key_id, owner_mark),
+    # no key needed.
+    sharing = _alt_listing((await db.execute(text(
+        "WITH mine AS (SELECT key_id, owner_mark FROM steam_family_shares"
+        " WHERE steam_id = CAST(:sid AS text) AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))),"
+        " pm AS (SELECT g.key_id, g.owner_mark, count(DISTINCT g.steam_id) AS n FROM steam_family_shares g JOIN mine m2 ON m2.key_id = g.key_id AND m2.owner_mark = g.owner_mark WHERE g.steam_id <> CAST(:sid AS text) AND g.last_seen_at >= now() - make_interval(days => CAST(:w AS integer)) GROUP BY g.key_id, g.owner_mark)"
+        " SELECT f.steam_id, count(*) AS owners, max(f.last_seen_at) AS last_seen_at, min(pm.n) - 1 AS others,"
+        " count(*) OVER () AS total"
+        " FROM steam_family_shares f"
+        " JOIN mine m ON m.key_id = f.key_id AND m.owner_mark = f.owner_mark"
+        " JOIN pm ON pm.key_id = f.key_id AND pm.owner_mark = f.owner_mark"
+        " JOIN players p ON p.steam_id = f.steam_id AND p.deleted_at IS NULL WHERE f.steam_id <> CAST(:sid AS text)"
+        " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+        " GROUP BY f.steam_id"
+        " ORDER BY max(f.last_seen_at) DESC, f.steam_id ASC"
+        " LIMIT CAST(:cap AS integer)"), {**base, "cap": cap})).mappings().all(), family_entry)
+
+    if key is None:
+        owner = {"state": "no_key"}
+        lends = {"state": "no_key"}
+    else:
+        # Accounts this one lends to: one mark, its own, under the loaded key.
+        lends = _alt_listing((await db.execute(text(
+            "SELECT f.steam_id, max(f.last_seen_at) AS last_seen_at, count(*) OVER () AS total"
+            " FROM steam_family_shares f"
+            " JOIN players p ON p.steam_id = f.steam_id AND p.deleted_at IS NULL"
+            " WHERE f.key_id = CAST(:kid AS text) AND f.owner_mark = CAST(:om AS bytea)"
+            " AND f.steam_id <> CAST(:sid AS text)"
+            " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+            " GROUP BY f.steam_id"
+            " ORDER BY max(f.last_seen_at) DESC, f.steam_id ASC"
+            " LIMIT CAST(:cap AS integer)"),
+            {**base, "cap": cap, "kid": key.key_id,
+             "om": _alt_signals.account_mark(key.secret, sid) if sid.isascii() and sid.isdigit()
+             else b""})).mappings().all(), family_entry)
+        mine = (await db.execute(text(
+            "SELECT key_id, owner_mark, last_seen_at FROM steam_family_shares WHERE steam_id = CAST(:sid AS text)"
+            " AND last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))"), base)).all()
+        if not mine:
+            owner = {"state": "none"}
+        else:
+            ids = [r[0] for r in (await db.execute(text(
+                "SELECT steam_id FROM players WHERE deleted_at IS NULL LIMIT CAST(:n AS integer)"),
+                {"n": _alt_signals.OWNER_CANDIDATE_CAP + 1})).all()]
+            if len(ids) > _alt_signals.OWNER_CANDIDATE_CAP:
+                owner = {"state": "not_computed"}
+            else:
+                # Only rows under the loaded key id can resolve; the rest, and
+                # every mark no candidate matches, are "unresolved" and nothing
+                # more (finding 25).
+                want = {bytes(m) for k, m, *_t in mine if k == key.key_id}
+                unresolved = sum(1 for k, _m, *_t in mine if k != key.key_id)
+                found = {}
+                for cand in ids:
+                    if isinstance(cand, str) and cand.isascii() and cand.isdigit():
+                        mk = _alt_signals.account_mark(key.secret, str(int(cand)))
+                        if mk in want:
+                            found.setdefault(mk, cand)
+                unresolved += len(want - set(found))
+                resolved = sorted(set(found.values()))
+                owner = ({"state": "resolved", "steam_ids": resolved, "unresolved": unresolved, **_alt_lender_seen(mine, found, own_days)}
+                         if resolved else {"state": "unresolved", "unresolved": unresolved})
+
+    steam = None
+    if facts is not None:
+        steam = {"copy_state": facts["copy_state"],
+                 "first_seen_at": _alt_iso(facts["first_seen_at"]),
+                 "last_seen_at": _alt_iso(facts["last_seen_at"]),
+                 "vac_banned": facts["vac_banned"],
+                 "vac_banned_first_at": _alt_iso(facts["vac_banned_first_at"]),
+                 "vac_banned_last_at": _alt_iso(facts["vac_banned_last_at"]),
+                 "publisher_banned": facts["publisher_banned"],
+                 "publisher_banned_first_at": _alt_iso(facts["publisher_banned_first_at"]),
+                 "publisher_banned_last_at": _alt_iso(facts["publisher_banned_last_at"])}
+    return {"window_days": window,
+            "recorded": {"facts": bool(counts["facts"]), "markers": int(counts["markers"]),
+                         "address_days": int(counts["address_days"]), "shares": int(counts["shares"]),
+                         "earlier_key_rows": int(counts["earlier"]) if key is not None else None,
+                         "over_limit_days": int(facts["over_limit_days"]) if facts is not None else 0},
+            "steam": steam,
+            "address": address,
+            "block": block,
+            "family": {"owner": owner, "sharing_owner": sharing, "lends_to": lends}}
+
+
+def _alt_boot() -> None:
+    """Load the signal key from the environment and say its state in one
+    line, on both roles: `key absent`, `key refused`, or `key loaded id=`
+    with the key id. The value itself is never printed."""
+    state = _alt_signals.install_key(os.getenv(_alt_signals.KEY_ENV))
+    _alt_print("[ALT-SIGNALS] key loaded id=%s" % _alt_signals.key_word() if state == "loaded"
+               else "[ALT-SIGNALS] key %s" % state)
+
+
+_alt_boot()
+
+
 @app.post("/api/v1/auth/steam", tags=["Mod"])
-async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
+async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db),
+                     request: Request = None):
     """Verify a Steam Web-API auth ticket and issue a session token.
     Key unset → pipeline no-op mode: token issued with verified=false so the
-    client/header plumbing can be proven end-to-end before enforcement."""
+    client/header plumbing can be proven end-to-end before enforcement.
+
+    CHEAT-ALT-1: a verified sign-in, after its own commit, may run the
+    alternate-account recording as a second transaction (_alt_record) inside
+    a guard that lets no Exception out; the answer is built before it."""
     # Reject non-hex tickets outright, before the value goes anywhere near the
     # outbound URL — the legit client only ever sends hex (BitConverter), and
     # raw interpolation would otherwise allow query-parameter injection
     # (ticket_hex='...&appid=<other>'). Runs even in key-unset no-op mode.
     if not _re.fullmatch(r"[0-9a-fA-F]+", req.ticket_hex):
         raise HTTPException(status_code=400, detail="bad_ticket")
-    # Review find: without a ban gate here, admin_ban's session revocation held
-    # only until the client's automatic re-mint ("re-minting on next
-    # heartbeat") — a banned account could immediately obtain a fresh verified
-    # session and keep using every session-gated endpoint that lacks a
-    # usage-site ban check. Bans must also stop the mint.
-    # This early read takes NO lock: the Steam call below waits up to 6 s, and
-    # an identity key held across it would hold every report that names the
-    # account for that long. A banned account is still refused here, before
-    # the call; the writing transaction below takes the key and reads again.
-    await _ban_gate_or_raise(db, req.steam_id)
+    # Bans stop the mint too (admin_ban's revocation otherwise held only until
+    # the client's automatic re-mint). This early read takes NO lock: a key held
+    # across the Steam call below would hold every report naming the account;
+    # the writing transaction takes the key and reads again. On the refusal,
+    # ALT-BAN-1's recording runs first (_alt_ban_refused); the same refusal is raised.
+    try:
+        await _ban_gate_or_raise(db, req.steam_id)
+    except HTTPException:
+        await _alt_ban_refused(db, req, request)
+        raise
     # End the read's transaction: nothing is written yet, and no transaction
     # stays open across the wait.
     await db.rollback()
@@ -17086,8 +17797,17 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
          "v": verified, "iat": now,
          "exp": now + timedelta(seconds=STEAM_SESSION_TTL_SECONDS)})
     await db.commit()
-    return {"session_token": token, "expires_in": STEAM_SESSION_TTL_SECONDS,
-            "verified": verified}
+    answer = {"session_token": token, "expires_in": STEAM_SESSION_TTL_SECONDS,
+              "verified": verified}
+    # CHEAT-ALT-1: the recording runs only after the commit above, only for a
+    # verified sign-in (`params` is bound whenever `verified` is true), as its
+    # own transaction; whatever Exception it raises, the answer above is returned.
+    if verified:
+        try:
+            await _alt_record(db, req.steam_id, params, request)
+        except Exception as ex:
+            await _alt_abandon(db, ex)
+    return answer
 
 
 SEAT_VERIFIED = "verified"
@@ -47233,6 +47953,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
       - deleted_at stamped so the row is hidden from leaderboards
       - personal-only rows (achievements, link codes, region ping maps, 1v1/2v2/1v2 queue
         entries, blocks, Steam sessions) deleted
+      - the account's sign-in evidence rows (steam_signin_facts, steam_family_shares,
+        conn_markers; CHEAT-ALT-1) deleted under the identity key, also when no players
+        row exists or the row is already deleted: those answers are unchanged
 
     Requires an HMAC signature over "delete:{steam_id}" using the mod secret,
     AND a verified Steam session for the same steam_id — STRICT, not the
@@ -47308,8 +48031,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await _ban_gate_or_raise(db, steam_id, request)  # every writer of a key's player_bans rows holds its identity lock to its commit
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
+        await _alt_delete_account(db, steam_id)
+        await db.commit()
         return {"status": "not_found", "steam_id": steam_id}
     if player.deleted_at is not None:
+        await _alt_delete_account(db, steam_id)
+        await db.commit()
         return {"status": "already_deleted", "steam_id": steam_id}
 
     pid = player.id
@@ -47339,6 +48066,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # so none of this player's survives it (c3 I). Order: identity ->
     # deletion key -> pc_snapshot -> every row lock.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
+    await _alt_delete_account(db, steam_id)   # CHEAT-ALT-1: after the pool snapshot's key (_alt_delete_account)
 
     # Drop purely personal rows — no cross-player impact.
     await db.execute(text("DELETE FROM player_achievements WHERE player_id = :pid"), {"pid": pid})
@@ -51194,7 +51922,7 @@ async def admin_list_bans(
     # check's two, THREE or FOUR per call. "live" is the first statement's word; "deleted" needs no live row in
     # the first statement and the id's hash in the ledger at the second (_purged_steam_ids: one read, for the page's
     # ids with no live row, only with MATCH_HMAC_SECRET set, never a bind value nor a statement's text); else "none".
-    gone = await _purged_steam_ids(db, sorted({r["steam_id"] for r in rows if r["live_id"] is None}))
+    gone = await _purged_steam_ids(db, sorted({r["steam_id"] for r in rows if r["live_id"] is None})); alt = await _ban_list_alt(db, [r["steam_id"] for r in rows])  # noqa: E702 -- ALT-BAN-1: with a key loaded FOUR more (a savepoint, the limits, one read, its rollback)
     return {"bans": [
         {
             "id": str(r["id"]), "steam_id": r["steam_id"],
@@ -51208,7 +51936,7 @@ async def admin_list_bans(
             "banned_by_name": r["banned_by_name"] or "",
             "details": r["details"] or "", "details_at": _ban_end_iso(r["details_at"]),
             "details_by_name": (r["details_by_name"] or "") if r["details"] is not None else "",
-            "region": "", "region_at": None, "regions": None, "links": None,  # ALT-BAN-1's four, unrecorded here
+            **alt.get(r["steam_id"], dict(_BAN_LIST_ALT_NONE)),  # ALT-BAN-1's four: region, region_at, regions, links
         } for r in rows
     ], "total": int(got[0]["total"]) if got else 0, "limit": limit, "offset": offset}
 
@@ -58996,7 +59724,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:5019 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:5036 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -88480,3 +89208,886 @@ def _checkin_outside_domain(answer) -> dict:
 # at the end of the module, so nothing above it in main.py moves; the health
 # route reads it at request time.
 _BAN_RECORD_BUILD = 1
+
+
+# ── ALT-BAN-1: the region reader and the build marker ────────────────────────
+# The region reader (geo_region.py: our own reader of the region file mounted
+# read-only at /app/private/geo). main reaches it only by its two attributes,
+# _geo_region.region_of(host) and _geo_region.file_word(), each call run in a
+# thread; never by importing its names. Imported here, at the end of the
+# module, so nothing above it in main.py moves: the health route and the
+# recording read the name at call time.
+import geo_region as _geo_region  # noqa: E402
+# Release-train verification plumbing, not a design mechanism: 1 = this build
+# carries ALT-BAN-1 (the region reader, and the recording of a verified
+# connection of an account under an active ban, kept while the ban stands),
+# reported on /health as `alt_ban_build`, beside `ban_region_file`
+# (geo_region.file_word(): 'absent', 'refused' or the file's build month). It
+# names build identity only (learnings 780, 794, 1186). A code constant, equal
+# on both boxes by construction, probed by the release train and read by
+# nothing else (#306). Absent on any build before it. Defined at the end of the
+# module, so nothing above it in main.py moves.
+_ALT_BAN_BUILD = 1
+
+
+# -- ALT-BAN-1 (Sid's asks B7 and B8): what is kept for an account under an active ban --
+# For an account under an active ban the server records, at a sign-in that
+# Steam has verified, the lane's records (alt_signals) and the rough region of
+# the connection (country and state, migration 431's ban_regions), and keeps
+# them while the ban stands. The sign-in of a banned account is refused before
+# it asks Steam (steam_auth's early gate); on that refusal _alt_ban_refused may
+# ask Steam to verify the ticket the request already carries, spaced (at most
+# once in two seconds overall, once in ten minutes per account after an OK and
+# once a minute after anything else), with no identity key, no transaction and
+# no lock held while Steam answers, and then records through _ban_ticket_seen.
+# The refusal the client receives is the same object, whatever the recording
+# does. _ban_ticket_seen is also the one function BAN-MAIL-1's route calls
+# after its own verification; _steam_ticket_check is the Steam helper both use.
+
+_ALT_BAN_SPACE_ALL_S = 2.0       # one Steam ask overall at most every two seconds
+_ALT_BAN_SPACE_OK_S = 600.0      # per account, after Steam answered OK
+_ALT_BAN_SPACE_OTHER_S = 60.0    # per account, after any other outcome
+_ALT_BAN_LATE_S = 8.0            # no recording begins later than this after the request came in
+_ALT_BAN_STEAM_SOCKET_S = 3.0    # each socket operation of the Steam call
+_ALT_BAN_STEAM_WAIT_S = 4.0      # the whole wait for Steam's answer
+_ALT_BAN_REGION_WAIT_S = 1.0     # the whole wait for the region reader
+_ALT_BAN_REGIONS_CAP = 50        # ban_regions rows per account
+# Monotonic stamps, in this process only (the api runs one worker): the last
+# ask overall, and per account the time before which it is not asked again.
+_alt_ban_asked = {"all": None, "ids": {}}
+
+
+def _steam_ticket_url(key: str, ticket_hex: str) -> str:
+    """The ticket check's URL, as steam_auth builds it. NEVER logged: it
+    carries the Web API key."""
+    return ("https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/"
+            f"?key={key}&appid={STEAM_APPID}&ticket={ticket_hex}"
+            f"&identity={STEAM_TICKET_IDENTITY}")
+
+
+def _steam_ticket_params(body, steam_id: str):
+    """Steam's params when the answer is OK for `steam_id`, else None: the
+    predicate steam_auth applies."""
+    params = ((body or {}).get("response") or {}).get("params") or {}
+    if params.get("result") == "OK" and str(params.get("steamid") or "") == steam_id:
+        return params
+    return None
+
+
+async def _steam_ticket_check(ticket_hex, steam_id, socket_s: float = 6.0, wait_s=None):
+    """The Steam helper beside steam_auth: verify `ticket_hex` for
+    `steam_id` the way steam_auth does (the same URL, the same predicate),
+    the blocking call in a thread of the reads' pool, one at most in flight
+    ("busy" when one is), `socket_s` for each socket operation, the wait cut
+    at `wait_s` (socket_s + 1 s when it is not given). Returns (params,
+    word): Steam's params and "OK", or None and a word ("no_key", "bad_ticket",
+    "not_ok", "busy" or an exception's class name). Never raises but a cancellation; logs nothing."""
+    key = os.getenv("STEAM_WEB_API_KEY", "")
+    if not key:
+        return None, "no_key"
+    if not isinstance(ticket_hex, str) or not _re.fullmatch(r"[0-9a-fA-F]+", ticket_hex):
+        return None, "bad_ticket"
+    try:
+        call = _alt_ban_read_start("steam", _steam_http_get_json, _steam_ticket_url(key, ticket_hex), socket_s)
+        body = await _alt_ban_read_wait(call, wait_s if wait_s is not None else socket_s + 1.0)
+        params = _steam_ticket_params(body, str(steam_id))
+    except Exception as ex:
+        return None, ("busy" if isinstance(ex, _AltBanReadBusy) else type(ex).__name__)
+    return (params, "OK") if params is not None else (None, "not_ok")
+
+
+def _alt_ban_spacing(steam_id: str, now: float, take: bool) -> bool:
+    """True when both spacings are free for `steam_id` at `now`; with
+    `take`, stamps both in the same call (no await between the check and
+    the stamp, so two requests cannot both pass). Stamps that have run out
+    are dropped first, so the table holds only accounts asked for in the
+    last ten minutes."""
+    ids = _alt_ban_asked["ids"]
+    for k in [k for k, until in ids.items() if until <= now]:
+        del ids[k]
+    last = _alt_ban_asked["all"]
+    if (last is not None and now - last < _ALT_BAN_SPACE_ALL_S) or steam_id in ids:
+        return False
+    if take:
+        _alt_ban_asked["all"] = now
+        ids[steam_id] = now + _ALT_BAN_SPACE_OK_S
+    return True
+
+
+async def _alt_ban_notice_open(db: AsyncSession) -> bool:
+    """The notice check with both sentences: exactly one FAQ message 1 row,
+    its current revision posted, holding alt_signals.NOTICE_BAN (the lane's
+    paragraph and the sentence for a banned account). A failed read is a
+    closed notice."""
+    try:
+        notice = tuple((await db.execute(text(
+            "SELECT count(*), count(*) FILTER (WHERE p.posted_revision = p.revision"
+            " AND strpos(p.content, CAST(:sentence AS text)) > 0)"
+            " FROM pending_channel_posts p"
+            " WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1"),
+            {"sentence": _alt_signals.NOTICE_BAN, "ch": _ALT_FAQ_CHANNEL})).one())
+    except Exception:
+        return False
+    return notice == (1, 1)
+
+
+async def _alt_ban_refused(db: AsyncSession, req, request) -> None:
+    """steam_auth's early ban refusal, before the refusal is raised: for a
+    banned account, ask Steam to verify the ticket the request carries and
+    record through _ban_ticket_seen. In this order: memory only (a signal
+    key loaded, STEAM_WEB_API_KEY set, both spacings free); the notice read
+    in the route's open read transaction; that transaction rolled back, so
+    nothing is held from here on; the spacings checked again and stamped;
+    the ticket sent to Steam's check (3 s a socket operation, 4 s in all);
+    the stamp of the account set to ten minutes after a verified OK, else
+    (any other answer, an exception, or the request cancelled during the
+    ask) a minute;
+    no recording when more than 8 s have passed since this function was
+    entered. Lets no Exception out; its lines carry a word only."""
+    entered = time.monotonic()
+    try:
+        sid = str(req.steam_id)
+        if _alt_signals.loaded_key() is None or not os.getenv("STEAM_WEB_API_KEY", ""):
+            return
+        if not _alt_ban_spacing(sid, time.monotonic(), take=False):
+            return
+        if not await _alt_ban_notice_open(db):
+            return
+        await db.rollback()
+        if not _alt_ban_spacing(sid, time.monotonic(), take=True):
+            return
+        verified = False
+        try:
+            params, word = await _steam_ticket_check(req.ticket_hex, sid, _ALT_BAN_STEAM_SOCKET_S,
+                                                     _ALT_BAN_STEAM_WAIT_S)
+            verified = params is not None
+        finally:
+            # The stamp taken above is provisional: it stands at ten minutes only
+            # after a verified OK; every other end of the ask leaves a minute.
+            _alt_ban_asked["ids"][sid] = time.monotonic() + (
+                _ALT_BAN_SPACE_OK_S if verified else _ALT_BAN_SPACE_OTHER_S)
+        if params is None:
+            _alt_print("[ALT-BAN] not verified: %s" % word)
+            return
+        if time.monotonic() - entered > _ALT_BAN_LATE_S:
+            _alt_print("[ALT-BAN] not recorded: late")
+            return
+        await _ban_ticket_seen(db, request, sid, params)
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _alt_print("[ALT-BAN] not recorded: %s" % type(ex).__name__)
+
+
+async def _ban_ticket_seen(db: AsyncSession, request, steam_id: str, steam_params) -> None:
+    """The one recording of a verified connection of an account under an
+    active ban (F3), for steam_auth's refusal and BAN-MAIL-1's route, each
+    after its own Steam verification and with no transaction open on `db`
+    (an open one is left as it is and nothing is recorded: the line says
+    `open`). Without a lock: the key, the connecting address, Steam's fields,
+    the marks, and the region (geo_region.region_of on the reads' pool, one in flight at most, cut at 1 s,
+    "" on anything else; only for an address the lane marks). Then one
+    transaction: the lane's limits; the account's identity key EXCLUSIVE as
+    its first lock; the active ban read under it (none: not recorded); the
+    notice check with both sentences; the lane's upserts and the region's
+    (_alt_store); commit. A deleted account under an active ban is recorded
+    like any other. Lets no Exception out (_alt_abandon)."""
+    if db.in_transaction():
+        _alt_print("[ALT-BAN] not recorded: open")
+        return
+    try:
+        key = _alt_signals.loaded_key()
+        if key is None:
+            return
+        host = _rl_client_address(request) if request is not None else None
+        facts = _alt_signals.steam_fields(steam_params, steam_id, key)
+        seen = _alt_signals.observe(host, key, _conn_ranges.classify_address, _conn_ranges.CR_LAN_NETS)
+        region = ""
+        if seen is not None:
+            try:
+                region = await _alt_ban_read_wait(_alt_ban_read_start("region", _geo_region.region_of, host),
+                                                  _ALT_BAN_REGION_WAIT_S)
+            except Exception:
+                region = ""
+            region = region if isinstance(region, str) else ""
+        await _alt_limits(db, _alt_signals.RECORD_LOCK_TIMEOUT_MS, _alt_signals.RECORD_STATEMENT_TIMEOUT_MS)
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+        banned = (await db.execute(text(
+            "SELECT 1 FROM player_bans pb WHERE pb.steam_id = CAST(:sid AS text) AND "
+            + player_ban_active_sql("pb") + " LIMIT 1"), {"sid": steam_id})).scalar()
+        if banned is None:
+            raise _AltNotRecorded("not_banned")
+        if not await _alt_ban_notice_open(db):
+            raise _AltNotRecorded("notice")
+        await _alt_store(db, steam_id, key, facts, seen, region)
+    except Exception as ex:
+        await _alt_abandon(db, ex)
+
+
+async def _ban_region_store(db: AsyncSession, steam_id: str, region: str, conn_class: str) -> None:
+    """The region's upsert in the recording's transaction: one row per
+    account, region and class, stored when the row stands or the account
+    holds fewer than _ALT_BAN_REGIONS_CAP rows; last_at moves forward only."""
+    await db.execute(text(
+        "INSERT INTO ban_regions AS r (steam_id, region, conn_class)"
+        " SELECT CAST(:sid AS text), CAST(:rg AS text), CAST(:cls AS varchar)"
+        " WHERE EXISTS (SELECT 1 FROM ban_regions x WHERE x.steam_id = CAST(:sid AS text)"
+        " AND x.region = CAST(:rg AS text) AND x.conn_class = CAST(:cls AS varchar))"
+        " OR (SELECT count(*) FROM ban_regions x WHERE x.steam_id = CAST(:sid AS text)) < CAST(:cap AS integer)"
+        " ON CONFLICT (steam_id, region, conn_class) DO UPDATE SET last_at = GREATEST(r.last_at, now())"),
+        {"sid": steam_id, "rg": region, "cls": conn_class, "cap": _ALT_BAN_REGIONS_CAP})
+
+
+# -- ALT-BAN-1 step 5: the retention keeps what an active ban keeps (F4) --
+# The lane's three arms (_alt_retention_batch, _alt_retention_left) skip every
+# row of an account under an active ban, read by models.player_ban_active_sql
+# (the one definition); once the ban has ended, its rows go by their own last
+# sight. Two arms more, here: a ban_regions row goes at the first pass after
+# its account's ban has ended, whatever its age; a ban_link_notices row goes
+# when the ban of its banned side has ended, and an UNPOSTED one also when
+# its other side has no marker row left. A POSTED row stays while the ban
+# stands, whatever the other side's markers, so the candidates' read (which
+# skips a pair that has a row) never posts a pair twice over one ban. Same
+# batches, limits, SKIP LOCKED and budget as the lane's arms.
+
+async def _ban_retention_batch(db: AsyncSession, table: str, bind: dict):
+    """One batch of the 'regions' or 'notices' arm, in the transaction
+    _alt_retention_batch opened under the pass's limits (it commits). Returns
+    the DELETE's result."""
+    if table == "regions":
+        return await db.execute(text(
+            "DELETE FROM ban_regions"
+            " WHERE (steam_id, region, conn_class) IN ("
+            " SELECT x.steam_id, x.region, x.conn_class FROM ban_regions x"
+            " WHERE NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.steam_id AND "
+            + player_ban_active_sql("pb") + ")"
+            " ORDER BY x.last_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), {"batch": bind["batch"]})
+    if table == "notices":
+        return await db.execute(text(
+            "DELETE FROM ban_link_notices"
+            " WHERE (banned_steam_id, other_steam_id) IN ("
+            " SELECT x.banned_steam_id, x.other_steam_id FROM ban_link_notices x"
+            " WHERE NOT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = x.banned_steam_id AND "
+            + player_ban_active_sql("pb") + ")"
+            " OR (x.posted_at IS NULL AND NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id))"
+            " ORDER BY x.noticed_at LIMIT CAST(:batch AS integer)"
+            " FOR UPDATE OF x SKIP LOCKED)"
+            " RETURNING 1"), {"batch": bind["batch"]})
+    raise ValueError(table)
+
+
+async def _ban_retention_left(db: AsyncSession) -> dict:
+    """The rows the two arms would take, read in the transaction the lane's
+    count opened under the pass's limits."""
+    row = (await db.execute(text(
+        "SELECT (SELECT count(*) FROM ban_regions x WHERE NOT EXISTS (SELECT 1 FROM player_bans pb"
+        " WHERE pb.steam_id = x.steam_id AND " + player_ban_active_sql("pb") + ")),"
+        " (SELECT count(*) FROM ban_link_notices x WHERE NOT EXISTS (SELECT 1 FROM player_bans pb"
+        " WHERE pb.steam_id = x.banned_steam_id AND " + player_ban_active_sql("pb") + ")"
+        " OR (x.posted_at IS NULL AND NOT EXISTS (SELECT 1 FROM conn_markers c WHERE c.steam_id = x.other_steam_id)))"))).one()
+    return {"regions": int(row[0]), "notices": int(row[1])}
+
+
+def _ban_retention_said(deleted: dict, left) -> dict:
+    """The two arms' lines and the result's "ban" part: the rows deleted, when
+    any; the rows left, when counted and any are."""
+    gone = {"regions": deleted["regions"], "notices": deleted["notices"]}
+    if any(gone.values()):
+        _alt_print("[ALT-RETENTION] ban rows: deleted regions %d, notices %d" % (gone["regions"], gone["notices"]))
+    if left is not None and any(left.values()):
+        _alt_print("[ALT-RETENTION] ban rows left: regions %d, notices %d" % (left["regions"], left["notices"]))
+    return {"deleted": gone, "left": left}
+
+
+# -- ALT-BAN-1 turn 2: the three reads that run in a thread, bounded at admission --
+# The region file's word for /health (_ban_region_word), the region read of a
+# recording (_ban_ticket_seen) and Steam's ticket check (_steam_ticket_check)
+# each run in a thread of _ALT_BAN_READS, a pool of their own with three
+# workers, so a read that does not return never holds a worker of the pool that
+# asyncio.to_thread uses. A read is admitted only when no read of its kind is
+# in flight: _alt_ban_reading holds the pool's future of the one in flight, and
+# that future is done exactly when its thread has ended (a cut wait never frees
+# it). So each kind holds one thread at most, the three together at most three,
+# the pool's size, and an admitted read never queues behind a held one. A
+# caller that finds its kind in flight starts nothing and answers as for a read
+# that did not answer in time: /health says "pending", the recording stores no
+# region, the ticket check says "busy" and the refusal goes out unrecorded. The
+# wait for a read is cut at its limit without cancelling the read.
+import concurrent.futures as _alt_cf  # noqa: E402
+_ALT_BAN_READS = _alt_cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="alt-ban-read")
+_alt_ban_reading = {"word": None, "region": None, "steam": None}
+_ALT_BAN_WORD_WAIT_S = 0.5       # the whole wait of a /health call for the word
+_BAN_REGION_WORD_PENDING = "pending"   # no state of the file produces it (file_word: absent, refused, YYYY-MM)
+
+
+class _AltBanReadBusy(Exception):
+    """A read of this kind is in flight: none was started."""
+
+
+def _alt_ban_read_start(kind: str, fn, *args):
+    """Start fn(*args) on _ALT_BAN_READS when no read of `kind` is in flight,
+    and return its future; None when one is (nothing is started). The check
+    and the start stand with no await between them."""
+    held = _alt_ban_reading[kind]
+    if held is not None and not held.done():
+        return None
+    fut = _ALT_BAN_READS.submit(fn, *args)
+    _alt_ban_reading[kind] = fut
+    return fut
+
+
+async def _alt_ban_read_wait(fut, wait_s: float):
+    """The answer of the read `fut`, waited for at most wait_s (TimeoutError
+    past it; _AltBanReadBusy when none was started). The read itself is not
+    cancelled: it runs on in its thread and holds its kind until it ends."""
+    if fut is None:
+        raise _AltBanReadBusy()
+    return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(fut)), wait_s)
+
+
+async def _ban_region_word() -> str:
+    """/health's ban_region_file (both arms): geo_region.file_word() read in
+    a thread of the reads' pool. A call that finds a read in flight waits for
+    that same read; else it starts one, so with storage that answers at once
+    the word is the file's state at the call (no age window). Past
+    _ALT_BAN_WORD_WAIT_S, or before a read has answered, the word is
+    _BAN_REGION_WORD_PENDING."""
+    fut = _alt_ban_reading["word"]
+    if fut is None or fut.done():
+        fut = _alt_ban_read_start("word", _geo_region.file_word)
+    try:
+        word = await _alt_ban_read_wait(fut, _ALT_BAN_WORD_WAIT_S)
+    except Exception:
+        return _BAN_REGION_WORD_PENDING
+    return word if isinstance(word, str) and word else _BAN_REGION_WORD_PENDING
+
+
+# -- ALT-BAN-1 step 6: the links of a banned account, and the list's four keys --
+# GET /api/v1/admin/bans/links (CONTRACT-BAN-1124 point 4 with ADD2) is built
+# from main.alt_relations on the banned account, its own side read with
+# _ALT_BAN_OWN_DAYS (its rows are kept while the ban stands), the other side
+# with the lane's window. Rows in the contract's order: address, block,
+# family_shared, family_lender, family_borrower; inside each the lane's order;
+# a block row of an account already shown by address is left out; at most 50.
+# Only current players are named (the lane's reads join players with no
+# deletion stamp): a linked account with no live players row stands in no
+# row, and every count counts it as one account: a row's `others`, the
+# borrowers' `others` (the head's gone_borrowers), links_total (the head's
+# gone) and the list's `links`. A lender with no live players row cannot be
+# resolved (its mark is computed from live candidates): neither named nor
+# counted. No mark, key id, code or address leaves.
+_ALT_BAN_OWN_DAYS = 36500        # the banned subject's own side: no window while the ban stands
+_ALT_BAN_LINKS_SHOWN = 50
+_ALT_BAN_REGIONS_SHOWN = 20
+_ALT_BAN_LINKS_LOCK_MS = 500
+_ALT_BAN_LINKS_STATEMENT_MS = 3000
+_ALT_BAN_HOW = ("address", "block", "family_shared", "family_lender", "family_borrower")
+
+
+def _alt_own_window(own_days) -> int:
+    """alt_relations' own window: a positive integer, else ValueError."""
+    if isinstance(own_days, bool) or not isinstance(own_days, int) or own_days < 1:
+        raise ValueError("own_days must be a positive integer")
+    return own_days
+
+
+def _alt_rel_extra(r, own_days) -> dict:
+    """The two keys a relation entry gains when alt_relations is read with
+    own_days: the linked account's days on a shared code (any day), and the
+    further accounts on the code (other than the subject and the linked
+    one, the least over the codes shared). Nothing otherwise."""
+    if own_days is None:
+        return {}
+    return {"seen_days": int(r["seen_days"]), "others": max(0, int(r["others"]))}
+
+
+def _alt_lender_seen(mine, found, own_days) -> dict:
+    """With own_days: per resolved lender, the newest time the subject's own
+    share rows on that lender's mark were seen (ISO). Nothing otherwise."""
+    if own_days is None:
+        return {}
+    seen = {}
+    for _k, mark, at in mine:
+        sid = found.get(bytes(mark))
+        if sid is not None and (sid not in seen or at > seen[sid]):
+            seen[sid] = at
+    return {"last_seen": {s: _alt_iso(at) for s, at in seen.items()}}
+
+# The links route's second statement: the active ban, the notice with both
+# sentences, the linked accounts with no live players row (gone: by block,
+# which holds every address link, by a shared lender and as borrowers of the
+# account's copy, in alt_relations' windows; gone_borrowers: the borrowers
+# alone), and the newest regions, in one read (a cross join of one row with
+# at most 20; no LATERAL).
+_BAN_LINKS_HEAD_SQL = (
+    "SELECT b.banned, b.notice, b.gone, b.gone_borrowers, r.region, r.conn_class, r.first_at, r.last_at FROM ("
+    " SELECT EXISTS (SELECT 1 FROM player_bans pb WHERE pb.steam_id = CAST(:sid AS text) AND {active}) AS banned,"
+    " (SELECT count(*) = 1 AND count(*) FILTER (WHERE p.posted_revision = p.revision"
+    " AND strpos(p.content, CAST(:sentence AS text)) > 0) = 1"
+    " FROM pending_channel_posts p WHERE p.channel_id = CAST(:ch AS text) AND p.sort_order = 1) AS notice,"
+    " (SELECT count(DISTINCT g.other) FROM ("
+    " SELECT o.steam_id AS other FROM conn_markers s JOIN conn_markers o"
+    " ON o.key_id = s.key_id AND o.block_mark = s.block_mark"
+    " WHERE s.steam_id = CAST(:sid AS text) AND s.last_at >= now() - make_interval(days => CAST(:ow AS integer))"
+    " AND o.steam_id <> CAST(:sid AS text) AND o.last_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " UNION SELECT f.steam_id FROM steam_family_shares m JOIN steam_family_shares f"
+    " ON f.key_id = m.key_id AND f.owner_mark = m.owner_mark"
+    " WHERE m.steam_id = CAST(:sid AS text) AND m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer))"
+    " AND f.steam_id <> CAST(:sid AS text) AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " UNION SELECT f.steam_id FROM steam_family_shares f WHERE f.key_id = CAST(:kid AS text)"
+    " AND f.owner_mark = CAST(:om AS bytea) AND f.steam_id <> CAST(:sid AS text)"
+    " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))) g"
+    " WHERE NOT EXISTS (SELECT 1 FROM players p WHERE p.steam_id = g.other AND p.deleted_at IS NULL)) AS gone,"
+    " (SELECT count(DISTINCT f.steam_id) FROM steam_family_shares f WHERE f.key_id = CAST(:kid AS text)"
+    " AND f.owner_mark = CAST(:om AS bytea) AND f.steam_id <> CAST(:sid AS text)"
+    " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))"
+    " AND NOT EXISTS (SELECT 1 FROM players p WHERE p.steam_id = f.steam_id AND p.deleted_at IS NULL))"
+    " AS gone_borrowers) b"
+    " LEFT JOIN (SELECT x.region, x.conn_class, x.first_at, x.last_at FROM ban_regions x"
+    " WHERE x.steam_id = CAST(:sid AS text) ORDER BY x.last_at DESC, x.region, x.conn_class"
+    " LIMIT CAST(:n AS integer)) r ON true"
+    " ORDER BY r.last_at DESC NULLS LAST, r.region, r.conn_class")
+
+
+def _ban_links_rows(rel: dict, gone_borrowers: int = 0) -> tuple:
+    """(rows in the contract's order before the cut, the count of the
+    current players' rows before every cap) from alt_relations' answer read
+    with own_days; `gone_borrowers` (borrowers with no live players row) is
+    counted in each family_borrower row's others."""
+    rows, seen = [], set()
+
+    def day(v):
+        return v[:10] if isinstance(v, str) else None
+    for how in ("address", "block"):
+        for e in rel[how]["related"]:
+            if how == "block" and e["steam_id"] in seen:
+                continue
+            seen.add(e["steam_id"])
+            rows.append({"linked_steam_id": e["steam_id"], "how": how, "days": int(e["seen_days"]),
+                         "last_day": day(e["last_shared_day"]), "others": max(0, int(e["others"]))})
+    fam = rel["family"]
+    for e in fam["sharing_owner"]["related"]:
+        rows.append({"linked_steam_id": e["steam_id"], "how": "family_shared", "days": None,
+                     "last_day": day(e["last_seen_at"]), "others": max(0, int(e["others"]))})
+    owner = fam["owner"]
+    for s in owner.get("steam_ids", []) if owner.get("state") == "resolved" else []:
+        rows.append({"linked_steam_id": s, "how": "family_lender", "days": None,
+                     "last_day": day(owner["last_seen"].get(s)), "others": 0})
+    lends = fam["lends_to"]
+    if "related" in lends:
+        further = max(0, len(lends["related"]) + lends["more"] + max(0, int(gone_borrowers)) - 1)
+        for e in lends["related"]:
+            rows.append({"linked_steam_id": e["steam_id"], "how": "family_borrower", "days": None,
+                         "last_day": day(e["last_seen_at"]), "others": further})
+    # Every account sharing an address code shares that row's block code, so
+    # the block listing's total is the count of the address and block rows
+    # together; the family words add their own.
+    total = (len(rel["block"]["related"]) + rel["block"]["more"] + len(fam["sharing_owner"]["related"])
+             + fam["sharing_owner"]["more"] + sum(1 for r in rows if r["how"] == "family_lender")
+             + ((len(lends["related"]) + lends["more"]) if "related" in lends else 0))
+    return rows, total
+
+
+@app.get("/api/v1/admin/bans/links", tags=["Admin"])
+async def admin_ban_links(
+    admin_steam_id: str = Query(...),
+    target_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """The accounts linked to an actively banned account and its recorded
+    regions (CONTRACT-BAN-1124 point 4, ADD2). Requires the admin signature
+    over action ban_links with the banned id as target. 404 no_active_ban
+    when the id holds no active ban (or is no account id); 503
+    links_unavailable when a read is cancelled by its limits (a lock wait
+    of 500 ms, a statement of 3000 ms, set after the admin check) or fails.
+    At most 13 statements: the admin check's two, the limits, the head
+    (ban, notice, regions), alt_relations' at most eight, the names. Writes
+    nothing; no moderator-log row."""
+    await _require_admin(db, admin_steam_id, "ban_links", target_steam_id, hmac_signature)
+    sid = str(target_steam_id)
+    if not (sid.isascii() and sid.isdigit() and 1 <= len(sid) <= 20):
+        raise HTTPException(status_code=404, detail="no_active_ban")
+    key = _alt_signals.loaded_key()
+    try:
+        await _alt_limits(db, _ALT_BAN_LINKS_LOCK_MS, _ALT_BAN_LINKS_STATEMENT_MS)
+        head = (await db.execute(text(_BAN_LINKS_HEAD_SQL.format(active=player_ban_active_sql("pb"))), {
+            "sid": sid, "sentence": _alt_signals.NOTICE_BAN, "ch": _ALT_FAQ_CHANNEL,
+            "n": _ALT_BAN_REGIONS_SHOWN, "ow": _ALT_BAN_OWN_DAYS, "w": _alt_signals.DUE_DAYS,
+            "kid": key.key_id if key is not None else "",
+            "om": _alt_signals.account_mark(key.secret, sid) if key is not None else b""})).mappings().all()
+        if not head or not head[0]["banned"]:
+            raise _AltNotRecorded("no_active_ban")
+        rel = await alt_relations(db, sid, own_days=_ALT_BAN_OWN_DAYS)
+        rows, total = _ban_links_rows(rel, int(head[0]["gone_borrowers"]))
+        shown = rows[:_ALT_BAN_LINKS_SHOWN]
+        ids = sorted({r["linked_steam_id"] for r in shown})
+        names = dict((await db.execute(text(
+            "SELECT steam_id, display_name FROM players WHERE steam_id = ANY(CAST(:ids AS text[]))"
+            " AND deleted_at IS NULL"), {"ids": ids})).all()) if ids else {}
+    except _AltNotRecorded:
+        raise HTTPException(status_code=404, detail="no_active_ban")
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _alt_print("[ALT-BAN] links unavailable: %s" % type(ex).__name__)
+        raise HTTPException(status_code=503, detail="links_unavailable")
+    return {
+        "steam_id": sid,
+        "recording": "on" if _alt_signals.loaded_key() is not None and head[0]["notice"] else "off",
+        "regions": [{"region": r["region"], "conn_class": r["conn_class"],
+                     "first_at": _ban_end_iso(r["first_at"]), "last_at": _ban_end_iso(r["last_at"])}
+                    for r in head if r["region"] is not None],
+        "links": [{"linked_steam_id": r["linked_steam_id"], "linked_name": names.get(r["linked_steam_id"]) or "",
+                   "how": r["how"], "days": r["days"], "last_day": r["last_day"], "others": r["others"]}
+                  for r in shown],
+        "links_total": max(total, len(rows)) + int(head[0]["gone"]),
+    }
+
+
+# The list's four keys (CONTRACT-BAN-1124 point 1) for every row of a page, by
+# ONE statement (_BAN_LIST_ALT_SQL) inside a savepoint that sets the lane's
+# limits and is rolled back after the read (the limits end with it). Per page
+# id: the newest region and its time, the count of distinct regions, the
+# accounts linked by block (an address shared is a block shared), by a
+# shared lender and as borrowers of the account's copy, each counted once
+# whether or not it has a live players row (never named), and the lender
+# marks of the account's own share rows under the loaded key; on the first
+# row only, the current players' ids when any page id holds such a mark, so
+# that the lenders resolve as alt_relations resolves them. Windows as the
+# links route: the own side _ALT_BAN_OWN_DAYS, the other side the lane's.
+# The block links are an index probe per own block (a correlated ARRAY
+# subquery over ix_conn_markers_block; no LATERAL), never a join of the table.
+# No loaded key, a failed or cancelled statement or an absent table: region
+# "", region_at null, regions and links null; the rest of the list as before.
+_BAN_LIST_ALT_NONE = (("region", ""), ("region_at", None), ("regions", None), ("links", None))   # a tuple: no module state
+_BAN_LIST_ALT_SQL = (
+    "WITH ids AS (SELECT u.sid, u.mark, u.ord FROM unnest(CAST(:ids AS text[]), CAST(:marks AS bytea[]))"
+    " WITH ORDINALITY AS u(sid, mark, ord)),"
+    " rg AS (SELECT DISTINCT ON (r.steam_id) r.steam_id, r.region, r.last_at FROM ban_regions r"
+    " JOIN ids ON ids.sid = r.steam_id ORDER BY r.steam_id, r.last_at DESC, r.region, r.conn_class),"
+    " rn AS (SELECT r.steam_id, count(DISTINCT r.region) AS n FROM ban_regions r JOIN ids ON ids.sid = r.steam_id"
+    " GROUP BY r.steam_id),"
+    " own AS (SELECT DISTINCT c.steam_id AS sid, c.key_id, c.block_mark FROM conn_markers c JOIN ids ON ids.sid = c.steam_id"
+    " WHERE c.last_at >= now() - make_interval(days => CAST(:ow AS integer))),"
+    " nb AS (SELECT own.sid, unnest(ARRAY(SELECT o.steam_id FROM conn_markers o"
+    " WHERE o.key_id = own.key_id AND o.block_mark = own.block_mark AND o.steam_id <> own.sid"
+    " AND o.last_at >= now() - make_interval(days => CAST(:w AS integer)))) AS other FROM own),"
+    " sh AS (SELECT m.steam_id AS sid, f.steam_id AS other FROM steam_family_shares m JOIN ids ON ids.sid = m.steam_id"
+    " JOIN steam_family_shares f ON f.key_id = m.key_id AND f.owner_mark = m.owner_mark"
+    " WHERE m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer)) AND f.steam_id <> m.steam_id"
+    " AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))),"
+    " br AS (SELECT ids.sid, f.steam_id AS other FROM ids JOIN steam_family_shares f"
+    " ON f.key_id = CAST(:kid AS text) AND f.owner_mark = ids.mark"
+    " WHERE f.steam_id <> ids.sid AND f.last_seen_at >= now() - make_interval(days => CAST(:w AS integer))),"
+    " lk AS (SELECT u.sid, array_agg(DISTINCT u.other) AS linked FROM ("
+    " SELECT sid, other FROM nb UNION SELECT sid, other FROM sh UNION SELECT sid, other FROM br) u"
+    " GROUP BY u.sid),"
+    " fl AS (SELECT m.steam_id AS sid, array_agg(DISTINCT m.owner_mark) AS marks FROM steam_family_shares m"
+    " JOIN ids ON ids.sid = m.steam_id WHERE m.key_id = CAST(:kid AS text)"
+    " AND m.last_seen_at >= now() - make_interval(days => CAST(:ow AS integer)) GROUP BY m.steam_id)"
+    " SELECT ids.sid, rg.region, rg.last_at AS region_at, COALESCE(rn.n, 0) AS regions, lk.linked, fl.marks,"
+    " CASE WHEN ids.ord = 1 AND EXISTS (SELECT 1 FROM fl) THEN ARRAY(SELECT p.steam_id FROM players p"
+    " WHERE p.deleted_at IS NULL LIMIT CAST(:cap AS integer) + 1) END AS candidates"
+    " FROM ids LEFT JOIN rg ON rg.steam_id = ids.sid LEFT JOIN rn ON rn.steam_id = ids.sid"
+    " LEFT JOIN lk ON lk.sid = ids.sid LEFT JOIN fl ON fl.sid = ids.sid ORDER BY ids.ord")
+
+
+async def _ban_list_alt(db: AsyncSession, steam_ids) -> dict:
+    """steam_id -> the four keys, for the list's page (_BAN_LIST_ALT_SQL).
+    Four statements when it reads (the savepoint, the limits, the read, the
+    savepoint's rollback), none with no key loaded or an empty page."""
+    key = _alt_signals.loaded_key()
+    ids = [str(s) for s in steam_ids]
+    if key is None or not ids:
+        return {}
+    marks = [_alt_signals.account_mark(key.secret, s) if s.isascii() and s.isdigit() else b"" for s in ids]
+    try:
+        sp = await db.begin_nested()
+        try:
+            await _alt_limits(db, _ALT_BAN_LINKS_LOCK_MS, _ALT_BAN_LINKS_STATEMENT_MS)
+            got = (await db.execute(text(_BAN_LIST_ALT_SQL), {
+                "ids": ids, "marks": marks, "kid": key.key_id, "ow": _ALT_BAN_OWN_DAYS,
+                "w": _alt_signals.DUE_DAYS, "cap": _alt_signals.OWNER_CANDIDATE_CAP})).mappings().all()
+        finally:
+            await sp.rollback()
+    except Exception as ex:
+        _alt_print("[ALT-BAN] list keys unavailable: %s" % type(ex).__name__)
+        return {}
+    cands = next((r["candidates"] for r in got if r["candidates"] is not None), None)
+    lender = {}
+    if cands is not None and len(cands) <= _alt_signals.OWNER_CANDIDATE_CAP:
+        want = {bytes(m) for r in got for m in (r["marks"] or [])}
+        for c in cands:
+            if isinstance(c, str) and c.isascii() and c.isdigit():
+                mk = _alt_signals.account_mark(key.secret, str(int(c)))
+                if mk in want:
+                    lender.setdefault(mk, c)
+    out = {}
+    for r in got:
+        linked = set(r["linked"] or [])
+        linked |= {lender[bytes(m)] for m in (r["marks"] or []) if bytes(m) in lender}
+        linked.discard(r["sid"])
+        out[r["sid"]] = {"region": r["region"] or "", "region_at": _ban_end_iso(r["region_at"]),
+                         "regions": int(r["regions"]), "links": len(linked)}
+    return out
+
+
+# -- ALT-BAN-1 step 7: the notice to the admins (F7; RULING-ALT-BAN-T0 section 4) --
+# A pass on the PRIMARY alone, in the retention loop's form, never inside a
+# sign-in (F8): it finds the pairs (an actively banned account, another
+# account) where the other account's verified sign-in recorded an ADDRESS code
+# that the banned account recorded too, after the ban began and after the
+# banned account's own first sight of that code; the other account under no
+# active ban. Block codes and family sharing are never noticed (they stand on
+# the links page). Each pair is stored in its own transaction (stored before
+# posted, so posted once), then posted: the pair whose qualifying code the
+# fewest accounts share first, then the oldest; at most _BAN_NOTICE_DAY_CAP posts in
+# one UTC day, counted in ban_notice_days (one row a UTC day; it names no
+# account). A post takes a slot of its day by one statement that adds one
+# only while the day's count is under the cap (_BAN_NOTICE_SLOT_SQL), inside
+# the pair's own transaction, after posted_at is written and before the post
+# row: the slot's day, posted_at and the post row's created_at read that
+# transaction's one clock (now()), and the three commit together or not at
+# all, so the day's count is the posts that committed on that UTC day. Passes
+# at once share the one row and its CHECK. No slot, no post. Account deletion
+# and the retention pass never touch the counter; the notice pass removes its
+# days older than two. Every pair's transaction takes the OTHER account's identity key
+# shared, by a try-lock (busy: the next pass), and reads the ban and the marker
+# again under it. The post names each account by its LIVE players row's name
+# (escaped) or "no name"; never the name kept with a ban. Nothing here
+# refuses, delays or marks an account.
+_BAN_NOTICE_PERIOD_S = 60
+_BAN_NOTICE_FIRST_DELAY_S = 90
+_BAN_NOTICE_CANDIDATES = 200
+_BAN_NOTICE_DAY_CAP = 20
+_BAN_NOTICE_LOCK_MS = 500
+_BAN_NOTICE_STATEMENT_MS = 3000
+_BAN_NOTICE_CHANNEL_ENV = "SCR_BAN_NOTICE_CHANNEL"
+
+# One slot of the UTC day of the transaction's now(): one row a day, a delta
+# of one, only while the count is under the cap (the CHECK of 431 holds the
+# same bound). No row returned: the day is full. Run only by
+# _ban_notice_pair_tx, inside the pair's transaction.
+_BAN_NOTICE_SLOT_SQL = (
+    "INSERT INTO ban_notice_days AS d (day, posts) VALUES ((now() AT TIME ZONE 'UTC')::date, 1)"
+    " ON CONFLICT (day) DO UPDATE SET posts = d.posts + 1 WHERE d.posts < CAST(:cap AS integer)"
+    " RETURNING d.posts")
+
+
+def _ban_notice_channel():
+    """The admin channel's id from SCR_BAN_NOTICE_CHANNEL, or None when it is
+    unset, 0 or not an id: then pairs are stored and none is posted."""
+    v = (os.getenv(_BAN_NOTICE_CHANNEL_ENV) or "").strip()
+    return v if v.isascii() and v.isdigit() and len(v) <= 20 and int(v) != 0 else None
+
+
+def _ban_notice_mode(got: dict) -> str:
+    """The pass's word in its log line: "posting" when it ran with the
+    channel set AND its gate open (a key loaded and the notice with both
+    sentences acknowledged), else "storing"."""
+    return "posting" if got["channel"] and got.get("gate") else "storing"
+
+
+# The shared address codes of one pair, with the other account's newest row on
+# them, and how many accounts recorded each code (the fewest is the pair's).
+_BAN_NOTICE_PAIR_FACTS = (
+    "SELECT o.day, o.conn_class, (SELECT count(DISTINCT a.steam_id) FROM conn_markers a"
+    " WHERE a.key_id = o.key_id AND a.addr_mark = o.addr_mark) AS n"
+    " FROM conn_markers b JOIN conn_markers o ON o.key_id = b.key_id AND o.addr_mark = b.addr_mark"
+    " JOIN player_bans pb ON pb.steam_id = b.steam_id AND {active}"
+    " WHERE b.steam_id = CAST(:b AS text) AND o.steam_id = CAST(:o AS text)"
+    " AND o.last_at >= pb.banned_at AND o.last_at >= b.first_at"
+    " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = o.steam_id AND {active_o})"
+    " ORDER BY n ASC, o.last_at DESC LIMIT 1")
+
+_BAN_NOTICE_CANDIDATE_SQL = (
+    "SELECT DISTINCT b.steam_id AS banned, o.steam_id AS other"
+    " FROM player_bans pb JOIN conn_markers b ON b.steam_id = pb.steam_id"
+    " JOIN conn_markers o ON o.key_id = b.key_id AND o.addr_mark = b.addr_mark"
+    " WHERE {active} AND o.steam_id <> b.steam_id"
+    " AND o.last_at >= pb.banned_at AND o.last_at >= b.first_at"
+    " AND NOT EXISTS (SELECT 1 FROM player_bans ob WHERE ob.steam_id = o.steam_id AND {active_o})"
+    " AND NOT EXISTS (SELECT 1 FROM ban_link_notices n WHERE n.banned_steam_id = b.steam_id"
+    " AND n.other_steam_id = o.steam_id)"
+    " LIMIT CAST(:cap AS integer)")
+
+# The due pairs, ranked by the fewest accounts on a QUALIFYING shared code
+# (the codes _BAN_NOTICE_PAIR_FACTS reads and the post names: recorded by the
+# other account after the ban began and after the banned account's first
+# sight of the code), then the oldest. A code shared only before the ban
+# does not rank the pair.
+_BAN_NOTICE_DUE_SQL = (
+    "SELECT n.banned_steam_id AS banned, n.other_steam_id AS other,"
+    " (SELECT min(x.cnt) FROM (SELECT (SELECT count(DISTINCT a.steam_id) FROM conn_markers a"
+    " WHERE a.key_id = o.key_id AND a.addr_mark = o.addr_mark) AS cnt"
+    " FROM conn_markers o JOIN conn_markers b ON b.key_id = o.key_id AND b.addr_mark = o.addr_mark"
+    " JOIN player_bans pb ON pb.steam_id = b.steam_id AND {active}"
+    " WHERE o.steam_id = n.other_steam_id AND b.steam_id = n.banned_steam_id"
+    " AND o.last_at >= pb.banned_at AND o.last_at >= b.first_at) x) AS shared"
+    " FROM ban_link_notices n WHERE n.posted_at IS NULL"
+    " ORDER BY shared ASC NULLS LAST, n.noticed_at ASC, n.banned_steam_id, n.other_steam_id"
+    " LIMIT CAST(:n AS integer)")
+
+
+async def _ban_notice_pair_tx(db: AsyncSession, banned: str, other: str, post_to=None):
+    """One pair's transaction, on the caller's session alone (it opens no
+    other session or connection): the limits; the OTHER account's identity
+    key shared by a try-lock ("busy": nothing written); the ban and the
+    marker read again under it ("gone" when the pair no longer holds; a
+    stored row of it removed when posting); then the pair stored (post_to
+    None), or posted_at written (the pair's row now held by this
+    transaction; "gone" when another pass posted it), a slot of the day
+    taken by _BAN_NOTICE_SLOT_SQL in this same transaction ("full" and
+    nothing written when none is left; "busy" and nothing written when the
+    slot statement fails, a lock time-out on the day's row included) and
+    the post row written. Commits on a write; rolls back otherwise, so a
+    slot is kept only by a post that commits. Returns "stored", "posted",
+    "busy", "gone" or "full"."""
+    await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
+    if not (await db.execute(text("SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:o AS text)))"),
+                             {"o": other})).scalar():
+        await db.rollback()
+        return "busy"
+    facts = (await db.execute(text(_BAN_NOTICE_PAIR_FACTS.format(
+        active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))),
+        {"b": banned, "o": other})).mappings().first()
+    if facts is None:
+        if post_to is None:
+            await db.rollback()
+            return "gone"
+        # A stored pair that no longer holds (the ban ended, the other account
+        # banned, the rows gone): its unposted row is removed, so that it
+        # holds no place among the due pairs; stored again if it holds again.
+        await db.execute(text(
+            "DELETE FROM ban_link_notices WHERE banned_steam_id = CAST(:b AS text)"
+            " AND other_steam_id = CAST(:o AS text) AND posted_at IS NULL"), {"b": banned, "o": other})
+        await db.commit()
+        return "gone"
+    if post_to is None:
+        await db.execute(text(
+            "INSERT INTO ban_link_notices (banned_steam_id, other_steam_id) VALUES (CAST(:b AS text), CAST(:o AS text))"
+            " ON CONFLICT (banned_steam_id, other_steam_id) DO NOTHING"), {"b": banned, "o": other})
+        await db.commit()
+        return "stored"
+    names = dict((await db.execute(text(
+        "SELECT steam_id, display_name FROM players WHERE steam_id = ANY(CAST(:ids AS text[]))"
+        " AND deleted_at IS NULL"), {"ids": [banned, other]})).all())
+    done = (await db.execute(text(
+        "UPDATE ban_link_notices SET posted_at = now() WHERE banned_steam_id = CAST(:b AS text)"
+        " AND other_steam_id = CAST(:o AS text) AND posted_at IS NULL RETURNING 1"),
+        {"b": banned, "o": other})).scalar()
+    if done is None:
+        await db.rollback()
+        return "gone"
+    # The day's slot before the post, taken once this transaction holds the
+    # pair's row (so a pair another pass posted takes no slot), in this
+    # transaction: its wait on the day's row is bounded by this
+    # transaction's lock limit, and a rollback gives the slot back. No slot,
+    # no post.
+    try:
+        slot = (await db.execute(text(_BAN_NOTICE_SLOT_SQL), {"cap": _BAN_NOTICE_DAY_CAP})).scalar()
+    except Exception:
+        await db.rollback()
+        return "busy"
+    if slot is None:
+        await db.rollback()
+        return "full"
+    await db.execute(text("INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"),
+                     {"ch": post_to, "c": _ban_notice_text(names, banned, other, facts)[:2000]})
+    await db.commit()
+    return "posted"
+
+
+def _ban_notice_name(names, sid) -> str:
+    n = names.get(sid)
+    return _dtext.escape_name(n, 64) if n else "no name"
+
+
+def _ban_notice_text(names, banned, other, facts) -> str:
+    return ("Linked to a banned account: **%s** (`%s`) signed in on %s from a connection that **%s** (`%s`,"
+            " banned) used too. Connection class: %s. Accounts seen on that connection: %d. A hint, not proof."
+            % (_ban_notice_name(names, other), other, facts["day"].isoformat(), _ban_notice_name(names, banned),
+               banned, facts["conn_class"], int(facts["n"])))
+
+
+async def ban_link_notice_pass(session_factory=None) -> dict:
+    """One pass (the loop's, or a test's): the gate (a key loaded, the notice
+    open with both sentences: one read), the candidates (one statement, no
+    lock, at most _BAN_NOTICE_CANDIDATES), each stored in its own
+    transaction; then, with the channel set, ban_notice_days' days older
+    than two removed, and the due pairs (fewest accounts on a qualifying
+    code first, then the oldest) read up to the room the counter leaves
+    today, each posted in its own transaction, which takes the slot of the
+    day; the first "full" ends the posting. One session throughout: no
+    second session or connection while a pair's transaction is open.
+    Returns the counts."""
+    if session_factory is None:
+        from database import async_session as session_factory
+    out = {"stored": 0, "posted": 0, "busy": 0, "gone": 0, "full": 0,
+           "channel": _ban_notice_channel() is not None, "gate": False}
+    if _alt_signals.loaded_key() is None:
+        return out
+    async with session_factory() as db:
+        if not await _alt_ban_notice_open(db):
+            await db.rollback()
+            return out
+        out["gate"] = True
+        await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
+        pairs = (await db.execute(text(_BAN_NOTICE_CANDIDATE_SQL.format(
+            active=player_ban_active_sql("pb"), active_o=player_ban_active_sql("ob"))),
+            {"cap": _BAN_NOTICE_CANDIDATES})).all()
+        await db.rollback()
+        for banned, other in pairs:
+            out[await _ban_notice_pair_tx(db, banned, other)] += 1
+        channel = _ban_notice_channel()
+        if channel is None:
+            return out
+        await _alt_limits(db, _BAN_NOTICE_LOCK_MS, _BAN_NOTICE_STATEMENT_MS)
+        await db.execute(text("DELETE FROM ban_notice_days WHERE day < (now() AT TIME ZONE 'UTC')::date - 2"))
+        today = (await db.execute(text(
+            "SELECT posts FROM ban_notice_days WHERE day = (now() AT TIME ZONE 'UTC')::date"))).scalar()
+        room = max(0, _BAN_NOTICE_DAY_CAP - int(today or 0))
+        due = (await db.execute(text(_BAN_NOTICE_DUE_SQL.format(active=player_ban_active_sql("pb"))),
+                                {"n": room})).all() if room else []
+        await db.commit()
+        for banned, other, _shared in due:
+            got = await _ban_notice_pair_tx(db, banned, other, post_to=channel)
+            out[got] += 1
+            if got == "full":
+                break
+    return out
+
+
+async def ban_link_notice_loop(clock=None, session_factory=None) -> None:
+    """The pass's own loop, started from lifespan on the PRIMARY only. One
+    `[ALT-BAN] notice pass armed` line at the start (channel set or unset),
+    a `[ALT-BAN] notice pass:` line at the end of its first pass and of every
+    pass that stored or posted ("posting" only with the channel set and the
+    gate open, a key loaded and the notice acknowledged; else "storing"
+    and posted 0); then a pass every _BAN_NOTICE_PERIOD_S from the
+    start of the one before. A failed pass is caught, counted and said."""
+    clock = clock or time.monotonic
+    _alt_print("[ALT-BAN] notice pass armed: channel %s" % ("set" if _ban_notice_channel() else "unset"))
+    await asyncio.sleep(_BAN_NOTICE_FIRST_DELAY_S)
+    failures, first = 0, True
+    while True:
+        started = clock()
+        try:
+            got = await ban_link_notice_pass(session_factory)
+            if first or got["stored"] or got["posted"]:
+                _alt_print("[ALT-BAN] notice pass: %s, stored %d, posted %d, busy %d"
+                           % (_ban_notice_mode(got), got["stored"], got["posted"], got["busy"]))
+            first, failures = False, 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            failures += 1
+            _alt_print("[ALT-BAN] notice pass FAILED (%d in a row): %s" % (failures, type(ex).__name__))
+        await asyncio.sleep(max(0.0, started + _BAN_NOTICE_PERIOD_S - clock()))

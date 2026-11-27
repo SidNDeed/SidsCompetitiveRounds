@@ -14,6 +14,7 @@ from ban_sweep_census import LEFT, LIVE, NO_LINK
 _EV = "evidence rows of a seat or a pair; the ban leaves evidence"
 _HIST = "history of what the account did; the ban leaves history"
 _REG = "a registry or setting; no column names an account"
+_ALT = "identity evidence recorded at a verified sign-in; the ban leaves evidence"
 
 TABLE_CLASSES = {
     "admin_actions": (LEFT, "the moderation log; the ban appends its own row"),
@@ -23,6 +24,10 @@ TABLE_CLASSES = {
     "artist_actions": (LEFT, "the artist audit trail"),
     "artist_item_blocks": (LEFT, "an artist's block list; a preference record"),
     "artist_users": (LEFT, "the artist roster; every artist route refuses a banned account"),
+    "ban_link_notices": (LEFT, "pairs of a banned account and an account that shared its address code; "
+                               "moderation records kept while the ban stands"),
+    "ban_notice_days": (NO_LINK, "the notice pass's count of posts a UTC day; no column names an account"),
+    "ban_regions": (LEFT, "the region of a banned account's verified connection; kept while the ban stands"),
     "bets": (LIVE, "an unsettled 1v1 wager on a series the account plays ends with the series (the void "
                    "refunds it); the account's own wager on another's series settles by a game it is not in"),
     "booster_grants": (LEFT, "the booster gold grant ledger"),
@@ -50,6 +55,7 @@ TABLE_CLASSES = {
     "combat_evidence_seeded_keys": (NO_LINK, _REG),
     "combat_games": (LEFT, _EV),
     "combat_player_daily": (LEFT, _EV),
+    "conn_markers": (LEFT, _ALT),
     "cosmetic_submission_frames": (NO_LINK, "frames of a submission, keyed by the submission"),
     "cosmetic_submissions": (LEFT, "an artist's submissions and their review; records"),
     "dc_events": (LEFT, _HIST),
@@ -180,7 +186,9 @@ TABLE_CLASSES = {
     "spectate_leases": (LIVE, "the account's spectator seat"),
     "spectate_watch_grants": (LEFT, "granted watches; history"),
     "stats_epoch_resets": (NO_LINK, "epoch reset log"),
+    "steam_family_shares": (LEFT, _ALT),
     "steam_sessions": (LIVE, "an open verified session"),
+    "steam_signin_facts": (LEFT, _ALT),
     "stream_channel_posts": (NO_LINK, "stream post state"),
     "team_bets": (LIVE, "an unsettled 2v2 wager on a series the account plays ends with the series (the void "
                         "refunds it); the account's own wager on another's series settles by a game it is not in"),
